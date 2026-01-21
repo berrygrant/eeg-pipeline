@@ -78,20 +78,21 @@ python run_mmn_pipeline.py \
   --token_map EH IH
 ```
 
-Event Code Schemas
+## Event Code Schemas
 
 The pipeline supports structured, multi-digit event codes (e.g., ABC), where each digit encodes experimental factors such as block type, buffer status, and condition. Metadata derived from event codes is attached to epochs and can be extended without modifying core pipeline logic.
 
-ICA Diagnostics
+## ICA Diagnostics
 
 The pipeline includes optional ICA diagnostics that estimate blink and ocular artifact prevalence using either EOG channels or frontal EEG proxies. The diagnostics provide quantitative recommendations for whether ICA is warranted, without automatically modifying the data.
 
-Outputs
-	•	Cleaned raw data (01_clean_raw/*.fif)
-	•	Epoched data (02_epochs/*.fif)
-	•	Subject-level evoked responses (03_evokeds/*.fif)
-	•	Grand-average evoked responses (04_grand_averages/*.fif)
-	•	QC summary CSV with alignment, artifact, and ICA metrics
+### Outputs
+
+- Cleaned raw data (01_clean_raw/*.fif)
+- Epoched data (02_epochs/*.fif)
+- Subject-level evoked responses (03_evokeds/*.fif)
+- Grand-average evoked responses (04_grand_averages/*.fif)
+- QC summary CSV with alignment, artifact, and ICA metrics
 
 # Status
 
