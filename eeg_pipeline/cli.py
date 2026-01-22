@@ -17,6 +17,26 @@ from .artifacts import moving_window_ptp_mask, simple_voltage_threshold_mask
 from .evoked import compute_evokeds, grand_averages
 from .qc import write_qc_summary
 from .ica_diagnostics import compute_ica_diagnostics, recommend_ica
+from .ica import ICAParams, fit_ica, find_ica_excludes, apply_ica
+from eeg_pipeline.config import load_config
+
+
+def _parse_n_components(x):
+    """
+    MNE ICA n_components can be float (variance fraction) or int (#components).
+    argparse gives us a string; infer int vs float.
+    """
+    if x is None:
+        return 0.99
+    if isinstance(x, (int, float)):
+        return x
+    s = str(x).strip()
+    try:
+        if "." in s:
+            return float(s)
+        return int(s)
+    except Exception:
+        return float(s)
 
 
 def subject_number_from_stem(stem: str) -> str:
@@ -145,10 +165,19 @@ def summarize_one_file(args, vhdr_path: Path):
 
 
 def run_full_pipeline(args):
-    raw_dir = Path(args.raw_dir)
-    subject_csv_dir = Path(args.subject_csv_dir)
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    cfg = load_config(args.config)
+
+    raw_dir = cfg["paths"]["raw_dir"]
+    subject_csv_dir = cfg["paths"]["subject_csv_dir"]
+    out_dir = cfg["paths"]["out_dir"]
+    prepare_output_dirs(out_dir)
+
+
+    standard_codes = cfg["events"]["standard_codes"]
+    deviant_codes = cfg["events"]["deviant_codes"]
+    behavioral_keep_codes = cfg["events"]["behavioral_keep_codes"]
+
+    token_map = cfg["labels"]["token_map"]  # either None or {"token1": "...", "token2": "..."}
 
     d_raw = out_dir / "01_clean_raw"
     d_epo = out_dir / "02_epochs"
@@ -229,6 +258,55 @@ def run_full_pipeline(args):
             blink_win_ms=args.blink_win_ms,
             blink_step_ms=args.blink_step_ms,
         )
+
+        # ---- ICA: optional fit + apply (before event extraction / epoching) ----
+        ica_applied = False
+        ica_exclude: list[int] = []
+        ica_fit_diag: dict = {}
+        ica_find_diag: dict = {}
+
+        if args.ica in ("on", "auto"):
+            do_ica = True
+            if args.ica == "auto":
+                # Use EOG-derived blink rate if available, else fall back to proxy-derived rate
+                rate = float(ica_diag.get("blink_rate_per_min", 0.0) or 0.0)
+                if rate == 0.0:
+                    rate = float(ica_diag.get("blink_proxy_rate_per_min", 0.0) or 0.0)
+                do_ica = rate >= args.ica_auto_blink_rate_per_min
+
+            if do_ica:
+                ica_params = ICAParams(
+                    method=args.ica_method,
+                    n_components=_parse_n_components(args.ica_n_components),
+                    random_state=args.ica_random_state,
+                    max_iter=args.ica_max_iter,
+                    fit_l_freq=args.ica_fit_l_freq,
+                    fit_h_freq=args.ica_fit_h_freq,
+                    corr_thresh=args.ica_corr_thresh,
+                    max_exclude=args.ica_max_exclude,
+                    decim=args.ica_decim,
+                )
+
+                ica_obj, ica_fit_diag = fit_ica(raw, ica_params)
+
+                ica_exclude, ica_find_diag = find_ica_excludes(
+                    ica_obj,
+                    raw,
+                    eog_chs=args.eog_chs,
+                    proxy_chs=args.blink_proxy_chs,
+                    corr_thresh=args.ica_corr_thresh,
+                    max_exclude=args.ica_max_exclude,
+                )
+
+                if len(ica_exclude) > 0:
+                    raw = apply_ica(raw, ica_obj, ica_exclude)
+                    ica_applied = True
+
+                # Save ICA object for audit/reuse
+                if bool(args.save_ica):
+                    ica_path = out_dir / "00_ica" / f"{subj}-ica.fif"
+                    ica_path.parent.mkdir(parents=True, exist_ok=True)
+                    ica_obj.save(ica_path, overwrite=True)
 
         # Events from annotations
         events_ann = events_from_annotations_positions(raw)
@@ -329,15 +407,59 @@ def run_full_pipeline(args):
         n_before = len(epochs)
         if bad_idx:
             epochs.drop(bad_idx, reason="ARTIFACT_REJECT_MNE")
+        # After dropping bad epochs:
         n_after = len(epochs)
 
+        if n_after == 0:
+            msg = "All epochs dropped after artifact rejection; skipping evoked computation."
+            print("[WARN]", msg)
+            rows.append(
+                {
+                    "subject": subj,
+                    "raw_file": str(vhdr.name),
+                    "subject_csv": str(subject_csv.name),
+                    "status": "SKIP_EMPTY_EPOCHS",
+                    "error": msg,
+                    **diag,
+                    "n_epochs_before_artifact": int(n_before),
+                    "n_epochs_final": 0,
+                }
+            )
+            # still save raw; optionally save empty epochs if you want, but don't compute evokeds
+            raw.save(d_raw / f"{subj}-raw.fif", overwrite=True)
+            # epochs.save(...) optional; but if you do, it will warn "no data"
+            continue
+
+        # Also guard per-condition:
+        n_std = len(epochs["Standard"])
+        n_dev = len(epochs["Deviant"])
+        if n_std == 0 or n_dev == 0:
+            msg = f"Empty condition after rejection (Standard={n_std}, Deviant={n_dev}); skipping evokeds."
+            print("[WARN]", msg)
+            rows.append(
+                {
+                    "subject": subj,
+                    "raw_file": str(vhdr.name),
+                    "subject_csv": str(subject_csv.name),
+                    "status": "SKIP_EMPTY_CONDITION",
+                    "error": msg,
+                    **diag,
+                    "n_epochs_before_artifact": int(n_before),
+                    "n_epochs_final": int(n_after),
+                    "n_standard_final": int(n_std),
+                    "n_deviant_final": int(n_dev),
+                }
+            )
+            raw.save(d_raw / f"{subj}-raw.fif", overwrite=True)
+            epochs.save(d_epo / f"{subj}-epo.fif", overwrite=True)
+            continue
         epoch_reject_rate = (n_before - n_after) / n_before if n_before > 0 else 0.0
 
         ica_recommendation = recommend_ica(
             epoch_reject_rate=epoch_reject_rate,
-            eog_corr_max=ica_diag["eog_corr_max"],
-            blink_rate_per_min=ica_diag["blink_rate_per_min"],
-            blink_proxy_rate_per_min=ica_diag["blink_proxy_rate_per_min"],
+            eog_corr_max=ica_diag.get("eog_corr_max", 0.0),
+            blink_rate_per_min=ica_diag.get("blink_rate_per_min", 0.0),
+            blink_proxy_rate_per_min=ica_diag.get("blink_proxy_rate_per_min", 0.0),
         )
 
         # Save outputs for this subject
@@ -373,13 +495,18 @@ def run_full_pipeline(args):
                 "n_standard_final": int(len(epochs["Standard"])),
                 "n_deviant_final": int(len(epochs["Deviant"])),
                 "epoch_reject_rate": float(epoch_reject_rate),
-                "eog_corr_max": float(ica_diag["eog_corr_max"]),
-                "eog_corr_mean": float(ica_diag["eog_corr_mean"]),
-                "blink_rate_per_min": float(ica_diag["blink_rate_per_min"]),
-                "blink_proxy_rate_per_min": float(ica_diag["blink_proxy_rate_per_min"]),
-                "blink_source": ica_diag["blink_source"],
-                "ica_recommended": bool(ica_recommendation["ica_recommended"]),
-                "ica_recommend_reason": ica_recommendation["ica_recommend_reason"],
+                "eog_corr_max": float(ica_diag.get("eog_corr_max", 0.0) or 0.0),
+                "eog_corr_mean": float(ica_diag.get("eog_corr_mean", 0.0) or 0.0),
+                "blink_rate_per_min": float(ica_diag.get("blink_rate_per_min", 0.0) or 0.0),
+                "blink_proxy_rate_per_min": float(ica_diag.get("blink_proxy_rate_per_min", 0.0) or 0.0),
+                "blink_source": ica_diag.get("blink_source", ""),
+                "ica_recommended": bool(ica_recommendation.get("ica_recommended", False)),
+                "ica_recommend_reason": ica_recommendation.get("ica_recommend_reason", ""),
+                "ica_mode": args.ica,
+                "ica_applied": bool(ica_applied),
+                "ica_exclude": " ".join(map(str, ica_exclude)) if ica_exclude else "",
+                **{f"ica_fit_{k}": v for k, v in ica_fit_diag.items()},
+                **{f"ica_find_{k}": v for k, v in ica_find_diag.items()},
                 "status": "OK",
                 "error": "",
             }
@@ -390,7 +517,7 @@ def run_full_pipeline(args):
             f"(gap_drop={diag['markers_dropped_by_gap']}, auto_drop={diag['markers_dropped_by_auto']})"
         )
         print(f"Dropped {n_before - n_after}/{n_before} epochs (blink={int(blink_bad.sum())}, muscle={int(muscle_bad.sum())})")
-        print(f"ICA recommended: {ica_recommendation['ica_recommended']} ({ica_recommendation['ica_recommend_reason']})")
+        print(f"ICA recommended: {ica_recommendation.get('ica_recommended', False)} ({ica_recommendation.get('ica_recommend_reason', '')})")
 
     # Grand averages (only if we have any successful subjects)
     if len(evokeds_std) == 0 or len(evokeds_dev) == 0:
@@ -407,13 +534,24 @@ def run_full_pipeline(args):
     print(f"\nSaved QC summary -> {out_dir / 'qc_summary.csv'}")
     print(f"Saved grand averages -> {d_ga}")
 
+def prepare_output_dirs(out_dir: Path):
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for sub in [
+        "01_clean_raw",
+        "02_epochs",
+        "03_evokeds",
+        "04_grand_averages",
+        "05_metrics",
+        "00_ica",
+    ]:
+        (out_dir / sub).mkdir(exist_ok=True)
 
 def build_arg_parser():
     ap = argparse.ArgumentParser()
-
-    ap.add_argument("--raw_dir", required=True, help="Folder containing BrainVision .vhdr files")
-    ap.add_argument("--subject_csv_dir", required=True, help="Folder containing subject-###.csv files")
-    ap.add_argument("--out_dir", required=True, help="Output root folder")
+    ap.add_argument("--config", required=True, help="Path to YAML/JSON config file")
+    ap.add_argument("--raw_dir",  help="Folder containing BrainVision .vhdr files")
+    ap.add_argument("--subject_csv_dir",  help="Folder containing subject-###.csv files")
+    ap.add_argument("--out_dir", help="Output root folder")
     ap.add_argument("--summarize_one_file", default=None, help="If provided, summarize this .vhdr and exit.")
 
     ap.add_argument(
@@ -494,6 +632,40 @@ def build_arg_parser():
     ap.add_argument("--blink_step_ms", type=float, default=10.0)
     ap.add_argument("--volt_pos_uv", type=float, default=150.0)
     ap.add_argument("--volt_neg_uv", type=float, default=-150.0)
+
+    # --- ICA controls ---
+    ap.add_argument(
+        "--ica",
+        choices=["off", "auto", "on"],
+        default="off",
+        help="ICA mode: off (default), auto (gate by blink rate), or on (always run ICA).",
+    )
+    ap.add_argument("--ica_method", default="fastica", choices=["fastica", "picard", "infomax"])
+    ap.add_argument(
+        "--ica_n_components",
+        default="0.99",
+        type=str,
+        help="ICA n_components: float variance fraction (e.g., 0.99) or int (e.g., 20).",
+    )
+    ap.add_argument("--ica_random_state", default=97, type=int)
+    ap.add_argument("--ica_max_iter", default=512, type=int)
+    ap.add_argument(
+        "--ica_fit_l_freq",
+        default=1.0,
+        type=float,
+        help="High-pass used only for ICA fitting (recommended 1.0).",
+    )
+    ap.add_argument("--ica_fit_h_freq", default=None, type=float, help="Optional low-pass used only for ICA fitting.")
+    ap.add_argument("--ica_decim", default=3, type=int, help="Decimation for ICA fit speed (3 is a good default).")
+    ap.add_argument("--ica_corr_thresh", default=0.30, type=float, help="Proxy correlation threshold for excluding components.")
+    ap.add_argument("--ica_max_exclude", default=3, type=int, help="Max # components to exclude.")
+    ap.add_argument(
+        "--ica_auto_blink_rate_per_min",
+        default=15.0,
+        type=float,
+        help="If --ica auto, run ICA when blink rate >= this threshold (per minute).",
+    )
+    ap.add_argument("--save_ica", default=1, type=int, help="Save ICA object to out_dir/00_ica (1=yes,0=no).")
 
     return ap
 

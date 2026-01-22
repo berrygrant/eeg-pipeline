@@ -1,99 +1,197 @@
 # eeg-pipeline
 
-A modular, reproducible EEG preprocessing and analysis pipeline built in Python using MNE. The pipeline is designed to mirror and extend common EEGLAB/ERPLAB workflows while remaining fully scriptable, auditable, and extensible across ERP and time–frequency paradigms.
+A modular, config-driven EEG preprocessing and analysis pipeline built on **MNE-Python**.  
+Originally developed for MMN paradigms, the pipeline is now **task-agnostic** and supports
+ERP and time–frequency analyses across arbitrary experimental designs.
 
-## Motivation
+This project is designed for **research-grade EEG workflows** with an emphasis on:
 
-EEGLAB and ERPLAB provide powerful GUI-based EEG analysis tools, but large-scale, multi-subject studies benefit from automated, version-controlled pipelines. `eeg-pipeline` provides a Python-native alternative that preserves the conceptual structure of EEGLAB/ERPLAB preprocessing (re-referencing, filtering, event lists, binning, epoching, artifact rejection, ICA) while enabling reproducibility, diagnostics, and flexible experimental designs.
+- Reproducibility
+- Auditability (QC summaries, ICA diagnostics)
+- MATLAB → MNE conceptual continuity
+- Scalable batch processing
+
+---
 
 ## Key Features
 
-- BrainVision (.vhdr/.vmrk) import via MNE
-- Flexible behavioral event alignment from external CSV files
-- Event-code schema parsing with extensible metadata derivation
-- ERP-focused preprocessing (filtering, re-referencing, baseline correction)
-- Artifact detection (blink and muscle) with configurable thresholds
-- Proxy blink diagnostics for datasets without EOG channels
-- ICA diagnostics and recommendation logic (optional, non-destructive)
-- Automated QC summaries across subjects
-- Modular architecture supporting non-MMN paradigms
+### Core preprocessing
+- BrainVision (.vhdr / .vmrk) input
+- Standard montages (e.g., `standard_1020`)
+- Average rereferencing
+- Band-pass and notch filtering
+- Automatic handling of missing `.vmrk` or behavioral files (skip / warn / fail)
 
-## Pipeline Overview
+### Event alignment
+- Alignment of EEG markers to behavioral event codes
+- Gap-based heuristics for boundary marker removal
+- Automatic trimming when EEG markers exceed behavioral codes
+- Explicit support for **standard vs. deviant** contrasts
 
-The default pipeline mirrors a typical ERPLAB workflow:
+### Epoching & artifact rejection
+- Configurable epoch windows and baselines
+- Blink detection using:
+  - True EOG channels (if present)
+  - Proxy EEG channels (e.g., Fp1) if EOG is unavailable
+- Simple voltage-based artifact rejection
+- Transparent reporting of rejected epochs
 
-1. Raw EEG import (BrainVision)
-2. Channel typing, montage assignment, re-referencing
-3. Notch and band-pass filtering
-4. Event extraction and behavioral code alignment
-5. Epoching and baseline correction
-6. Artifact detection and rejection
-7. Evoked response computation
-8. Grand averaging across subjects
-9. QC summary generation
+### ICA (optional)
+- Modes:
+  - `off` – no ICA
+  - `auto` – run ICA only if blink rate exceeds threshold
+  - `on` – always run ICA
+- Multiple ICA solvers (`fastica`, `picard`, `infomax`)
+- Automatic component exclusion using EOG / proxy correlations
+- ICA diagnostics and recommendations saved to QC output
+- ICA objects optionally saved for reuse and auditing
 
-All steps are configurable via command-line arguments.
+### ERP outputs
+- Condition-wise evoked responses (Standard / Deviant)
+- Grand averages across subjects
+- ERP window definitions via config (e.g., MMN, N1, P3a, P3b)
+- Optional channel-level ERP time series extraction (planned / in progress)
 
-## Repository Structure
+### Time–frequency analysis (optional)
+- Evoked TFR computation (multitaper or Morlet)
+- Configurable frequency ranges, baselines, and time windows
+- Fully compatible with MNE `AverageTFR` objects
 
-```bash
-eeg-pipeline/
-├── run_mmn_pipeline.py
-├── mmn_pipeline/
-│   ├── cli.py
-│   ├── io_brainvision.py
-│   ├── behavior.py
-│   ├── align.py
-│   ├── epoching.py
-│   ├── artifacts.py
-│   ├── ica_diagnostics.py
-│   ├── evoked.py
-│   ├── schema.py
-│   └── qc.py
-└── README.md
+### Quality control
+- Per-subject QC rows written to `qc_summary.csv`
+- Includes:
+  - Event counts
+  - Epoch rejection rates
+  - Blink metrics
+  - ICA decisions and exclusions
+- Designed to support downstream statistical screening
+
+---
+
+## Repository structure
+
+```
+eeg_pipeline/
+├── cli.py                # Main pipeline entry point
+├── config.py             # YAML/JSON config loader + validation
+├── io_brainvision.py     # BrainVision I/O helpers
+├── behavior.py           # Behavioral CSV parsing
+├── align.py              # EEG ↔ behavioral alignment logic
+├── epoching.py           # Epoch creation utilities
+├── artifacts.py          # Blink + voltage artifact detection
+├── ica.py                # ICA fitting and application
+├── ica_diagnostics.py    # Blink diagnostics and ICA recommendation logic
+├── evoked.py             # Evoked and grand-average helpers
+├── metrics/
+│   ├── erp.py            # ERP metrics (windowed + time series)
+│   └── tfr.py            # Time–frequency metrics
+└── qc.py                 # QC summary writer
 ```
 
-The `mmn_pipeline` module contains reusable components; `run_mmn_pipeline.py` is a thin CLI entry point.
+---
 
-## Example Usage
+## Configuration-driven workflow
 
-Summarize a single file (sanity checks only):
+All pipeline behavior is controlled via a **single YAML (or JSON) config file**.
+CLI flags are intentionally minimal.
+
+### Example `config.yaml`
+
+```yaml
+paths:
+  raw_dir: /data/EEG/raw
+  subject_csv_dir: /data/EEG/behavior
+  out_dir: /data/EEG/derivatives
+
+channels:
+  eog_chs: []
+  blink_proxy_chs: [Fp1]
+
+preprocess:
+  montage: standard_1020
+  l_freq: 0.1
+  h_freq: 30
+  notch_hz: [60]
+
+events:
+  behavioral_keep_codes: [110, 111, 210, 211]
+  standard_codes: [110, 210]
+  deviant_codes: [111, 211]
+
+epoching:
+  tmin: -0.2
+  tmax: 0.6
+  baseline: [-0.2, 0.0]
+
+ica:
+  mode: auto
+  auto_blink_rate_per_min: 15
+  method: fastica
+  n_components: 0.99
+  save_ica: true
+
+metrics:
+  erp:
+    enabled: true
+    windows:
+      - name: MMN_150_250
+        tmin: 0.15
+        tmax: 0.25
+    timeseries: false
+
+  tfr:
+    enabled: false
+```
+
+## Running the Pipeline
+
+From the repository root:
 
 ```bash
-python run_mmn_pipeline.py \
-  --raw_dir path/to/raw_data \
-  --subject_csv_dir path/to/behavioral_data \
-  --out_dir /tmp/mmn_test \
-  --summarize_one_file path/to/s203.vhdr
+python run_eeg_pipeline.py --config config.yaml
 ```
-Run the full pipeline for a subject:
+
+Optional debugging / inspection of a single file:
 
 ```bash
-python run_mmn_pipeline.py \
-  --raw_dir path/to/raw_data \
-  --subject_csv_dir path/to/behavioral_data \
-  --out_dir /tmp/mmn_results \
-  --subjects s203 \
-  --behavioral_keep_codes 110 111 210 211 \
-  --token_map EH IH
+python run_eeg_pipeline.py \
+  --config config.yaml \
+  --summarize_one_file /path/to/S203.vhdr
 ```
 
-## Event Code Schemas
 
-The pipeline supports structured, multi-digit event codes (e.g., ABC), where each digit encodes experimental factors such as block type, buffer status, and condition. Metadata derived from event codes is attached to epochs and can be extended without modifying core pipeline logic.
+## Outputs
 
-## ICA Diagnostics
+```
+out_dir/
+├── 00_ica/                 # Saved ICA objects (optional)
+├── 01_clean_raw/           # Preprocessed raw FIF files
+├── 02_epochs/              # Epoched data
+├── 03_evokeds/             # Subject-level evoked responses
+├── 04_grand_averages/      # Grand-average evokeds
+├── 05_metrics/             # ERP / TFR metrics (if enabled)
+└── qc_summary.csv          # Per-subject QC table
+```
 
-The pipeline includes optional ICA diagnostics that estimate blink and ocular artifact prevalence using either EOG channels or frontal EEG proxies. The diagnostics provide quantitative recommendations for whether ICA is warranted, without automatically modifying the data.
+## Design philosophy
+- Explicit over implicit: no hidden heuristics
+- Fail loudly, skip safely: broken subjects don’t crash batch runs
+- MNE-native: outputs are standard FIF objects
+- MATLAB-aware: folder structure and logic map cleanly to common EEGLAB workflows
 
-### Outputs
 
-- Cleaned raw data (01_clean_raw/*.fif)
-- Epoched data (02_epochs/*.fif)
-- Subject-level evoked responses (03_evokeds/*.fif)
-- Grand-average evoked responses (04_grand_averages/*.fif)
-- QC summary CSV with alignment, artifact, and ICA metrics
+## Roadmap
+- ERP peak latency and amplitude metrics
+- Channel clusters and ROI definitions
+- Trial-level TFR metrics
+- BIDS-compatible export
+- Automated report generation
 
-# Status
+⸻
 
-This package is in active development. APIs may change substantially prior to a 1.0 release.
+## Requirements
+- Python ≥ 3.10
+- mne
+- numpy
+- pandas
+- pyyaml (for YAML configs)

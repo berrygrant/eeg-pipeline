@@ -1,0 +1,74 @@
+task: mmn
+
+paths:
+  raw_dir: "/Volumes/Lab_Studies/RCG_2023/Tasks/2_MMN/1-raw_data"
+  subject_csv_dir: "/Volumes/Lab_Studies/RCG_2023/Tasks/2_MMN/0-behavioral_data"
+  out_dir: "/tmp/mmn_test_yaml"
+
+channels:
+  picks: [Fp1, Fz, F3, Cz, F4]
+  eog_chs: []                 # if present, list them (e.g., [VEOG, HEOG])
+  blink_proxy_chs: [Fp1]      # used if eog_chs is empty/missing
+  drop_aux_chs: [AUX]
+
+preprocess:
+  montage: "standard_1020"
+  reref: "average"            # average | none (future: custom)
+  notch_hz: [60]
+  l_freq: 0.1
+  h_freq: 30.0
+
+events:
+  behavioral_keep_codes: [110, 111, 210, 211, 900, 910, 911]
+  standard_codes: [110, 210]
+  deviant_codes: [111, 211]
+  drop_eeg_markers_by_gap_s: null
+  auto_drop_to_count: true
+
+epoching:
+  tmin: -0.2
+  tmax: 0.6
+  baseline: [-0.2, 0.0]
+
+artifacts:
+  test_window: [-0.2, 0.3]
+  blink:
+    threshold_uv: 75
+    win_ms: 200
+    step_ms: 10
+  voltage:
+    pos_uv: 150
+    neg_uv: -150
+
+ica:
+  mode: auto                  # off | auto | on
+  auto_blink_rate_per_min: 15
+  method: fastica              # fastica | picard | infomax
+  n_components: 0.99
+  random_state: 97
+  max_iter: 512
+  fit_l_freq: 1.0
+  fit_h_freq: null
+  decim: 3
+  corr_thresh: 0.30
+  max_exclude: 3
+  save_ica: true
+
+labels:
+  token_map: ["EH", "IH"]     # shorthand; also allow Token1=EH Token2=IH
+
+metrics:
+  erp:
+    enabled: true
+    windows:
+      - { name: "MMN_150_250", tmin: 0.15, tmax: 0.25 }
+    timeseries: true
+  tfr:
+    enabled: true
+    method: multitaper
+    tmin: -0.2
+    tmax: 0.6
+    fmin: 1
+    fmax: 30
+    baseline: [-0.2, 0.0]
+    baseline_mode: logratio
