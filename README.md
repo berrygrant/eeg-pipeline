@@ -195,3 +195,8 @@ out_dir/
 - numpy
 - pandas
 - pyyaml (for YAML configs)
+
+## Acknowledgments
+
+Portions of this pipeline were developed with the assistance of **ChatGPT (GPT-5.2, OpenAI)**, which was used as an interactive programming and design aid.  
+All scientific decisions, methodological choices, and final code were reviewed and implemented by the author.
