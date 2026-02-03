@@ -53,6 +53,11 @@ def set_if_default(args, defaults: dict, field: str, value):
         setattr(args, field, value)
 from eeg_pipeline.config import load_config
 
+# Metrics (ERP + TFR)
+from eeg_pipeline.metrics import compute_erp_metrics, compute_tfr_metrics
+from eeg_pipeline.metrics.erp import ERPWindow
+from eeg_pipeline.metrics.tfr import TFRParams
+
 import re
 import tempfile
 
@@ -155,12 +160,57 @@ def summarize_one_file(args, vhdr_path: Path):
     print("\nICA diagnostics:")
     print(pd.Series(ica_diag).to_string())
 
+    # If no true EOG rate, recommend_ica can use proxy
+    pre_epoch_reco = recommend_ica(
+        epoch_reject_rate=0.0,  # unknown yet
+        eog_corr_max=ica_diag.get("eog_corr_max", 0.0),
+        blink_rate_per_min=ica_diag.get("blink_rate_per_min", 0.0),
+        blink_proxy_rate_per_min=ica_diag.get("blink_proxy_rate_per_min", 0.0),
+        epoch_loss_thresh=0.20,                 # won’t trigger since 0.0
+        eog_corr_thresh=args.ica_corr_thresh,
+        blink_rate_thresh=args.ica_auto_blink_rate_per_min,
+    )
+
     events_ann = events_from_annotations_positions(raw)
     markers_pos = events_ann[:, 0].copy()
 
-    print("\nTotal events (from annotations):", len(events_ann))
-    print("Event ID distribution (from annotations):")
-    print(pd.Series(events_ann[:, 2]).value_counts().sort_index().to_string())
+    # ------------------------------------------------------------
+    # StimTrak trigger QC: detect burst-like trigger failures
+    # (do NOT modify markers; flag only)
+    # ------------------------------------------------------------
+    burst_diag = detect_trigger_bursts(
+        markers_pos=markers_pos,
+        sfreq=float(raw.info["sfreq"]),
+        min_iti_s=0.02,      # 20 ms: impossible for real trials
+        burst_win_s=0.25,    # 250 ms window
+        burst_count=5,       # ≥5 triggers in 250 ms
+    )
+
+    trigger_diag = {
+    "trigger_burst_flag": burst_diag["burst_flag"],
+    "trigger_n_short_iti": burst_diag["n_short_iti"],
+    "trigger_min_iti_s": burst_diag["min_iti_s"],
+    "trigger_burst_max_in_window": burst_diag["burst_max_in_window"],
+    "trigger_burst_n_windows_ge_thresh": burst_diag["burst_n_windows_ge_thresh"],
+    "trigger_burst_params": burst_diag.get("burst_params", ""),
+    }
+
+    burst_qc = {
+        "trigger_burst_flag": bool(burst_diag.get("burst_flag", False)),
+        "trigger_n_short_iti": int(burst_diag.get("n_short_iti", 0) or 0),
+        "trigger_min_iti_s": burst_diag.get("min_iti_s", ""),
+        "trigger_burst_max_in_window": int(burst_diag.get("burst_max_in_window", 1) or 1),
+        "trigger_burst_n_windows_ge_thresh": int(burst_diag.get("burst_n_windows_ge_thresh", 0) or 0),
+        "trigger_burst_params": burst_diag.get("burst_params", ""),
+    }
+
+    if burst_diag["burst_flag"]:
+        print(f"[WARN] Trigger burst detected for {subj}: "
+              f"short_iti={burst_diag['n_short_iti']}, "
+              f"max_in_window={burst_diag['burst_max_in_window']}")
+        print("\nTotal events (from annotations):", len(events_ann))
+        print("Event ID distribution (from annotations):")
+        print(pd.Series(events_ann[:, 2]).value_counts().sort_index().to_string())
 
     stats = marker_gap_stats(markers_pos, sfreq=float(raw.info["sfreq"]))
     print("\nInter-marker gap stats (seconds):")
@@ -227,6 +277,57 @@ def summarize_one_file(args, vhdr_path: Path):
     print("Metadata preview (first 5 rows):")
     print(md.head(5).to_string(index=False))
 
+def detect_trigger_bursts(markers_pos: np.ndarray, sfreq: float,
+                          min_iti_s: float = 0.02,
+                          burst_win_s: float = 0.25,
+                          burst_count: int = 5) -> dict:
+    """
+    Detect suspicious StimTrak behavior:
+      - very short ITIs (<= min_iti_s)
+      - bursts: >= burst_count triggers inside burst_win_s
+
+    Returns summary diagnostics; does NOT modify markers.
+    """
+    if len(markers_pos) < 2:
+        return {
+            "burst_flag": False,
+            "n_triggers": int(len(markers_pos)),
+            "n_short_iti": 0,
+            "min_iti_s": None,
+            "burst_max_in_window": 1,
+            "burst_n_windows_ge_thresh": 0,
+        }
+
+    t = markers_pos / float(sfreq)
+    dt = np.diff(t)
+
+    n_short = int(np.sum(dt <= min_iti_s))
+    min_iti = float(np.min(dt))
+
+    # Sliding window burst count using two pointers
+    j = 0
+    burst_max = 1
+    n_ge = 0
+    for i in range(len(t)):
+        while t[i] - t[j] > burst_win_s:
+            j += 1
+        c = i - j + 1
+        burst_max = max(burst_max, c)
+        if c >= burst_count:
+            n_ge += 1
+
+    burst_flag = (n_short > 0) or (burst_max >= burst_count)
+
+    return {
+        "burst_flag": bool(burst_flag),
+        "n_triggers": int(len(markers_pos)),
+        "n_short_iti": int(n_short),
+        "min_iti_s": min_iti,
+        "burst_max_in_window": int(burst_max),
+        "burst_n_windows_ge_thresh": int(n_ge),
+        "burst_params": f"min_iti_s={min_iti_s},win_s={burst_win_s},count={burst_count}",
+    }
+
 
 def run_full_pipeline(args, defaults=None):
     """Run the full EEG processing pipeline.
@@ -234,7 +335,7 @@ def run_full_pipeline(args, defaults=None):
     Parameters
     ----------
     args : argparse.Namespace
-        Parsed command‑line arguments.
+        Parsed command-line arguments.
     defaults : dict or None
         Mapping from argument names to their argparse defaults.  Used to
         determine whether CLI arguments were explicitly provided.  If None,
@@ -246,12 +347,6 @@ def run_full_pipeline(args, defaults=None):
 
     # ------------------------------------------------------------------
     # Integrate configuration values into CLI arguments.
-    #
-    # We respect command‑line flags by comparing each argument against its
-    # argparse default via the ``defaults`` dict.  If the CLI did not override
-    # a value (i.e., ``args.<field> == defaults[field]``) then we apply
-    # the corresponding value from the configuration.  Otherwise we leave
-    # the CLI value untouched.
     # ------------------------------------------------------------------
 
     # Paths
@@ -265,25 +360,33 @@ def run_full_pipeline(args, defaults=None):
     set_if_default(args, defaults, "h_freq", cfg["preprocess"].get("h_freq", args.h_freq))
     set_if_default(args, defaults, "notch", cfg["preprocess"].get("notch_hz", args.notch))
 
-    # Channel selections: EOG, blink proxies and auxiliary channels
+    # Channel selections
     set_if_default(args, defaults, "eog_chs", cfg["channels"].get("eog_chs", args.eog_chs))
     set_if_default(args, defaults, "blink_proxy_chs", cfg["channels"].get("blink_proxy_chs", args.blink_proxy_chs))
     set_if_default(args, defaults, "aux_chs", cfg["channels"].get("drop_aux_chs", args.aux_chs))
 
-    # Event codes and behavioral keep codes
+    # Events
     set_if_default(args, defaults, "standard_codes", cfg["events"].get("standard_codes", args.standard_codes))
     set_if_default(args, defaults, "deviant_codes", cfg["events"].get("deviant_codes", args.deviant_codes))
-    set_if_default(args, defaults, "behavioral_keep_codes", cfg["events"].get("behavioral_keep_codes", args.behavioral_keep_codes))
-    # gap and auto-drop heuristics
-    set_if_default(args, defaults, "drop_eeg_markers_by_gap_s", cfg["events"].get("drop_eeg_markers_by_gap_s", args.drop_eeg_markers_by_gap_s))
-    set_if_default(args, defaults, "auto_drop_to_count", int(bool(cfg["events"].get("auto_drop_to_count", args.auto_drop_to_count))))
+    set_if_default(
+        args, defaults, "behavioral_keep_codes",
+        cfg["events"].get("behavioral_keep_codes", args.behavioral_keep_codes)
+    )
+    set_if_default(
+        args, defaults, "drop_eeg_markers_by_gap_s",
+        cfg["events"].get("drop_eeg_markers_by_gap_s", args.drop_eeg_markers_by_gap_s)
+    )
+    set_if_default(
+        args, defaults, "auto_drop_to_count",
+        int(bool(cfg["events"].get("auto_drop_to_count", args.auto_drop_to_count)))
+    )
 
-    # Epoching parameters
+    # Epoching
     set_if_default(args, defaults, "tmin", cfg["epoching"].get("tmin", args.tmin))
     set_if_default(args, defaults, "tmax", cfg["epoching"].get("tmax", args.tmax))
     set_if_default(args, defaults, "baseline", cfg["epoching"].get("baseline", args.baseline))
 
-    # Artifact rejection parameters
+    # Artifacts
     art = cfg.get("artifacts", {})
     win = art.get("test_window", [args.art_test_tmin, args.art_test_tmax])
     if len(win) >= 2:
@@ -297,10 +400,13 @@ def run_full_pipeline(args, defaults=None):
     set_if_default(args, defaults, "volt_pos_uv", volt_cfg.get("pos_uv", args.volt_pos_uv))
     set_if_default(args, defaults, "volt_neg_uv", volt_cfg.get("neg_uv", args.volt_neg_uv))
 
-    # ICA controls
+    # ICA
     ica_cfg = cfg.get("ica", {})
     set_if_default(args, defaults, "ica", ica_cfg.get("mode", args.ica))
-    set_if_default(args, defaults, "ica_auto_blink_rate_per_min", ica_cfg.get("auto_blink_rate_per_min", args.ica_auto_blink_rate_per_min))
+    set_if_default(
+        args, defaults, "ica_auto_blink_rate_per_min",
+        ica_cfg.get("auto_blink_rate_per_min", args.ica_auto_blink_rate_per_min)
+    )
     set_if_default(args, defaults, "ica_method", ica_cfg.get("method", args.ica_method))
     set_if_default(args, defaults, "ica_n_components", str(ica_cfg.get("n_components", args.ica_n_components)))
     set_if_default(args, defaults, "ica_random_state", ica_cfg.get("random_state", args.ica_random_state))
@@ -312,7 +418,47 @@ def run_full_pipeline(args, defaults=None):
     set_if_default(args, defaults, "ica_max_exclude", ica_cfg.get("max_exclude", args.ica_max_exclude))
     set_if_default(args, defaults, "save_ica", int(bool(ica_cfg.get("save_ica", args.save_ica))))
 
-    # Token map: override only if CLI not provided
+    # Metrics
+    metrics_cfg = cfg.get("metrics", {})
+    set_if_default(args, defaults, "metrics", int(bool(metrics_cfg.get("enabled", args.metrics))))
+
+    # Only override these from config when the user didn't specify them
+    if args.metrics_channels is None:
+        chs = metrics_cfg.get("channels", None)
+        if isinstance(chs, (list, tuple)) and len(chs):
+            args.metrics_channels = list(map(str, chs))
+
+    # ERP windows: list[dict] (preferred) or list[list/tuple]
+    if args.erp_window is None:
+        wins = metrics_cfg.get("erp_windows", None)
+        if isinstance(wins, list) and len(wins):
+            parsed = []
+            for w in wins:
+                if isinstance(w, dict):
+                    name = str(w.get("name", "window"))
+                    tmin = float(w.get("tmin"))
+                    tmax = float(w.get("tmax"))
+                    parsed.append([name, tmin, tmax])
+                elif isinstance(w, (list, tuple)) and len(w) >= 3:
+                    parsed.append([str(w[0]), float(w[1]), float(w[2])])
+            if parsed:
+                args.erp_window = parsed
+
+    set_if_default(args, defaults, "compute_mmn", int(bool(metrics_cfg.get("compute_mmn", args.compute_mmn))))
+
+    tfr_cfg = metrics_cfg.get("tfr", {})
+    set_if_default(args, defaults, "tfr_fmin", float(tfr_cfg.get("fmin", args.tfr_fmin)))
+    set_if_default(args, defaults, "tfr_fmax", float(tfr_cfg.get("fmax", args.tfr_fmax)))
+    set_if_default(args, defaults, "tfr_fstep", float(tfr_cfg.get("fstep", args.tfr_fstep)))
+    set_if_default(args, defaults, "tfr_method", tfr_cfg.get("method", args.tfr_method))
+    set_if_default(args, defaults, "tfr_n_cycles_div", float(tfr_cfg.get("n_cycles_div", args.tfr_n_cycles_div)))
+    set_if_default(args, defaults, "tfr_decim", int(tfr_cfg.get("decim", args.tfr_decim)))
+    b = tfr_cfg.get("baseline", [args.tfr_baseline[0], args.tfr_baseline[1]])
+    if isinstance(b, (list, tuple)) and len(b) >= 2:
+        set_if_default(args, defaults, "tfr_baseline", [float(b[0]), float(b[1])])
+    set_if_default(args, defaults, "tfr_baseline_mode", tfr_cfg.get("mode", args.tfr_baseline_mode))
+
+    # Token map
     if args.token_map is None:
         tm = cfg.get("labels", {}).get("token_map", None)
         if isinstance(tm, dict):
@@ -322,15 +468,10 @@ def run_full_pipeline(args, defaults=None):
         else:
             args.token_map = None
 
-    # Resolve paths after config/CLI integration.  Use args.* rather than cfg so
-    # that command‑line overrides take effect.
     raw_dir = Path(args.raw_dir)
     subject_csv_dir = Path(args.subject_csv_dir)
     out_dir = Path(args.out_dir)
     prepare_output_dirs(out_dir)
-
-    # We no longer read standard/dev codes from cfg here because they have been
-    # merged into args.standard_codes and args.deviant_codes via set_if_default above.
 
     d_raw = out_dir / "01_clean_raw"
     d_epo = out_dir / "02_epochs"
@@ -347,9 +488,16 @@ def run_full_pipeline(args, defaults=None):
 
     token_map = parse_token_map(args.token_map)
 
+    erp_windows = _parse_erp_window_specs(getattr(args, 'erp_window', None))
+    tfr_windows = _parse_tfr_window_specs(getattr(args, 'tfr_window', None))
+
     rows: list[dict] = []
     evokeds_std = []
     evokeds_dev = []
+
+    # Metrics outputs collected across subjects
+    erp_metrics_all: list[pd.DataFrame] = []
+    tfr_metrics_all: list[pd.DataFrame] = []
 
     vhdr_files = sorted(raw_dir.glob("*.vhdr"))
     if not vhdr_files:
@@ -369,11 +517,23 @@ def run_full_pipeline(args, defaults=None):
         subj = vhdr.stem
         subj_num = subject_number_from_stem(subj)
         subject_csv = subject_csv_dir / f"subject-{subj_num}.csv"
+        subject_csv_name = subject_csv.name
+        subject_csv_path = str(subject_csv)
+        subject_csv_exists = bool(subject_csv.exists())
         vmrk = vhdr.with_suffix(".vmrk")
 
         print(f"\n=== {subj} ===")
 
-        # Optional vmrk policy (debugging / audit)
+        # Always define burst QC fields so the CSV schema is consistent
+        burst_qc = {
+            "trigger_burst_flag": False,
+            "trigger_n_short_iti": 0,
+            "trigger_min_iti_s": "",
+            "trigger_burst_max_in_window": "",
+            "trigger_burst_n_windows_ge_thresh": 0,
+            "trigger_burst_params": "",
+        }
+
         if not vmrk.exists():
             msg = f"Missing .vmrk for {subj}: {vmrk}"
             if args.on_missing_vmrk == "fail":
@@ -384,13 +544,17 @@ def run_full_pipeline(args, defaults=None):
                     {
                         "subject": subj,
                         "raw_file": str(vhdr.name),
-                        "subject_csv": str(subject_csv),
+                        "subject_csv": subject_csv_name,
+                        "subject_csv_path": subject_csv_path,
+                        "subject_csv_exists": subject_csv_exists
+                        **burst_qc,
                         "status": "SKIP_MISSING_VMRK",
                         "error": msg,
                     }
                 )
                 continue
             print("[WARN]", msg)
+
         ok, reason = brainvision_links_ok(vhdr)
         if not ok:
             msg = f"BrainVision link mismatch in {vhdr.name}: {reason}"
@@ -401,13 +565,16 @@ def run_full_pipeline(args, defaults=None):
                 {
                     "subject": subj,
                     "raw_file": str(vhdr.name),
-                    "subject_csv": str(subject_csv.name) if subject_csv.exists() else str(subject_csv),
+                    "subject_csv": subject_csv_name,
+                        "subject_csv_path": subject_csv_path,
+                        "subject_csv_exists": subject_csv_exists
+                    **burst_qc,
                     "status": "SKIP_BV_LINK_MISMATCH",
                     "error": msg,
                 }
             )
             continue
-        # Preprocess
+
         raw = read_raw_preprocess(
             vhdr_path=vhdr,
             montage=args.montage,
@@ -418,7 +585,6 @@ def run_full_pipeline(args, defaults=None):
             notch=args.notch,
         )
 
-        # ICA diagnostics (non-destructive)
         ica_diag = compute_ica_diagnostics(
             raw,
             blink_proxy_chs=args.blink_proxy_chs,
@@ -428,37 +594,24 @@ def run_full_pipeline(args, defaults=None):
         )
 
         # ---- ICA: optional fit + apply (before event extraction / epoching) ----
-        # Track whether ICA was run at all.  This allows QC to distinguish
-        # between ICA never being attempted (False), ICA fit but nothing
-        # excluded (True but ica_applied remains False), and ICA fit with
-        # exclusions (True and ica_applied=True).
         ica_ran = False
         ica_applied = False
         ica_exclude: list[int] = []
         ica_fit_diag: dict = {}
         ica_find_diag: dict = {}
 
-        if args.ica in ("on", "auto"):
-            # Determine whether to perform ICA.  In "on" mode ICA is always run.
-            # In "auto" mode we use multiple diagnostics: blink rate, proxy blink rate
-            # and EOG–EEG correlation.  ICA is applied when either the blink/proxy
-            # rate exceeds the configured threshold OR the maximum EOG–EEG correlation
-            # exceeds the proxy correlation threshold.  This logic better reflects
-            # the recommendation logic implemented in recommend_ica().
-            do_ica = True
-            if args.ica == "auto":
-                rate = float(ica_diag.get("blink_rate_per_min", np.nan))
-                proxy_rate = float(ica_diag.get("blink_proxy_rate_per_min", np.nan))
-                # prefer true EOG blink rate if available, else fall back to proxy rate
-                blink_rate = rate if np.isfinite(rate) and rate > 0 else proxy_rate
-                max_corr = float(ica_diag.get("eog_corr_max", np.nan))
-                do_ica = False
-                # Blink-based criterion
-                if np.isfinite(blink_rate) and blink_rate >= args.ica_auto_blink_rate_per_min:
-                    do_ica = True
-                # Correlation-based criterion
-                elif np.isfinite(max_corr) and max_corr >= args.ica_corr_thresh:
-                    do_ica = True
+        if args.ica == "auto":
+            do_ica = False
+
+            rate = float(ica_diag.get("blink_rate_per_min", np.nan))
+            proxy_rate = float(ica_diag.get("blink_proxy_rate_per_min", np.nan))
+            blink_rate = rate if np.isfinite(rate) and rate > 0 else proxy_rate
+            max_corr = float(ica_diag.get("eog_corr_max", np.nan))
+
+            if np.isfinite(blink_rate) and blink_rate >= args.ica_auto_blink_rate_per_min:
+                do_ica = True
+            elif np.isfinite(max_corr) and max_corr >= args.ica_corr_thresh:
+                do_ica = True
 
             if do_ica:
                 ica_params = ICAParams(
@@ -473,38 +626,54 @@ def run_full_pipeline(args, defaults=None):
                     decim=args.ica_decim,
                 )
 
-            ica_obj, ica_fit_diag = fit_ica(raw, ica_params)
-            if ica_obj is None:
-                print(f"[WARN] ICA fit failed for {subj}; continuing without ICA.")
-            else:
-                # Record that ICA fit ran successfully
-                ica_ran = True
-
-                ica_exclude, ica_find_diag = find_ica_excludes(
-                    ica_obj,
-                    raw,
-                    eog_chs=args.eog_chs,
-                    proxy_chs=args.blink_proxy_chs,
-                    corr_thresh=args.ica_corr_thresh,
-                    max_exclude=args.ica_max_exclude,
-                )
-
-                # Apply ICA if there are components to exclude
-                if len(ica_exclude) > 0:
-                    raw = apply_ica(raw, ica_obj, ica_exclude)
-                    ica_applied = True
-
-                # Save ICA object for audit/reuse if requested
-                if bool(args.save_ica):
-                    ica_path = out_dir / "00_ica" / f"{subj}-ica.fif"
-                    ica_path.parent.mkdir(parents=True, exist_ok=True)
-                    ica_obj.save(ica_path, overwrite=True)
+                ica_obj, ica_fit_diag = fit_ica(raw, ica_params)
+                if ica_obj is None:
+                    print(f"[WARN] ICA fit failed for {subj}; continuing without ICA.")
+                else:
+                    ica_ran = True
+                    ica_exclude, ica_find_diag = find_ica_excludes(
+                        ica_obj,
+                        raw,
+                        eog_chs=args.eog_chs,
+                        proxy_chs=args.blink_proxy_chs,
+                        corr_thresh=args.ica_corr_thresh,
+                        max_exclude=args.ica_max_exclude,
+                    )
+                    if len(ica_exclude) > 0:
+                        raw = apply_ica(raw, ica_obj, ica_exclude)
+                        ica_applied = True
+                    if bool(args.save_ica):
+                        ica_path = out_dir / "00_ica" / f"{subj}-ica.fif"
+                        ica_path.parent.mkdir(parents=True, exist_ok=True)
+                        ica_obj.save(ica_path, overwrite=True)
 
         # Events from annotations
         events_ann = events_from_annotations_positions(raw)
         markers_pos = events_ann[:, 0].copy()
+        
+        # Trigger burst QC (flag only; do not modify markers_pos)
+        burst_diag = detect_trigger_bursts(
+            markers_pos=markers_pos,
+            sfreq=float(raw.info["sfreq"]),
+            min_iti_s=0.02,
+            burst_win_s=0.25,
+            burst_count=5,
+        )
+        burst_qc = {
+            "trigger_burst_flag": bool(burst_diag.get("burst_flag", False)),
+            "trigger_n_short_iti": int(burst_diag.get("n_short_iti", 0) or 0),
+            "trigger_min_iti_s": burst_diag.get("min_iti_s", ""),
+            "trigger_burst_max_in_window": int(burst_diag.get("burst_max_in_window", 1) or 1),
+            "trigger_burst_n_windows_ge_thresh": int(burst_diag.get("burst_n_windows_ge_thresh", 0) or 0),
+            "trigger_burst_params": burst_diag.get("burst_params", ""),
+        }
+        if burst_qc["trigger_burst_flag"]:
+            print(
+                f"[WARN] Trigger burst detected for {subj}: "
+                f"short_iti={burst_qc['trigger_n_short_iti']}, "
+                f"max_in_window={burst_qc['trigger_burst_max_in_window']}"
+            )
 
-        # Behavioral file policy
         if not subject_csv.exists():
             msg = f"Missing subject file for {subj}: {subject_csv}"
             if args.on_missing_subject_csv == "fail":
@@ -514,18 +683,19 @@ def run_full_pipeline(args, defaults=None):
                 {
                     "subject": subj,
                     "raw_file": str(vhdr.name),
-                    "subject_csv": str(subject_csv),
+                    "subject_csv": subject_csv_name,
+                        "subject_csv_path": subject_csv_path,
+                        "subject_csv_exists": subject_csv_exists
+                    **burst_qc,
                     "status": "SKIP_MISSING_SUBJECT_CSV",
                     "error": msg,
                 }
             )
             continue
 
-        # Load + filter behavioral codes
         codes_all = read_eventcodes_from_subject_csv(subject_csv)
         codes = filter_codes(codes_all, args.behavioral_keep_codes)
-
-        # Align markers to behavioral codes (sanity check step)
+        expected_trials = len(codes) 
         try:
             markers_aligned, diag = align_marker_positions_to_codes(
                 markers_pos=markers_pos,
@@ -541,28 +711,49 @@ def run_full_pipeline(args, defaults=None):
                 {
                     "subject": subj,
                     "raw_file": str(vhdr.name),
-                    "subject_csv": str(subject_csv),
+                    "subject_csv": subject_csv_name,
+                        "subject_csv_path": subject_csv_path,
+                        "subject_csv_exists": subject_csv_exists
+                    **burst_qc,
                     "status": "SKIP_ALIGNMENT_FAILED",
                     "error": msg,
                 }
             )
             continue
 
-        events = build_events_from_positions_and_codes(markers_aligned, codes)
+        review_flag = False
+        review_reasons = []
 
-        # Epoch only standard/deviant codes (recode to 1/2)
+        # 1) StimTrak burst
+        if burst_qc["trigger_burst_flag"]:
+            review_flag = True
+            review_reasons.append("trigger_burst")
+
+        # 2) Huge marker excess before alignment (StimTrak spam)
+        if diag.get("markers_original", 0) > 2 * len(codes):
+            review_flag = True
+            review_reasons.append("markers>>behavior")
+
+        # 3) Big auto-drop suggests trigger noise
+        if diag.get("markers_dropped_by_auto", 0) >= 50:
+            review_flag = True
+            review_reasons.append("large_auto_drop")
+
+        # 4) Too few markers vs expected (typically a recording/annotation problem)
+        if diag.get("markers_original", 0) < 0.9 * len(codes):
+            review_flag = True
+            review_reasons.append("markers<behavior")
+
+        events = build_events_from_positions_and_codes(markers_aligned, codes)
         events_stddev, event_id = select_and_recode_stddev(events, args.standard_codes, args.deviant_codes)
         epochs = make_epochs(raw, events_stddev, event_id, ep)
 
-        # Attach metadata (derived from aligned codes; slice to std/dev kept)
         keep_mask = np.isin(events[:, 2], stddev_set)
         md_full = derive_metadata_v1(codes.tolist(), token_map=token_map)
         epochs.metadata = md_full.loc[keep_mask].reset_index(drop=True)
 
-        # Artifact rejection within test window
         epochs_test = epochs.copy().crop(tmin=args.art_test_tmin, tmax=args.art_test_tmax)
 
-        # Blink detection: prefer true EOG picks; else fall back to blink_proxy_chs (e.g., Fp1)
         eog_picks = mne.pick_types(epochs_test.info, eog=True, eeg=False)
         blink_bad = np.zeros(len(epochs_test), dtype=bool)
 
@@ -599,7 +790,6 @@ def run_full_pipeline(args, defaults=None):
         n_before = len(epochs)
         if bad_idx:
             epochs.drop(bad_idx, reason="ARTIFACT_REJECT_MNE")
-        # After dropping bad epochs:
         n_after = len(epochs)
 
         if n_after == 0:
@@ -609,20 +799,20 @@ def run_full_pipeline(args, defaults=None):
                 {
                     "subject": subj,
                     "raw_file": str(vhdr.name),
-                    "subject_csv": str(subject_csv.name),
-                    "status": "SKIP_EMPTY_EPOCHS",
-                    "error": msg,
+                    "subject_csv": subject_csv_name,
+                        "subject_csv_path": subject_csv_path,
+                        "subject_csv_exists": subject_csv_exists
                     **diag,
+                    **burst_qc,
                     "n_epochs_before_artifact": int(n_before),
                     "n_epochs_final": 0,
+                    "status": "SKIP_EMPTY_EPOCHS",
+                    "error": msg,
                 }
             )
-            # still save raw; optionally save empty epochs if you want, but don't compute evokeds
             raw.save(d_raw / f"{subj}-raw.fif", overwrite=True)
-            # epochs.save(...) optional; but if you do, it will warn "no data"
             continue
 
-        # Also guard per-condition:
         n_std = len(epochs["Standard"])
         n_dev = len(epochs["Deviant"])
         if n_std == 0 or n_dev == 0:
@@ -632,39 +822,140 @@ def run_full_pipeline(args, defaults=None):
                 {
                     "subject": subj,
                     "raw_file": str(vhdr.name),
-                    "subject_csv": str(subject_csv.name),
-                    "status": "SKIP_EMPTY_CONDITION",
-                    "error": msg,
+                    "subject_csv": subject_csv_name,
+                        "subject_csv_path": subject_csv_path,
+                        "subject_csv_exists": subject_csv_exists
                     **diag,
+                    **burst_qc,
                     "n_epochs_before_artifact": int(n_before),
                     "n_epochs_final": int(n_after),
                     "n_standard_final": int(n_std),
                     "n_deviant_final": int(n_dev),
+                    "status": "SKIP_EMPTY_CONDITION",
+                    "error": msg,
                 }
             )
             raw.save(d_raw / f"{subj}-raw.fif", overwrite=True)
             epochs.save(d_epo / f"{subj}-epo.fif", overwrite=True)
             continue
+
         epoch_reject_rate = (n_before - n_after) / n_before if n_before > 0 else 0.0
+
+        # ------------------------------------------------------------------
+        # Metrics (ERP + TFR)
+        # ------------------------------------------------------------------
+        if int(getattr(args, "metrics", 0)):
+            metrics_dir = out_dir / "05_metrics"
+            metrics_dir.mkdir(parents=True, exist_ok=True)
+
+            # ERP windows
+            if getattr(args, "erp_window", None):
+                erp_windows = [
+                    ERPWindow(name=w[0], tmin=float(w[1]), tmax=float(w[2]))
+                    for w in args.erp_window
+                ]
+            else:
+                erp_windows = [ERPWindow("MMN_150_250", 0.15, 0.25)]
+
+            channels = getattr(args, "metrics_channels", None) or ["Fp1", "Fz", "Cz"]
+
+            try:
+                df_erp = compute_erp_metrics(
+                    epochs,
+                    subject=subj,
+                    channels=channels,
+                    conditions=["Standard", "Deviant"],
+                    windows=erp_windows,
+                    compute_mmn=bool(getattr(args, "compute_mmn", 1)),
+                )
+                df_erp.to_csv(metrics_dir / f"{subj}_erp_metrics.csv", index=False)
+                erp_metrics_all.append(df_erp)
+            except Exception as e:
+                print(f"[WARN] ERP metrics failed for {subj}: {e}")
+
+            try:
+                tfr_params = TFRParams(
+                    fmin=float(getattr(args, "tfr_fmin", 1.0)),
+                    fmax=float(getattr(args, "tfr_fmax", 30.0)),
+                    fstep=float(getattr(args, "tfr_fstep", 1.0)),
+                    method=str(getattr(args, "tfr_method", "multitaper")),
+                    n_cycles_div=float(getattr(args, "tfr_n_cycles_div", 10.0)),
+                    decim=int(getattr(args, "tfr_decim", 1)),
+                    baseline=(
+                        float(getattr(args, "tfr_baseline", [-0.1, 0.0])[0]),
+                        float(getattr(args, "tfr_baseline", [-0.1, 0.0])[1]),
+                    ),
+                    mode=str(getattr(args, "tfr_baseline_mode", "logratio")),
+                )
+                df_tfr = compute_tfr_metrics(
+                    epochs,
+                    subject=subj,
+                    channels=channels,
+                    conditions=["Standard", "Deviant"],
+                    params=tfr_params,
+                    tmin=float(getattr(args, "tfr_tmin", -0.2)),
+                    tmax=float(getattr(args, "tfr_tmax", 0.6)),
+                )
+                df_tfr.to_csv(metrics_dir / f"{subj}_tfr_metrics.csv", index=False)
+                tfr_metrics_all.append(df_tfr)
+            except Exception as e:
+                print(f"[WARN] TFR metrics failed for {subj}: {e}")
 
         ica_recommendation = recommend_ica(
             epoch_reject_rate=epoch_reject_rate,
             eog_corr_max=ica_diag.get("eog_corr_max", 0.0),
             blink_rate_per_min=ica_diag.get("blink_rate_per_min", 0.0),
             blink_proxy_rate_per_min=ica_diag.get("blink_proxy_rate_per_min", 0.0),
-            # Use the same thresholds configured for auto ICA gating
             epoch_loss_thresh=0.20,
             eog_corr_thresh=args.ica_corr_thresh,
             blink_rate_thresh=args.ica_auto_blink_rate_per_min,
         )
 
-        # Save outputs for this subject
         raw.save(d_raw / f"{subj}-raw.fif", overwrite=True)
         epochs.save(d_epo / f"{subj}-epo.fif", overwrite=True)
 
         evo_std, evo_dev = compute_evokeds(epochs)
         evo_std.save(d_evk / f"{subj}_Standard-ave.fif", overwrite=True)
         evo_dev.save(d_evk / f"{subj}_Deviant-ave.fif", overwrite=True)
+
+        # -------------------------
+        # Metrics (ERP + TFR)
+        # -------------------------
+        if int(getattr(args, "run_metrics", 1)) == 1:
+            metric_picks = _resolve_metric_picks(epochs, getattr(args, "metric_picks", None))
+            # ERP
+            for win_name, tmin_w, tmax_w in erp_windows:
+                try:
+                    df_erp = compute_erp_metrics(
+                        epochs,
+                        tmin=tmin_w,
+                        tmax=tmax_w,
+                        baseline=(None, 0),
+                        picks=metric_picks,
+                    ).reset_index()
+                    df_erp.insert(0, "subject", subj)
+                    df_erp.insert(1, "window", win_name)
+                    _write_metrics_df(df_erp, (out_dir / "05_metrics" / "erp" / f"{subj}_erp_{win_name}.csv"))
+                except Exception as e:
+                    print(f"[WARN] ERP metrics failed for {subj} window={win_name}: {e}")
+
+            # TFR (requires epochs)
+            for win_name, tmin_w, tmax_w, fmin, fmax in tfr_windows:
+                try:
+                    df_tfr = compute_tfr_metrics(
+                        epochs,
+                        tmin=tmin_w,
+                        tmax=tmax_w,
+                        fmin=fmin,
+                        fmax=fmax,
+                        baseline=(None, 0),
+                        picks=metric_picks,
+                    ).reset_index()
+                    df_tfr.insert(0, "subject", subj)
+                    df_tfr.insert(1, "window", win_name)
+                    _write_metrics_df(df_tfr, (out_dir / "05_metrics" / "tfr" / f"{subj}_tfr_{win_name}.csv"))
+                except Exception as e:
+                    print(f"[WARN] TFR metrics failed for {subj} window={win_name}: {e}")
 
         evokeds_std.append(evo_std)
         evokeds_dev.append(evo_dev)
@@ -673,7 +964,9 @@ def run_full_pipeline(args, defaults=None):
             {
                 "subject": subj,
                 "raw_file": str(vhdr.name),
-                "subject_csv": str(subject_csv.name),
+                "subject_csv": subject_csv_name,
+                        "subject_csv_path": subject_csv_path,
+                        "subject_csv_exists": subject_csv_exists,
                 "sfreq": float(raw.info["sfreq"]),
                 "token1": token_map.get("token1"),
                 "token2": token_map.get("token2"),
@@ -681,6 +974,7 @@ def run_full_pipeline(args, defaults=None):
                 "behavioral_codes_used": int(len(codes)),
                 "behavioral_keep_codes": " ".join(map(str, args.behavioral_keep_codes)) if args.behavioral_keep_codes else "",
                 **diag,
+                **burst_qc,
                 "n_events_used": int(len(events)),
                 "n_events_kept_stddev": int(len(events_stddev)),
                 "n_epochs_before_artifact": int(n_before),
@@ -704,6 +998,8 @@ def run_full_pipeline(args, defaults=None):
                 "ica_exclude": " ".join(map(str, ica_exclude)) if ica_exclude else "",
                 **{f"ica_fit_{k}": v for k, v in ica_fit_diag.items()},
                 **{f"ica_find_{k}": v for k, v in ica_find_diag.items()},
+                "review_flag": review_flag,
+                "review_reasons": "+".join(review_reasons),
                 "status": "OK",
                 "error": "",
             }
@@ -713,13 +1009,30 @@ def run_full_pipeline(args, defaults=None):
             f"Alignment: markers {diag['markers_original']} -> {len(markers_aligned)} "
             f"(gap_drop={diag['markers_dropped_by_gap']}, auto_drop={diag['markers_dropped_by_auto']})"
         )
-        print(f"Dropped {n_before - n_after}/{n_before} epochs (blink={int(blink_bad.sum())}, muscle={int(muscle_bad.sum())})")
-        print(f"ICA recommended: {ica_recommendation.get('ica_recommended', False)} ({ica_recommendation.get('ica_recommend_reason', '')})")
+        print(
+            f"Dropped {n_before - n_after}/{n_before} epochs "
+            f"(blink={int(blink_bad.sum())}, muscle={int(muscle_bad.sum())})"
+        )
+        print(
+            f"ICA recommended: {ica_recommendation.get('ica_recommended', False)} "
+            f"({ica_recommendation.get('ica_recommend_reason', '')})"
+        )
 
-    # Grand averages (only if we have any successful subjects)
     if len(evokeds_std) == 0 or len(evokeds_dev) == 0:
         print("\n[WARN] No successful subjects to grand-average. Writing QC summary only.")
         write_qc_summary(rows, out_dir / "qc_summary.csv")
+
+        # Combined metrics tables (may still exist even if grand averages fail)
+        metrics_dir = out_dir / "05_metrics"
+        if erp_metrics_all:
+            pd.concat(erp_metrics_all, ignore_index=True).to_csv(
+                metrics_dir / "erp_metrics_all.csv", index=False
+            )
+        if tfr_metrics_all:
+            pd.concat(tfr_metrics_all, ignore_index=True).to_csv(
+                metrics_dir / "tfr_metrics_all.csv", index=False
+            )
+
         print(f"Saved QC summary -> {out_dir / 'qc_summary.csv'}")
         return
 
@@ -728,6 +1041,17 @@ def run_full_pipeline(args, defaults=None):
     ga_dev.save(d_ga / "grand_average_Deviant-ave.fif", overwrite=True)
 
     write_qc_summary(rows, out_dir / "qc_summary.csv")
+
+    metrics_dir = out_dir / "05_metrics"
+    if erp_metrics_all:
+        pd.concat(erp_metrics_all, ignore_index=True).to_csv(
+            metrics_dir / "erp_metrics_all.csv", index=False
+        )
+    if tfr_metrics_all:
+        pd.concat(tfr_metrics_all, ignore_index=True).to_csv(
+            metrics_dir / "tfr_metrics_all.csv", index=False
+        )
+
     print(f"\nSaved QC summary -> {out_dir / 'qc_summary.csv'}")
     print(f"Saved grand averages -> {d_ga}")
 
@@ -863,12 +1187,77 @@ def build_arg_parser():
         help="If --ica auto, run ICA when blink rate >= this threshold (per minute).",
     )
     ap.add_argument("--save_ica", default=1, type=int, help="Save ICA object to out_dir/00_ica (1=yes,0=no).")
+
+    # --- Metrics controls ---
+    ap.add_argument(
+        "--run_metrics",
+        type=int,
+        default=1,
+        help="Compute ERP/TFR metrics into out_dir/05_metrics (1=yes,0=no).",
+    )
+    ap.add_argument(
+        "--metric_picks",
+        nargs="*",
+        default=None,
+        help="Optional channel names to compute metrics on (e.g., Fz Cz Pz). If omitted, uses all EEG channels.",
+    )
+    ap.add_argument(
+        "--erp_window",
+        action="append",
+        default=[],
+        help="ERP window spec name:tmin:tmax. Repeatable. Example: --erp_window mmn:0.1:0.25",
+    )
+    ap.add_argument(
+        "--tfr_window",
+        action="append",
+        default=[],
+        help="TFR window spec name:tmin:tmax:fmin:fmax. Repeatable. Example: --tfr_window mmn:0.1:0.25:4:8",
+    )
+
     ap.add_argument(
         "--on_bv_link_mismatch",
         choices=["skip", "fail"],
         default="skip",
         help="What to do if a .vhdr references a missing MarkerFile/DataFile (default: skip).",
     )
+
+    # --- Metrics controls (ERP + TFR) ---
+    ap.add_argument(
+        "--metrics",
+        type=int,
+        default=1,
+        help="Compute ERP/TFR metrics and write to out_dir/05_metrics (1=yes,0=no).",
+    )
+    ap.add_argument(
+        "--metrics_channels",
+        nargs="+",
+        default=None,
+        help="Channels used for metrics (default uses config or a small fronto-central set).",
+    )
+    ap.add_argument(
+        "--erp_window",
+        nargs=3,
+        action="append",
+        default=None,
+        metavar=("NAME", "TMIN", "TMAX"),
+        help="Add an ERP window, e.g. --erp_window MMN_150_250 0.15 0.25. Can be repeated.",
+    )
+    ap.add_argument(
+        "--compute_mmn",
+        type=int,
+        default=1,
+        help="If 1, also compute Deviant-Standard for ERP windows (MMN-style).",
+    )
+
+    # TFR settings (kept simple; can be overridden in config)
+    ap.add_argument("--tfr_fmin", type=float, default=1.0)
+    ap.add_argument("--tfr_fmax", type=float, default=30.0)
+    ap.add_argument("--tfr_fstep", type=float, default=1.0)
+    ap.add_argument("--tfr_method", default="multitaper", choices=["multitaper", "morlet"])
+    ap.add_argument("--tfr_n_cycles_div", type=float, default=10.0)
+    ap.add_argument("--tfr_decim", type=int, default=1)
+    ap.add_argument("--tfr_baseline", nargs=2, type=float, default=[-0.1, 0.0])
+    ap.add_argument("--tfr_baseline_mode", default="logratio")
     return ap
 
 

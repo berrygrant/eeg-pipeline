@@ -3,7 +3,7 @@ task: mmn
 paths:
   raw_dir: "/Volumes/Lab_Studies/RCG_2023/Tasks/2_MMN/1-raw_data"
   subject_csv_dir: "/Volumes/Lab_Studies/RCG_2023/Tasks/2_MMN/0-behavioral_data"
-  out_dir: "/tmp/mmn_full_autoica"
+  out_dir: "/Users/grantberry/Library/CloudStorage/OneDrive-VillanovaUniversity/Research/LUV_Lab/RCG/MMN_Data_mne_02_2026"
 
 channels:
   # LUV Lab default has no VEOG, so Fp1 is used as a blink proxy
