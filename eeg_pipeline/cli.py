@@ -20,6 +20,37 @@ from .ica_diagnostics import compute_ica_diagnostics, recommend_ica
 from .ica import ICAParams, fit_ica, find_ica_excludes, apply_ica
 from eeg_pipeline.config import load_config
 
+import re
+import tempfile
+
+_BV_KEY_RE = re.compile(r"^(?P<key>\w+)\s*=\s*(?P<val>.+?)\s*$", re.MULTILINE)
+
+def _bv_get(txt: str, key: str) -> str | None:
+    key_l = key.lower()
+    for m in _BV_KEY_RE.finditer(txt):
+        if m.group("key").strip().lower() == key_l:
+            return m.group("val").strip()
+    return None
+
+def brainvision_links_ok(vhdr_path: Path) -> tuple[bool, str]:
+    """
+    Returns (ok, reason). Checks whether .vhdr's MarkerFile/DataFile exist.
+    """
+    txt = vhdr_path.read_text(encoding="utf-8", errors="replace")
+    marker = _bv_get(txt, "MarkerFile")
+    data = _bv_get(txt, "DataFile")
+
+    missing = []
+    if marker:
+        if not (vhdr_path.parent / marker).exists():
+            missing.append(f"MarkerFile={marker}")
+    if data:
+        if not (vhdr_path.parent / data).exists():
+            missing.append(f"DataFile={data}")
+
+    if missing:
+        return False, "Missing referenced file(s): " + ", ".join(missing)
+    return True, ""
 
 def _parse_n_components(x):
     """
@@ -167,6 +198,103 @@ def summarize_one_file(args, vhdr_path: Path):
 def run_full_pipeline(args):
     cfg = load_config(args.config)
 
+    # ------------------------------------------------------------------
+    # Integrate configuration values into CLI arguments.
+    #
+    # The YAML/JSON config provides a flexible way to specify preprocessing,
+    # artifact rejection, ICA and event settings.  To honour user-defined
+    # configuration, we override corresponding argparse attributes here.
+    # Command‑line flags still take precedence if explicitly provided, but
+    # absent values fall back to the config.  Converting values early allows
+    # the remainder of the pipeline to refer to args.* uniformly.
+    # ------------------------------------------------------------------
+
+    # Paths
+    if getattr(args, "raw_dir", None) is None:
+        args.raw_dir = cfg["paths"]["raw_dir"]
+    if getattr(args, "subject_csv_dir", None) is None:
+        args.subject_csv_dir = cfg["paths"]["subject_csv_dir"]
+    if getattr(args, "out_dir", None) is None:
+        args.out_dir = cfg["paths"]["out_dir"]
+
+    # Channels and preprocessing
+    # Montage / filter settings
+    args.montage = cfg["preprocess"].get("montage", args.montage)
+    args.l_freq = cfg["preprocess"].get("l_freq", args.l_freq)
+    args.h_freq = cfg["preprocess"].get("h_freq", args.h_freq)
+    # Notch is stored as a list of floats in the config
+    args.notch = cfg["preprocess"].get("notch_hz", args.notch)
+
+    # Channel selections: EOG, blink proxies and auxiliary channels
+    args.eog_chs = cfg["channels"].get("eog_chs", args.eog_chs or [])
+    args.blink_proxy_chs = cfg["channels"].get("blink_proxy_chs", args.blink_proxy_chs or [])
+    # Drop aux channels using config value (overrides CLI default)
+    args.aux_chs = cfg["channels"].get("drop_aux_chs", args.aux_chs or [])
+
+    # Event codes and behavioral keep codes
+    if not args.standard_codes:
+        args.standard_codes = cfg["events"].get("standard_codes", args.standard_codes)
+    if not args.deviant_codes:
+        args.deviant_codes = cfg["events"].get("deviant_codes", args.deviant_codes)
+    # behavioral_keep_codes: if unspecified on CLI, use config; else keep CLI value
+    if not args.behavioral_keep_codes:
+        args.behavioral_keep_codes = cfg["events"].get("behavioral_keep_codes", args.behavioral_keep_codes)
+    # gap and auto-drop heuristics
+    if args.drop_eeg_markers_by_gap_s is None:
+        args.drop_eeg_markers_by_gap_s = cfg["events"].get("drop_eeg_markers_by_gap_s", args.drop_eeg_markers_by_gap_s)
+    # auto_drop_to_count can be boolean or int; normalise to int 1/0 for CLI semantics
+    if args.auto_drop_to_count is None:
+        args.auto_drop_to_count = int(bool(cfg["events"].get("auto_drop_to_count", args.auto_drop_to_count)))
+
+    # Epoching parameters
+    args.tmin = cfg["epoching"].get("tmin", args.tmin)
+    args.tmax = cfg["epoching"].get("tmax", args.tmax)
+    # baseline is a list of two floats
+    args.baseline = cfg["epoching"].get("baseline", args.baseline)
+
+    # Artifact rejection parameters
+    art = cfg["artifacts"]
+    # Test window for artifact detection
+    args.art_test_tmin = art.get("test_window", [args.art_test_tmin, args.art_test_tmax])[0]
+    args.art_test_tmax = art.get("test_window", [args.art_test_tmin, args.art_test_tmax])[1]
+    # Blink detection thresholds
+    blink_cfg = art.get("blink", {})
+    args.blink_threshold_uv = blink_cfg.get("threshold_uv", args.blink_threshold_uv)
+    args.blink_win_ms = blink_cfg.get("win_ms", args.blink_win_ms)
+    args.blink_step_ms = blink_cfg.get("step_ms", args.blink_step_ms)
+    # Voltage thresholds
+    volt_cfg = art.get("voltage", {})
+    args.volt_pos_uv = volt_cfg.get("pos_uv", args.volt_pos_uv)
+    args.volt_neg_uv = volt_cfg.get("neg_uv", args.volt_neg_uv)
+
+    # ICA controls
+    ica_cfg = cfg["ica"]
+    args.ica = ica_cfg.get("mode", args.ica)
+    args.ica_auto_blink_rate_per_min = ica_cfg.get("auto_blink_rate_per_min", args.ica_auto_blink_rate_per_min)
+    args.ica_method = ica_cfg.get("method", args.ica_method)
+    # n_components may be float or int; store as string so _parse_n_components can convert
+    args.ica_n_components = str(ica_cfg.get("n_components", args.ica_n_components))
+    args.ica_random_state = ica_cfg.get("random_state", args.ica_random_state)
+    args.ica_max_iter = ica_cfg.get("max_iter", args.ica_max_iter)
+    args.ica_fit_l_freq = ica_cfg.get("fit_l_freq", args.ica_fit_l_freq)
+    args.ica_fit_h_freq = ica_cfg.get("fit_h_freq", args.ica_fit_h_freq)
+    args.ica_decim = ica_cfg.get("decim", args.ica_decim)
+    args.ica_corr_thresh = ica_cfg.get("corr_thresh", args.ica_corr_thresh)
+    args.ica_max_exclude = ica_cfg.get("max_exclude", args.ica_max_exclude)
+    args.save_ica = int(bool(ica_cfg.get("save_ica", args.save_ica)))
+
+    # Token map: override only if CLI not provided
+    if args.token_map is None:
+        # config stores token_map as dict or None; convert to list-of-strings form expected by parse_token_map
+        tm = cfg["labels"].get("token_map", None)
+        if isinstance(tm, dict):
+            # produce list like ['Token1=EH', 'Token2=IH']
+            args.token_map = [f"{k}={v}" for k, v in tm.items()]
+        elif isinstance(tm, list):
+            args.token_map = tm
+        else:
+            args.token_map = None
+
     raw_dir = cfg["paths"]["raw_dir"]
     subject_csv_dir = cfg["paths"]["subject_csv_dir"]
     out_dir = cfg["paths"]["out_dir"]
@@ -238,7 +366,22 @@ def run_full_pipeline(args):
                 )
                 continue
             print("[WARN]", msg)
-
+        ok, reason = brainvision_links_ok(vhdr)
+        if not ok:
+            msg = f"BrainVision link mismatch in {vhdr.name}: {reason}"
+            if args.on_bv_link_mismatch == "fail":
+                raise FileNotFoundError(msg)
+            print("[WARN]", msg, "-> skipping")
+            rows.append(
+                {
+                    "subject": subj,
+                    "raw_file": str(vhdr.name),
+                    "subject_csv": str(subject_csv.name) if subject_csv.exists() else str(subject_csv),
+                    "status": "SKIP_BV_LINK_MISMATCH",
+                    "error": msg,
+                }
+            )
+            continue
         # Preprocess
         raw = read_raw_preprocess(
             vhdr_path=vhdr,
@@ -266,13 +409,26 @@ def run_full_pipeline(args):
         ica_find_diag: dict = {}
 
         if args.ica in ("on", "auto"):
+            # Determine whether to perform ICA.  In "on" mode ICA is always run.
+            # In "auto" mode we use multiple diagnostics: blink rate, proxy blink rate
+            # and EOG–EEG correlation.  ICA is applied when either the blink/proxy
+            # rate exceeds the configured threshold OR the maximum EOG–EEG correlation
+            # exceeds the proxy correlation threshold.  This logic better reflects
+            # the recommendation logic implemented in recommend_ica().
             do_ica = True
             if args.ica == "auto":
-                # Use EOG-derived blink rate if available, else fall back to proxy-derived rate
-                rate = float(ica_diag.get("blink_rate_per_min", 0.0) or 0.0)
-                if rate == 0.0:
-                    rate = float(ica_diag.get("blink_proxy_rate_per_min", 0.0) or 0.0)
-                do_ica = rate >= args.ica_auto_blink_rate_per_min
+                rate = float(ica_diag.get("blink_rate_per_min", np.nan))
+                proxy_rate = float(ica_diag.get("blink_proxy_rate_per_min", np.nan))
+                # prefer true EOG blink rate if available, else fall back to proxy rate
+                blink_rate = rate if np.isfinite(rate) and rate > 0 else proxy_rate
+                max_corr = float(ica_diag.get("eog_corr_max", np.nan))
+                do_ica = False
+                # Blink-based criterion
+                if np.isfinite(blink_rate) and blink_rate >= args.ica_auto_blink_rate_per_min:
+                    do_ica = True
+                # Correlation-based criterion
+                elif np.isfinite(max_corr) and max_corr >= args.ica_corr_thresh:
+                    do_ica = True
 
             if do_ica:
                 ica_params = ICAParams(
@@ -288,21 +444,24 @@ def run_full_pipeline(args):
                 )
 
                 ica_obj, ica_fit_diag = fit_ica(raw, ica_params)
+                if ica_obj is None:
+                    print(f"[WARN] ICA fit failed for {subj}; continuing without ICA.")
+                else:
+                    ica_exclude, ica_find_diag = find_ica_excludes(
+                        ica_obj,
+                        raw,
+                        eog_chs=args.eog_chs,
+                        proxy_chs=args.blink_proxy_chs,
+                        corr_thresh=args.ica_corr_thresh,
+                        max_exclude=args.ica_max_exclude,
+                    )
 
-                ica_exclude, ica_find_diag = find_ica_excludes(
-                    ica_obj,
-                    raw,
-                    eog_chs=args.eog_chs,
-                    proxy_chs=args.blink_proxy_chs,
-                    corr_thresh=args.ica_corr_thresh,
-                    max_exclude=args.ica_max_exclude,
-                )
-
+                # Apply ICA cleaning if any components were marked for exclusion
                 if len(ica_exclude) > 0:
                     raw = apply_ica(raw, ica_obj, ica_exclude)
                     ica_applied = True
 
-                # Save ICA object for audit/reuse
+                # Save ICA object for audit/reuse if requested
                 if bool(args.save_ica):
                     ica_path = out_dir / "00_ica" / f"{subj}-ica.fif"
                     ica_path.parent.mkdir(parents=True, exist_ok=True)
@@ -460,6 +619,10 @@ def run_full_pipeline(args):
             eog_corr_max=ica_diag.get("eog_corr_max", 0.0),
             blink_rate_per_min=ica_diag.get("blink_rate_per_min", 0.0),
             blink_proxy_rate_per_min=ica_diag.get("blink_proxy_rate_per_min", 0.0),
+            # Use the same thresholds configured for auto ICA gating
+            epoch_loss_thresh=0.20,
+            eog_corr_thresh=args.ica_corr_thresh,
+            blink_rate_thresh=args.ica_auto_blink_rate_per_min,
         )
 
         # Save outputs for this subject
@@ -666,7 +829,12 @@ def build_arg_parser():
         help="If --ica auto, run ICA when blink rate >= this threshold (per minute).",
     )
     ap.add_argument("--save_ica", default=1, type=int, help="Save ICA object to out_dir/00_ica (1=yes,0=no).")
-
+    ap.add_argument(
+        "--on_bv_link_mismatch",
+        choices=["skip", "fail"],
+        default="skip",
+        help="What to do if a .vhdr references a missing MarkerFile/DataFile (default: skip).",
+    )
     return ap
 
 

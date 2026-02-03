@@ -4,6 +4,8 @@ import numpy as np
 import mne
 
 from .artifacts import moving_window_ptp_mask
+from mne.preprocessing import find_eog_events
+
 
 def count_clusters(mask: np.ndarray) -> int:
     if mask.size == 0:
@@ -50,7 +52,7 @@ def compute_ica_diagnostics(
         metrics["eog_corr_mean"] = float(np.nanmean(eog_eeg_corr))
 
     # ---- Blink rate per minute ----
-    duration_min = raw.times[-1] / 60.0 if raw.times.size else np.nan
+    duration_min = (raw.n_times / sfreq) / 60.0    
     if duration_min and duration_min > 0:
 
         # Prefer true EOG if present
@@ -72,17 +74,19 @@ def compute_ica_diagnostics(
             proxy_existing = [ch for ch in blink_proxy_chs if ch in raw.ch_names]
 
             if proxy_existing:
-                proxy_picks = mne.pick_channels(raw.ch_names, include=proxy_existing)
-                blink_mask = moving_window_ptp_mask(
-                    raw.get_data(picks=proxy_picks),
-                    sfreq=sfreq,
-                    win_ms=blink_win_ms,
-                    step_ms=blink_step_ms,
-                    threshold_uv=blink_threshold_uv,
-                )
-                blink_events_n = count_clusters(blink_mask)
-                metrics["blink_proxy_rate_per_min"] = float((blink_events_n) / duration_min)
-                metrics["blink_source"] = f"proxy:{','.join(proxy_existing)}"
+                # Use the first proxy as a pseudo-EOG for blink event detection
+                proxy_ch = proxy_existing[0]
+                raw_tmp = raw.copy()
+                raw_tmp.set_channel_types({proxy_ch: "eog"}, on_unit_change="ignore")
+
+                try:
+                    eog_events = find_eog_events(raw_tmp, ch_name=proxy_ch, verbose=False)
+                    blink_events_n = len(eog_events)
+                except Exception:
+                    blink_events_n = 0  # safe fallback
+
+                metrics["blink_proxy_rate_per_min"] = float(blink_events_n / duration_min)
+                metrics["blink_source"] = f"proxy:{proxy_ch}"
     return metrics
 
 
@@ -91,29 +95,23 @@ def recommend_ica(
     epoch_reject_rate: float,
     eog_corr_max: float,
     blink_rate_per_min: float,
+    blink_proxy_rate_per_min: float,
     epoch_loss_thresh: float = 0.20,
     eog_corr_thresh: float = 0.30,
     blink_rate_thresh: float = 20.0,
-    blink_proxy_rate_per_min: float,
 ):
-    """
-    Decide whether ICA is recommended and explain why.
-    """
-
     reasons = []
-    if not np.isnan(blink_rate_per_min) and blink_rate_per_min > blink_rate_thresh:
+
+    if np.isfinite(blink_rate_per_min) and blink_rate_per_min > blink_rate_thresh:
         reasons.append(f"blink_rate>{blink_rate_thresh:.0f}/min")
-    elif not np.isnan(blink_proxy_rate_per_min) and blink_proxy_rate_per_min > blink_rate_thresh:
+    elif np.isfinite(blink_proxy_rate_per_min) and blink_proxy_rate_per_min > blink_rate_thresh:
         reasons.append(f"blink_proxy>{blink_rate_thresh:.0f}/min")
 
     if epoch_reject_rate > epoch_loss_thresh:
         reasons.append(f"epoch_loss>{epoch_loss_thresh:.2f}")
 
-    if not np.isnan(eog_corr_max) and eog_corr_max > eog_corr_thresh:
+    if np.isfinite(eog_corr_max) and eog_corr_max > eog_corr_thresh:
         reasons.append(f"eog_corr>{eog_corr_thresh:.2f}")
-
-    if not np.isnan(blink_rate_per_min) and blink_rate_per_min > blink_rate_thresh:
-        reasons.append(f"blink_rate>{blink_rate_thresh:.0f}/min")
 
     return {
         "ica_recommended": bool(reasons),
