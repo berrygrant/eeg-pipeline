@@ -3,23 +3,22 @@ task: mmn
 paths:
   raw_dir: "/Volumes/Lab_Studies/RCG_2023/Tasks/2_MMN/1-raw_data"
   subject_csv_dir: "/Volumes/Lab_Studies/RCG_2023/Tasks/2_MMN/0-behavioral_data"
-  out_dir: "/tmp/mmn_test_yaml"
+  out_dir: "/tmp/mmn_full_autoica"
 
 channels:
-  picks: [Fp1, Fz, F3, Cz, F4]
-  eog_chs: []                 # if present, list them (e.g., [VEOG, HEOG])
-  blink_proxy_chs: [Fp1]      # used if eog_chs is empty/missing
-  drop_aux_chs: [AUX]
+  # LUV Lab default has no VEOG, so Fp1 is used as a blink proxy
+  blink_proxy_chs: ["Fp1"]
+  eog_chs: []          # leave empty if VEOG/HEOG don’t exist
+  drop_aux_chs: ["AUX"]
 
 preprocess:
   montage: "standard_1020"
-  reref: "average"            # average | none (future: custom)
-  notch_hz: [60]
+  notch_hz: [60.0]
   l_freq: 0.1
   h_freq: 30.0
 
 events:
-  behavioral_keep_codes: [110, 111, 210, 211, 900, 910, 911]
+  behavioral_keep_codes: [110, 111, 210, 211]
   standard_codes: [110, 210]
   deviant_codes: [111, 211]
   drop_eeg_markers_by_gap_s: null
@@ -33,17 +32,17 @@ epoching:
 artifacts:
   test_window: [-0.2, 0.3]
   blink:
-    threshold_uv: 75
-    win_ms: 200
-    step_ms: 10
+    threshold_uv: 75.0
+    win_ms: 200.0
+    step_ms: 10.0
   voltage:
-    pos_uv: 150
-    neg_uv: -150
+    pos_uv: 150.0
+    neg_uv: -150.0
 
 ica:
-  mode: auto                  # off | auto | on
-  auto_blink_rate_per_min: 15
-  method: fastica              # fastica | picard | infomax
+  mode: "auto"                 # off | auto | on
+  auto_blink_rate_per_min: 15.0
+  method: "fastica"            # or "picard" if installed and you prefer it
   n_components: 0.99
   random_state: 97
   max_iter: 512
@@ -55,20 +54,22 @@ ica:
   save_ica: true
 
 labels:
-  token_map: ["EH", "IH"]     # shorthand; also allow Token1=EH Token2=IH
+  token_map: ["EH", "IH"]      # optional; can be null
 
 metrics:
   erp:
     enabled: true
-    windows:
-      - { name: "MMN_150_250", tmin: 0.15, tmax: 0.25 }
     timeseries: true
+    windows:
+      - { name: "MMN_100_250", tmin: 0.10, tmax: 0.25 }
+      - { name: "P300_250_500", tmin: 0.25, tmax: 0.50 }
+
   tfr:
     enabled: true
-    method: multitaper
+    method: "multitaper"
     tmin: -0.2
     tmax: 0.6
-    fmin: 1
-    fmax: 30
+    fmin: 3.0
+    fmax: 8.0
     baseline: [-0.2, 0.0]
-    baseline_mode: logratio
+    baseline_mode: "logratio"
