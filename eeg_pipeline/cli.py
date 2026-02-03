@@ -18,6 +18,39 @@ from .evoked import compute_evokeds, grand_averages
 from .qc import write_qc_summary
 from .ica_diagnostics import compute_ica_diagnostics, recommend_ica
 from .ica import ICAParams, fit_ica, find_ica_excludes, apply_ica
+
+# Helper for config integration.  When merging configuration values
+# into command‑line arguments we want to honour user‑supplied flags.
+# This helper sets ``args.<field>`` only if the attribute still has
+# its argparse default value.  The ``defaults`` dict is built once in
+# ``main`` and passed through to ``run_full_pipeline``.  See
+# ``build_defaults`` below for how defaults are collected.
+def set_if_default(args, defaults: dict, field: str, value):
+    """Assign a config value to ``args.field`` only if the CLI
+    argument was not explicitly provided.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed arguments namespace.  The field is looked up on this
+        object and replaced if it still equals the parser default.
+    defaults : dict
+        Mapping of argument names to their argparse defaults.  This
+        comes from ``build_defaults`` which iterates over all parser
+        actions.
+    field : str
+        Name of the attribute on ``args`` to inspect and potentially
+        overwrite.
+    value : Any
+        The value from the configuration that should be applied if
+        appropriate.
+    """
+    # If the field wasn't in defaults we can't know the default so bail
+    if field not in defaults:
+        return
+    # Only set the value if the user didn't override it via CLI
+    if getattr(args, field) == defaults[field]:
+        setattr(args, field, value)
 from eeg_pipeline.config import load_config
 
 import re
@@ -195,117 +228,109 @@ def summarize_one_file(args, vhdr_path: Path):
     print(md.head(5).to_string(index=False))
 
 
-def run_full_pipeline(args):
+def run_full_pipeline(args, defaults=None):
+    """Run the full EEG processing pipeline.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed command‑line arguments.
+    defaults : dict or None
+        Mapping from argument names to their argparse defaults.  Used to
+        determine whether CLI arguments were explicitly provided.  If None,
+        an empty dict is used and all config values will be applied.
+    """
+    if defaults is None:
+        defaults = {}
     cfg = load_config(args.config)
 
     # ------------------------------------------------------------------
     # Integrate configuration values into CLI arguments.
     #
-    # The YAML/JSON config provides a flexible way to specify preprocessing,
-    # artifact rejection, ICA and event settings.  To honour user-defined
-    # configuration, we override corresponding argparse attributes here.
-    # Command‑line flags still take precedence if explicitly provided, but
-    # absent values fall back to the config.  Converting values early allows
-    # the remainder of the pipeline to refer to args.* uniformly.
+    # We respect command‑line flags by comparing each argument against its
+    # argparse default via the ``defaults`` dict.  If the CLI did not override
+    # a value (i.e., ``args.<field> == defaults[field]``) then we apply
+    # the corresponding value from the configuration.  Otherwise we leave
+    # the CLI value untouched.
     # ------------------------------------------------------------------
 
     # Paths
-    if getattr(args, "raw_dir", None) is None:
-        args.raw_dir = cfg["paths"]["raw_dir"]
-    if getattr(args, "subject_csv_dir", None) is None:
-        args.subject_csv_dir = cfg["paths"]["subject_csv_dir"]
-    if getattr(args, "out_dir", None) is None:
-        args.out_dir = cfg["paths"]["out_dir"]
+    set_if_default(args, defaults, "raw_dir", cfg["paths"]["raw_dir"])
+    set_if_default(args, defaults, "subject_csv_dir", cfg["paths"]["subject_csv_dir"])
+    set_if_default(args, defaults, "out_dir", cfg["paths"]["out_dir"])
 
     # Channels and preprocessing
-    # Montage / filter settings
-    args.montage = cfg["preprocess"].get("montage", args.montage)
-    args.l_freq = cfg["preprocess"].get("l_freq", args.l_freq)
-    args.h_freq = cfg["preprocess"].get("h_freq", args.h_freq)
-    # Notch is stored as a list of floats in the config
-    args.notch = cfg["preprocess"].get("notch_hz", args.notch)
+    set_if_default(args, defaults, "montage", cfg["preprocess"].get("montage", args.montage))
+    set_if_default(args, defaults, "l_freq", cfg["preprocess"].get("l_freq", args.l_freq))
+    set_if_default(args, defaults, "h_freq", cfg["preprocess"].get("h_freq", args.h_freq))
+    set_if_default(args, defaults, "notch", cfg["preprocess"].get("notch_hz", args.notch))
 
     # Channel selections: EOG, blink proxies and auxiliary channels
-    args.eog_chs = cfg["channels"].get("eog_chs", args.eog_chs or [])
-    args.blink_proxy_chs = cfg["channels"].get("blink_proxy_chs", args.blink_proxy_chs or [])
-    # Drop aux channels using config value (overrides CLI default)
-    args.aux_chs = cfg["channels"].get("drop_aux_chs", args.aux_chs or [])
+    set_if_default(args, defaults, "eog_chs", cfg["channels"].get("eog_chs", args.eog_chs))
+    set_if_default(args, defaults, "blink_proxy_chs", cfg["channels"].get("blink_proxy_chs", args.blink_proxy_chs))
+    set_if_default(args, defaults, "aux_chs", cfg["channels"].get("drop_aux_chs", args.aux_chs))
 
     # Event codes and behavioral keep codes
-    if not args.standard_codes:
-        args.standard_codes = cfg["events"].get("standard_codes", args.standard_codes)
-    if not args.deviant_codes:
-        args.deviant_codes = cfg["events"].get("deviant_codes", args.deviant_codes)
-    # behavioral_keep_codes: if unspecified on CLI, use config; else keep CLI value
-    if not args.behavioral_keep_codes:
-        args.behavioral_keep_codes = cfg["events"].get("behavioral_keep_codes", args.behavioral_keep_codes)
+    set_if_default(args, defaults, "standard_codes", cfg["events"].get("standard_codes", args.standard_codes))
+    set_if_default(args, defaults, "deviant_codes", cfg["events"].get("deviant_codes", args.deviant_codes))
+    set_if_default(args, defaults, "behavioral_keep_codes", cfg["events"].get("behavioral_keep_codes", args.behavioral_keep_codes))
     # gap and auto-drop heuristics
-    if args.drop_eeg_markers_by_gap_s is None:
-        args.drop_eeg_markers_by_gap_s = cfg["events"].get("drop_eeg_markers_by_gap_s", args.drop_eeg_markers_by_gap_s)
-    # auto_drop_to_count can be boolean or int; normalise to int 1/0 for CLI semantics
-    if args.auto_drop_to_count is None:
-        args.auto_drop_to_count = int(bool(cfg["events"].get("auto_drop_to_count", args.auto_drop_to_count)))
+    set_if_default(args, defaults, "drop_eeg_markers_by_gap_s", cfg["events"].get("drop_eeg_markers_by_gap_s", args.drop_eeg_markers_by_gap_s))
+    set_if_default(args, defaults, "auto_drop_to_count", int(bool(cfg["events"].get("auto_drop_to_count", args.auto_drop_to_count))))
 
     # Epoching parameters
-    args.tmin = cfg["epoching"].get("tmin", args.tmin)
-    args.tmax = cfg["epoching"].get("tmax", args.tmax)
-    # baseline is a list of two floats
-    args.baseline = cfg["epoching"].get("baseline", args.baseline)
+    set_if_default(args, defaults, "tmin", cfg["epoching"].get("tmin", args.tmin))
+    set_if_default(args, defaults, "tmax", cfg["epoching"].get("tmax", args.tmax))
+    set_if_default(args, defaults, "baseline", cfg["epoching"].get("baseline", args.baseline))
 
     # Artifact rejection parameters
-    art = cfg["artifacts"]
-    # Test window for artifact detection
-    args.art_test_tmin = art.get("test_window", [args.art_test_tmin, args.art_test_tmax])[0]
-    args.art_test_tmax = art.get("test_window", [args.art_test_tmin, args.art_test_tmax])[1]
-    # Blink detection thresholds
+    art = cfg.get("artifacts", {})
+    win = art.get("test_window", [args.art_test_tmin, args.art_test_tmax])
+    if len(win) >= 2:
+        set_if_default(args, defaults, "art_test_tmin", float(win[0]))
+        set_if_default(args, defaults, "art_test_tmax", float(win[1]))
     blink_cfg = art.get("blink", {})
-    args.blink_threshold_uv = blink_cfg.get("threshold_uv", args.blink_threshold_uv)
-    args.blink_win_ms = blink_cfg.get("win_ms", args.blink_win_ms)
-    args.blink_step_ms = blink_cfg.get("step_ms", args.blink_step_ms)
-    # Voltage thresholds
+    set_if_default(args, defaults, "blink_threshold_uv", blink_cfg.get("threshold_uv", args.blink_threshold_uv))
+    set_if_default(args, defaults, "blink_win_ms", blink_cfg.get("win_ms", args.blink_win_ms))
+    set_if_default(args, defaults, "blink_step_ms", blink_cfg.get("step_ms", args.blink_step_ms))
     volt_cfg = art.get("voltage", {})
-    args.volt_pos_uv = volt_cfg.get("pos_uv", args.volt_pos_uv)
-    args.volt_neg_uv = volt_cfg.get("neg_uv", args.volt_neg_uv)
+    set_if_default(args, defaults, "volt_pos_uv", volt_cfg.get("pos_uv", args.volt_pos_uv))
+    set_if_default(args, defaults, "volt_neg_uv", volt_cfg.get("neg_uv", args.volt_neg_uv))
 
     # ICA controls
-    ica_cfg = cfg["ica"]
-    args.ica = ica_cfg.get("mode", args.ica)
-    args.ica_auto_blink_rate_per_min = ica_cfg.get("auto_blink_rate_per_min", args.ica_auto_blink_rate_per_min)
-    args.ica_method = ica_cfg.get("method", args.ica_method)
-    # n_components may be float or int; store as string so _parse_n_components can convert
-    args.ica_n_components = str(ica_cfg.get("n_components", args.ica_n_components))
-    args.ica_random_state = ica_cfg.get("random_state", args.ica_random_state)
-    args.ica_max_iter = ica_cfg.get("max_iter", args.ica_max_iter)
-    args.ica_fit_l_freq = ica_cfg.get("fit_l_freq", args.ica_fit_l_freq)
-    args.ica_fit_h_freq = ica_cfg.get("fit_h_freq", args.ica_fit_h_freq)
-    args.ica_decim = ica_cfg.get("decim", args.ica_decim)
-    args.ica_corr_thresh = ica_cfg.get("corr_thresh", args.ica_corr_thresh)
-    args.ica_max_exclude = ica_cfg.get("max_exclude", args.ica_max_exclude)
-    args.save_ica = int(bool(ica_cfg.get("save_ica", args.save_ica)))
+    ica_cfg = cfg.get("ica", {})
+    set_if_default(args, defaults, "ica", ica_cfg.get("mode", args.ica))
+    set_if_default(args, defaults, "ica_auto_blink_rate_per_min", ica_cfg.get("auto_blink_rate_per_min", args.ica_auto_blink_rate_per_min))
+    set_if_default(args, defaults, "ica_method", ica_cfg.get("method", args.ica_method))
+    set_if_default(args, defaults, "ica_n_components", str(ica_cfg.get("n_components", args.ica_n_components)))
+    set_if_default(args, defaults, "ica_random_state", ica_cfg.get("random_state", args.ica_random_state))
+    set_if_default(args, defaults, "ica_max_iter", ica_cfg.get("max_iter", args.ica_max_iter))
+    set_if_default(args, defaults, "ica_fit_l_freq", ica_cfg.get("fit_l_freq", args.ica_fit_l_freq))
+    set_if_default(args, defaults, "ica_fit_h_freq", ica_cfg.get("fit_h_freq", args.ica_fit_h_freq))
+    set_if_default(args, defaults, "ica_decim", ica_cfg.get("decim", args.ica_decim))
+    set_if_default(args, defaults, "ica_corr_thresh", ica_cfg.get("corr_thresh", args.ica_corr_thresh))
+    set_if_default(args, defaults, "ica_max_exclude", ica_cfg.get("max_exclude", args.ica_max_exclude))
+    set_if_default(args, defaults, "save_ica", int(bool(ica_cfg.get("save_ica", args.save_ica))))
 
     # Token map: override only if CLI not provided
     if args.token_map is None:
-        # config stores token_map as dict or None; convert to list-of-strings form expected by parse_token_map
-        tm = cfg["labels"].get("token_map", None)
+        tm = cfg.get("labels", {}).get("token_map", None)
         if isinstance(tm, dict):
-            # produce list like ['Token1=EH', 'Token2=IH']
             args.token_map = [f"{k}={v}" for k, v in tm.items()]
         elif isinstance(tm, list):
             args.token_map = tm
         else:
             args.token_map = None
 
-    raw_dir = cfg["paths"]["raw_dir"]
-    subject_csv_dir = cfg["paths"]["subject_csv_dir"]
-    out_dir = cfg["paths"]["out_dir"]
+    # Resolve paths after config/CLI integration.  Use args.* rather than cfg so
+    # that command‑line overrides take effect.
+    raw_dir = Path(args.raw_dir)
+    subject_csv_dir = Path(args.subject_csv_dir)
+    out_dir = Path(args.out_dir)
     prepare_output_dirs(out_dir)
 
-
-    standard_codes = cfg["events"]["standard_codes"]
-    deviant_codes = cfg["events"]["deviant_codes"]
-    behavioral_keep_codes = cfg["events"]["behavioral_keep_codes"]
-
-    token_map = cfg["labels"]["token_map"]  # either None or {"token1": "...", "token2": "..."}
+    # We no longer read standard/dev codes from cfg here because they have been
+    # merged into args.standard_codes and args.deviant_codes via set_if_default above.
 
     d_raw = out_dir / "01_clean_raw"
     d_epo = out_dir / "02_epochs"
@@ -403,6 +428,11 @@ def run_full_pipeline(args):
         )
 
         # ---- ICA: optional fit + apply (before event extraction / epoching) ----
+        # Track whether ICA was run at all.  This allows QC to distinguish
+        # between ICA never being attempted (False), ICA fit but nothing
+        # excluded (True but ica_applied remains False), and ICA fit with
+        # exclusions (True and ica_applied=True).
+        ica_ran = False
         ica_applied = False
         ica_exclude: list[int] = []
         ica_fit_diag: dict = {}
@@ -447,6 +477,8 @@ def run_full_pipeline(args):
                 if ica_obj is None:
                     print(f"[WARN] ICA fit failed for {subj}; continuing without ICA.")
                 else:
+                    # Record that ICA fit ran successfully
+                    ica_ran = True
                     ica_exclude, ica_find_diag = find_ica_excludes(
                         ica_obj,
                         raw,
@@ -666,6 +698,7 @@ def run_full_pipeline(args):
                 "ica_recommended": bool(ica_recommendation.get("ica_recommended", False)),
                 "ica_recommend_reason": ica_recommendation.get("ica_recommend_reason", ""),
                 "ica_mode": args.ica,
+                "ica_ran": bool(ica_ran),
                 "ica_applied": bool(ica_applied),
                 "ica_exclude": " ".join(map(str, ica_exclude)) if ica_exclude else "",
                 **{f"ica_fit_{k}": v for k, v in ica_fit_diag.items()},
@@ -838,12 +871,38 @@ def build_arg_parser():
     return ap
 
 
+# -----------------------------------------------------------------------------
+# Default handling helpers
+#
+# To allow command‑line flags to override YAML/JSON configuration values
+# cleanly, we record the argparse defaults once up front.  See
+# ``run_full_pipeline`` for how these defaults are used together with the
+# ``set_if_default`` helper.
+def build_defaults(parser: argparse.ArgumentParser) -> dict:
+    """Return a mapping from argument name to its argparse default.
+
+    The ``defaults`` dict allows us to detect whether the user set a flag
+    explicitly on the command line (in which case ``args.<field>`` will
+    differ from the default) or left it unspecified (in which case we can
+    safely override it with the value from the config file).
+    """
+    defaults: dict = {}
+    for action in parser._actions:
+        if action.dest != "help":
+            defaults[action.dest] = action.default
+    return defaults
+
+
 def main(argv=None):
     ap = build_arg_parser()
+    # Collect defaults before parsing arguments.  These defaults let us
+    # distinguish CLI‑provided arguments from those left unspecified.
+    defaults = build_defaults(ap)
     args = ap.parse_args(argv)
 
     if args.summarize_one_file:
         summarize_one_file(args, Path(args.summarize_one_file))
         return
 
-    run_full_pipeline(args)
+    # Pass defaults through so run_full_pipeline can honour CLI overrides
+    run_full_pipeline(args, defaults=defaults)
