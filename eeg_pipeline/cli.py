@@ -473,22 +473,23 @@ def run_full_pipeline(args, defaults=None):
                     decim=args.ica_decim,
                 )
 
-                ica_obj, ica_fit_diag = fit_ica(raw, ica_params)
-                if ica_obj is None:
-                    print(f"[WARN] ICA fit failed for {subj}; continuing without ICA.")
-                else:
-                    # Record that ICA fit ran successfully
-                    ica_ran = True
-                    ica_exclude, ica_find_diag = find_ica_excludes(
-                        ica_obj,
-                        raw,
-                        eog_chs=args.eog_chs,
-                        proxy_chs=args.blink_proxy_chs,
-                        corr_thresh=args.ica_corr_thresh,
-                        max_exclude=args.ica_max_exclude,
-                    )
+            ica_obj, ica_fit_diag = fit_ica(raw, ica_params)
+            if ica_obj is None:
+                print(f"[WARN] ICA fit failed for {subj}; continuing without ICA.")
+            else:
+                # Record that ICA fit ran successfully
+                ica_ran = True
 
-                # Apply ICA cleaning if any components were marked for exclusion
+                ica_exclude, ica_find_diag = find_ica_excludes(
+                    ica_obj,
+                    raw,
+                    eog_chs=args.eog_chs,
+                    proxy_chs=args.blink_proxy_chs,
+                    corr_thresh=args.ica_corr_thresh,
+                    max_exclude=args.ica_max_exclude,
+                )
+
+                # Apply ICA if there are components to exclude
                 if len(ica_exclude) > 0:
                     raw = apply_ica(raw, ica_obj, ica_exclude)
                     ica_applied = True
