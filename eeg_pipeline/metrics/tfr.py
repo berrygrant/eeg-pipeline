@@ -72,6 +72,7 @@ def compute_tfr_metrics(
     tmax: float,
     conditions: Sequence[str] = ("Standard", "Deviant"),
     params: TFRParams = TFRParams(),
+    time_decim: int = 1,
 ) -> pd.DataFrame:
     """
     Computes per condition:
@@ -107,10 +108,6 @@ def compute_tfr_metrics(
 
     # Work on cropped/picked copy (requires non-empty + preload)
     ep = epochs.copy().crop(tmin=tmin, tmax=tmax).pick(channels)
-
-    # Baseline on epochs before TF (common workflow)
-    if params.baseline is not None:
-        ep.apply_baseline(params.baseline)
 
     freqs = np.arange(params.fmin, params.fmax + params.fstep, params.fstep, dtype=float)
 
@@ -183,9 +180,11 @@ def compute_tfr_metrics(
         induced.data = power_total.data - tfr_evoked.data
 
         # Flatten to rows
+        t_step = max(1, int(time_decim))
         for ch_i, ch in enumerate(power_total.ch_names):
             for f_i, f in enumerate(power_total.freqs):
-                for t_i, tt in enumerate(power_total.times):
+                for t_i in range(0, len(power_total.times), t_step):
+                    tt = power_total.times[t_i]
                     rows.append(
                         dict(
                             subject=subject,

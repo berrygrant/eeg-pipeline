@@ -11,6 +11,7 @@ def read_raw_preprocess(
     montage: str,
     eog_chs: list[str],
     aux_chs: list[str],
+    reref: str,
     l_freq: float,
     h_freq: float,
     notch: list[float] | None,
@@ -30,7 +31,13 @@ def read_raw_preprocess(
         eog_map = {ch: "eog" for ch in eog_chs if ch in raw.ch_names}
         if eog_map:
             raw.set_channel_types(eog_map)
-    raw.set_eeg_reference("average", projection=False)
+    reref_mode = str(reref).strip().lower()
+    if reref_mode in {"average", "avg"}:
+        raw.set_eeg_reference("average", projection=False)
+    elif reref_mode in {"none", "no"}:
+        pass
+    else:
+        raise ValueError(f"Unsupported reref mode: {reref!r} (use 'average' or 'none')")
 
     if notch:
         raw.notch_filter(list(notch))

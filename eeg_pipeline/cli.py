@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -54,8 +55,9 @@ def set_if_default(args, defaults: dict, field: str, value):
 from eeg_pipeline.config import load_config
 
 # Metrics (ERP + TFR)
-from eeg_pipeline.metrics import compute_erp_metrics, compute_tfr_metrics
+from eeg_pipeline.metrics import compute_erp_metrics, compute_tfr_metrics, load_epochs
 from eeg_pipeline.metrics.erp import ERPWindow
+from eeg_pipeline.metrics.erp_timeseries import ERPTimeSeriesParams, compute_erp_timeseries
 from eeg_pipeline.metrics.tfr import TFRParams
 
 import re
@@ -144,6 +146,7 @@ def summarize_one_file(args, vhdr_path: Path):
         montage=args.montage,
         eog_chs=args.eog_chs,
         aux_chs=args.aux_chs,
+        reref=args.reref,
         l_freq=args.l_freq,
         h_freq=args.h_freq,
         notch=args.notch,
@@ -329,25 +332,11 @@ def detect_trigger_bursts(markers_pos: np.ndarray, sfreq: float,
     }
 
 
-def run_full_pipeline(args, defaults=None):
-    """Run the full EEG processing pipeline.
-
-    Parameters
-    ----------
-    args : argparse.Namespace
-        Parsed command-line arguments.
-    defaults : dict or None
-        Mapping from argument names to their argparse defaults.  Used to
-        determine whether CLI arguments were explicitly provided.  If None,
-        an empty dict is used and all config values will be applied.
-    """
+def apply_config(args, defaults=None):
+    """Load config and apply values to args (respecting CLI overrides)."""
     if defaults is None:
         defaults = {}
     cfg = load_config(args.config)
-
-    # ------------------------------------------------------------------
-    # Integrate configuration values into CLI arguments.
-    # ------------------------------------------------------------------
 
     # Paths
     set_if_default(args, defaults, "raw_dir", cfg["paths"]["raw_dir"])
@@ -356,6 +345,7 @@ def run_full_pipeline(args, defaults=None):
 
     # Channels and preprocessing
     set_if_default(args, defaults, "montage", cfg["preprocess"].get("montage", args.montage))
+    set_if_default(args, defaults, "reref", cfg["preprocess"].get("reref", args.reref))
     set_if_default(args, defaults, "l_freq", cfg["preprocess"].get("l_freq", args.l_freq))
     set_if_default(args, defaults, "h_freq", cfg["preprocess"].get("h_freq", args.h_freq))
     set_if_default(args, defaults, "notch", cfg["preprocess"].get("notch_hz", args.notch))
@@ -420,17 +410,36 @@ def run_full_pipeline(args, defaults=None):
 
     # Metrics
     metrics_cfg = cfg.get("metrics", {})
-    set_if_default(args, defaults, "metrics", int(bool(metrics_cfg.get("enabled", args.metrics))))
+    erp_cfg = metrics_cfg.get("erp", {}) if isinstance(metrics_cfg.get("erp", {}), dict) else {}
+    tfr_cfg = metrics_cfg.get("tfr", {}) if isinstance(metrics_cfg.get("tfr", {}), dict) else {}
+
+    erp_enabled = bool(erp_cfg.get("enabled", True))
+    tfr_enabled = bool(tfr_cfg.get("enabled", False))
+
+    if "enabled" in metrics_cfg:
+        metrics_enabled = bool(metrics_cfg.get("enabled"))
+    else:
+        metrics_enabled = bool(erp_enabled or tfr_enabled)
+    set_if_default(args, defaults, "metrics", int(metrics_enabled))
+
+    # Stash per‑modality enable flags for later gating (no CLI flags)
+    args.metrics_erp_enabled = erp_enabled
+    args.metrics_tfr_enabled = tfr_enabled
+    args.metrics_erp_timeseries = bool(erp_cfg.get("timeseries", False))
 
     # Only override these from config when the user didn't specify them
     if args.metrics_channels is None:
-        chs = metrics_cfg.get("channels", None)
+        chs = erp_cfg.get("channels", None)
+        if chs is None:
+            chs = metrics_cfg.get("channels", None)
         if isinstance(chs, (list, tuple)) and len(chs):
             args.metrics_channels = list(map(str, chs))
 
     # ERP windows: list[dict] (preferred) or list[list/tuple]
     if args.erp_window is None:
-        wins = metrics_cfg.get("erp_windows", None)
+        wins = erp_cfg.get("windows", None)
+        if wins is None:
+            wins = metrics_cfg.get("erp_windows", None)
         if isinstance(wins, list) and len(wins):
             parsed = []
             for w in wins:
@@ -444,19 +453,31 @@ def run_full_pipeline(args, defaults=None):
             if parsed:
                 args.erp_window = parsed
 
-    set_if_default(args, defaults, "compute_mmn", int(bool(metrics_cfg.get("compute_mmn", args.compute_mmn))))
+    set_if_default(
+        args,
+        defaults,
+        "compute_mmn",
+        int(bool(erp_cfg.get("compute_mmn", metrics_cfg.get("compute_mmn", args.compute_mmn)))),
+    )
 
-    tfr_cfg = metrics_cfg.get("tfr", {})
+    set_if_default(args, defaults, "tfr_tmin", float(tfr_cfg.get("tmin", args.tfr_tmin)))
+    set_if_default(args, defaults, "tfr_tmax", float(tfr_cfg.get("tmax", args.tfr_tmax)))
     set_if_default(args, defaults, "tfr_fmin", float(tfr_cfg.get("fmin", args.tfr_fmin)))
     set_if_default(args, defaults, "tfr_fmax", float(tfr_cfg.get("fmax", args.tfr_fmax)))
     set_if_default(args, defaults, "tfr_fstep", float(tfr_cfg.get("fstep", args.tfr_fstep)))
     set_if_default(args, defaults, "tfr_method", tfr_cfg.get("method", args.tfr_method))
     set_if_default(args, defaults, "tfr_n_cycles_div", float(tfr_cfg.get("n_cycles_div", args.tfr_n_cycles_div)))
     set_if_default(args, defaults, "tfr_decim", int(tfr_cfg.get("decim", args.tfr_decim)))
+    set_if_default(args, defaults, "tfr_time_decim", int(tfr_cfg.get("time_decim", args.tfr_time_decim)))
     b = tfr_cfg.get("baseline", [args.tfr_baseline[0], args.tfr_baseline[1]])
     if isinstance(b, (list, tuple)) and len(b) >= 2:
         set_if_default(args, defaults, "tfr_baseline", [float(b[0]), float(b[1])])
-    set_if_default(args, defaults, "tfr_baseline_mode", tfr_cfg.get("mode", args.tfr_baseline_mode))
+    set_if_default(
+        args,
+        defaults,
+        "tfr_baseline_mode",
+        tfr_cfg.get("baseline_mode", tfr_cfg.get("mode", args.tfr_baseline_mode)),
+    )
 
     # Token map
     if args.token_map is None:
@@ -467,6 +488,26 @@ def run_full_pipeline(args, defaults=None):
             args.token_map = tm
         else:
             args.token_map = None
+
+    return cfg
+
+
+def run_full_pipeline(args, defaults=None, cfg=None):
+    """Run the full EEG processing pipeline.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed command-line arguments.
+    defaults : dict or None
+        Mapping from argument names to their argparse defaults.  Used to
+        determine whether CLI arguments were explicitly provided.  If None,
+        an empty dict is used and all config values will be applied.
+    """
+    if defaults is None:
+        defaults = {}
+    if cfg is None:
+        cfg = apply_config(args, defaults)
 
     raw_dir = Path(args.raw_dir)
     subject_csv_dir = Path(args.subject_csv_dir)
@@ -488,9 +529,6 @@ def run_full_pipeline(args, defaults=None):
 
     token_map = parse_token_map(args.token_map)
 
-    erp_windows = _parse_erp_window_specs(getattr(args, 'erp_window', None))
-    tfr_windows = _parse_tfr_window_specs(getattr(args, 'tfr_window', None))
-
     rows: list[dict] = []
     evokeds_std = []
     evokeds_dev = []
@@ -498,6 +536,7 @@ def run_full_pipeline(args, defaults=None):
     # Metrics outputs collected across subjects
     erp_metrics_all: list[pd.DataFrame] = []
     tfr_metrics_all: list[pd.DataFrame] = []
+    erp_timeseries_all: list[pd.DataFrame] = []
 
     vhdr_files = sorted(raw_dir.glob("*.vhdr"))
     if not vhdr_files:
@@ -546,7 +585,7 @@ def run_full_pipeline(args, defaults=None):
                         "raw_file": str(vhdr.name),
                         "subject_csv": subject_csv_name,
                         "subject_csv_path": subject_csv_path,
-                        "subject_csv_exists": subject_csv_exists
+                        "subject_csv_exists": subject_csv_exists,
                         **burst_qc,
                         "status": "SKIP_MISSING_VMRK",
                         "error": msg,
@@ -562,16 +601,16 @@ def run_full_pipeline(args, defaults=None):
                 raise FileNotFoundError(msg)
             print("[WARN]", msg, "-> skipping")
             rows.append(
-                {
-                    "subject": subj,
-                    "raw_file": str(vhdr.name),
-                    "subject_csv": subject_csv_name,
+                    {
+                        "subject": subj,
+                        "raw_file": str(vhdr.name),
+                        "subject_csv": subject_csv_name,
                         "subject_csv_path": subject_csv_path,
-                        "subject_csv_exists": subject_csv_exists
-                    **burst_qc,
-                    "status": "SKIP_BV_LINK_MISMATCH",
-                    "error": msg,
-                }
+                        "subject_csv_exists": subject_csv_exists,
+                        **burst_qc,
+                        "status": "SKIP_BV_LINK_MISMATCH",
+                        "error": msg,
+                    }
             )
             continue
 
@@ -580,6 +619,7 @@ def run_full_pipeline(args, defaults=None):
             montage=args.montage,
             eog_chs=args.eog_chs,
             aux_chs=args.aux_chs,
+            reref=args.reref,
             l_freq=args.l_freq,
             h_freq=args.h_freq,
             notch=args.notch,
@@ -680,16 +720,16 @@ def run_full_pipeline(args, defaults=None):
                 raise FileNotFoundError(msg)
             print("[WARN]", msg, "-> skipping")
             rows.append(
-                {
-                    "subject": subj,
-                    "raw_file": str(vhdr.name),
-                    "subject_csv": subject_csv_name,
+                    {
+                        "subject": subj,
+                        "raw_file": str(vhdr.name),
+                        "subject_csv": subject_csv_name,
                         "subject_csv_path": subject_csv_path,
-                        "subject_csv_exists": subject_csv_exists
-                    **burst_qc,
-                    "status": "SKIP_MISSING_SUBJECT_CSV",
-                    "error": msg,
-                }
+                        "subject_csv_exists": subject_csv_exists,
+                        **burst_qc,
+                        "status": "SKIP_MISSING_SUBJECT_CSV",
+                        "error": msg,
+                    }
             )
             continue
 
@@ -708,16 +748,16 @@ def run_full_pipeline(args, defaults=None):
             msg = f"Alignment failed for {subj}: {e}"
             print("[WARN]", msg, "-> skipping")
             rows.append(
-                {
-                    "subject": subj,
-                    "raw_file": str(vhdr.name),
-                    "subject_csv": subject_csv_name,
+                    {
+                        "subject": subj,
+                        "raw_file": str(vhdr.name),
+                        "subject_csv": subject_csv_name,
                         "subject_csv_path": subject_csv_path,
-                        "subject_csv_exists": subject_csv_exists
-                    **burst_qc,
-                    "status": "SKIP_ALIGNMENT_FAILED",
-                    "error": msg,
-                }
+                        "subject_csv_exists": subject_csv_exists,
+                        **burst_qc,
+                        "status": "SKIP_ALIGNMENT_FAILED",
+                        "error": msg,
+                    }
             )
             continue
 
@@ -796,16 +836,16 @@ def run_full_pipeline(args, defaults=None):
             msg = "All epochs dropped after artifact rejection; skipping evoked computation."
             print("[WARN]", msg)
             rows.append(
-                {
-                    "subject": subj,
-                    "raw_file": str(vhdr.name),
-                    "subject_csv": subject_csv_name,
+                    {
+                        "subject": subj,
+                        "raw_file": str(vhdr.name),
+                        "subject_csv": subject_csv_name,
                         "subject_csv_path": subject_csv_path,
-                        "subject_csv_exists": subject_csv_exists
-                    **diag,
-                    **burst_qc,
-                    "n_epochs_before_artifact": int(n_before),
-                    "n_epochs_final": 0,
+                        "subject_csv_exists": subject_csv_exists,
+                        **diag,
+                        **burst_qc,
+                        "n_epochs_before_artifact": int(n_before),
+                        "n_epochs_final": 0,
                     "status": "SKIP_EMPTY_EPOCHS",
                     "error": msg,
                 }
@@ -819,16 +859,16 @@ def run_full_pipeline(args, defaults=None):
             msg = f"Empty condition after rejection (Standard={n_std}, Deviant={n_dev}); skipping evokeds."
             print("[WARN]", msg)
             rows.append(
-                {
-                    "subject": subj,
-                    "raw_file": str(vhdr.name),
-                    "subject_csv": subject_csv_name,
+                    {
+                        "subject": subj,
+                        "raw_file": str(vhdr.name),
+                        "subject_csv": subject_csv_name,
                         "subject_csv_path": subject_csv_path,
-                        "subject_csv_exists": subject_csv_exists
-                    **diag,
-                    **burst_qc,
-                    "n_epochs_before_artifact": int(n_before),
-                    "n_epochs_final": int(n_after),
+                        "subject_csv_exists": subject_csv_exists,
+                        **diag,
+                        **burst_qc,
+                        "n_epochs_before_artifact": int(n_before),
+                        "n_epochs_final": int(n_after),
                     "n_standard_final": int(n_std),
                     "n_deviant_final": int(n_dev),
                     "status": "SKIP_EMPTY_CONDITION",
@@ -845,61 +885,97 @@ def run_full_pipeline(args, defaults=None):
         # Metrics (ERP + TFR)
         # ------------------------------------------------------------------
         if int(getattr(args, "metrics", 0)):
-            metrics_dir = out_dir / "05_metrics"
-            metrics_dir.mkdir(parents=True, exist_ok=True)
+            do_erp = bool(getattr(args, "metrics_erp_enabled", True))
+            do_tfr = bool(getattr(args, "metrics_tfr_enabled", True))
 
-            # ERP windows
-            if getattr(args, "erp_window", None):
-                erp_windows = [
-                    ERPWindow(name=w[0], tmin=float(w[1]), tmax=float(w[2]))
-                    for w in args.erp_window
-                ]
-            else:
-                erp_windows = [ERPWindow("MMN_150_250", 0.15, 0.25)]
+            if do_erp or do_tfr:
+                metrics_dir = out_dir / "05_metrics"
+                metrics_dir.mkdir(parents=True, exist_ok=True)
 
             channels = getattr(args, "metrics_channels", None) or ["Fp1", "Fz", "Cz"]
 
-            try:
-                df_erp = compute_erp_metrics(
-                    epochs,
-                    subject=subj,
-                    channels=channels,
-                    conditions=["Standard", "Deviant"],
-                    windows=erp_windows,
-                    compute_mmn=bool(getattr(args, "compute_mmn", 1)),
-                )
-                df_erp.to_csv(metrics_dir / f"{subj}_erp_metrics.csv", index=False)
-                erp_metrics_all.append(df_erp)
-            except Exception as e:
-                print(f"[WARN] ERP metrics failed for {subj}: {e}")
+            if do_erp:
+                # ERP windows
+                if getattr(args, "erp_window", None):
+                    erp_windows = [
+                        ERPWindow(name=w[0], tmin=float(w[1]), tmax=float(w[2]))
+                        for w in args.erp_window
+                    ]
+                else:
+                    erp_windows = [ERPWindow("MMN_150_250", 0.15, 0.25)]
 
-            try:
-                tfr_params = TFRParams(
-                    fmin=float(getattr(args, "tfr_fmin", 1.0)),
-                    fmax=float(getattr(args, "tfr_fmax", 30.0)),
-                    fstep=float(getattr(args, "tfr_fstep", 1.0)),
-                    method=str(getattr(args, "tfr_method", "multitaper")),
-                    n_cycles_div=float(getattr(args, "tfr_n_cycles_div", 10.0)),
-                    decim=int(getattr(args, "tfr_decim", 1)),
-                    baseline=(
-                        float(getattr(args, "tfr_baseline", [-0.1, 0.0])[0]),
-                        float(getattr(args, "tfr_baseline", [-0.1, 0.0])[1]),
-                    ),
-                    mode=str(getattr(args, "tfr_baseline_mode", "logratio")),
-                )
-                df_tfr = compute_tfr_metrics(
-                    epochs,
-                    subject=subj,
-                    channels=channels,
-                    conditions=["Standard", "Deviant"],
-                    params=tfr_params,
-                    tmin=float(getattr(args, "tfr_tmin", -0.2)),
-                    tmax=float(getattr(args, "tfr_tmax", 0.6)),
-                )
-                df_tfr.to_csv(metrics_dir / f"{subj}_tfr_metrics.csv", index=False)
-                tfr_metrics_all.append(df_tfr)
-            except Exception as e:
-                print(f"[WARN] TFR metrics failed for {subj}: {e}")
+                try:
+                    df_erp = compute_erp_metrics(
+                        epochs,
+                        subject=subj,
+                        channels=channels,
+                        conditions=["Standard", "Deviant"],
+                        windows=erp_windows,
+                        compute_mmn=bool(getattr(args, "compute_mmn", 1)),
+                    )
+                    df_erp.to_csv(metrics_dir / f"{subj}_erp_metrics.csv", index=False)
+                    erp_metrics_all.append(df_erp)
+                except Exception as e:
+                    print(f"[WARN] ERP metrics failed for {subj}: {e}")
+
+                if bool(getattr(args, "metrics_erp_timeseries", False)):
+                    try:
+                        if args.metrics_channels is None:
+                            eeg_picks = mne.pick_types(epochs.info, eeg=True, eog=False)
+                            ts_channels = [epochs.ch_names[i] for i in eeg_picks]
+                        else:
+                            ts_channels = channels
+
+                        ts_params = ERPTimeSeriesParams(
+                            tmin=float(args.tmin),
+                            tmax=float(args.tmax),
+                            baseline=(float(args.baseline[0]), float(args.baseline[1])),
+                            decim=1,
+                        )
+                        df_ts = compute_erp_timeseries(
+                            epochs,
+                            subject=subj,
+                            channels=ts_channels,
+                            params=ts_params,
+                            conditions=["Standard", "Deviant"],
+                            include_difference_wave=False,
+                        )
+                        ts_dir = metrics_dir / "erp_timeseries"
+                        ts_dir.mkdir(parents=True, exist_ok=True)
+                        df_ts.to_parquet(ts_dir / f\"{subj}_erp_timeseries.parquet\", index=False)
+                        erp_timeseries_all.append(df_ts)
+                    except Exception as e:
+                        print(f\"[WARN] ERP timeseries failed for {subj}: {e}\")
+
+            if do_tfr:
+                try:
+                    tfr_params = TFRParams(
+                        fmin=float(getattr(args, "tfr_fmin", 1.0)),
+                        fmax=float(getattr(args, "tfr_fmax", 30.0)),
+                        fstep=float(getattr(args, "tfr_fstep", 1.0)),
+                        method=str(getattr(args, "tfr_method", "multitaper")),
+                        n_cycles_div=float(getattr(args, "tfr_n_cycles_div", 10.0)),
+                        decim=int(getattr(args, "tfr_decim", 1)),
+                        baseline=(
+                            float(getattr(args, "tfr_baseline", [-0.1, 0.0])[0]),
+                            float(getattr(args, "tfr_baseline", [-0.1, 0.0])[1]),
+                        ),
+                        mode=str(getattr(args, "tfr_baseline_mode", "logratio")),
+                    )
+                    df_tfr = compute_tfr_metrics(
+                        epochs,
+                        subject=subj,
+                        channels=channels,
+                        conditions=["Standard", "Deviant"],
+                        params=tfr_params,
+                        tmin=float(getattr(args, "tfr_tmin", -0.2)),
+                        tmax=float(getattr(args, "tfr_tmax", 0.6)),
+                        time_decim=int(getattr(args, "tfr_time_decim", 1)),
+                    )
+                    df_tfr.to_csv(metrics_dir / f"{subj}_tfr_metrics.csv", index=False)
+                    tfr_metrics_all.append(df_tfr)
+                except Exception as e:
+                    print(f"[WARN] TFR metrics failed for {subj}: {e}")
 
         ica_recommendation = recommend_ica(
             epoch_reject_rate=epoch_reject_rate,
@@ -917,45 +993,6 @@ def run_full_pipeline(args, defaults=None):
         evo_std, evo_dev = compute_evokeds(epochs)
         evo_std.save(d_evk / f"{subj}_Standard-ave.fif", overwrite=True)
         evo_dev.save(d_evk / f"{subj}_Deviant-ave.fif", overwrite=True)
-
-        # -------------------------
-        # Metrics (ERP + TFR)
-        # -------------------------
-        if int(getattr(args, "run_metrics", 1)) == 1:
-            metric_picks = _resolve_metric_picks(epochs, getattr(args, "metric_picks", None))
-            # ERP
-            for win_name, tmin_w, tmax_w in erp_windows:
-                try:
-                    df_erp = compute_erp_metrics(
-                        epochs,
-                        tmin=tmin_w,
-                        tmax=tmax_w,
-                        baseline=(None, 0),
-                        picks=metric_picks,
-                    ).reset_index()
-                    df_erp.insert(0, "subject", subj)
-                    df_erp.insert(1, "window", win_name)
-                    _write_metrics_df(df_erp, (out_dir / "05_metrics" / "erp" / f"{subj}_erp_{win_name}.csv"))
-                except Exception as e:
-                    print(f"[WARN] ERP metrics failed for {subj} window={win_name}: {e}")
-
-            # TFR (requires epochs)
-            for win_name, tmin_w, tmax_w, fmin, fmax in tfr_windows:
-                try:
-                    df_tfr = compute_tfr_metrics(
-                        epochs,
-                        tmin=tmin_w,
-                        tmax=tmax_w,
-                        fmin=fmin,
-                        fmax=fmax,
-                        baseline=(None, 0),
-                        picks=metric_picks,
-                    ).reset_index()
-                    df_tfr.insert(0, "subject", subj)
-                    df_tfr.insert(1, "window", win_name)
-                    _write_metrics_df(df_tfr, (out_dir / "05_metrics" / "tfr" / f"{subj}_tfr_{win_name}.csv"))
-                except Exception as e:
-                    print(f"[WARN] TFR metrics failed for {subj} window={win_name}: {e}")
 
         evokeds_std.append(evo_std)
         evokeds_dev.append(evo_dev)
@@ -1028,6 +1065,10 @@ def run_full_pipeline(args, defaults=None):
             pd.concat(erp_metrics_all, ignore_index=True).to_csv(
                 metrics_dir / "erp_metrics_all.csv", index=False
             )
+        if erp_timeseries_all:
+            pd.concat(erp_timeseries_all, ignore_index=True).to_parquet(
+                metrics_dir / "erp_timeseries_all.parquet", index=False
+            )
         if tfr_metrics_all:
             pd.concat(tfr_metrics_all, ignore_index=True).to_csv(
                 metrics_dir / "tfr_metrics_all.csv", index=False
@@ -1047,6 +1088,10 @@ def run_full_pipeline(args, defaults=None):
         pd.concat(erp_metrics_all, ignore_index=True).to_csv(
             metrics_dir / "erp_metrics_all.csv", index=False
         )
+    if erp_timeseries_all:
+        pd.concat(erp_timeseries_all, ignore_index=True).to_parquet(
+            metrics_dir / "erp_timeseries_all.parquet", index=False
+        )
     if tfr_metrics_all:
         pd.concat(tfr_metrics_all, ignore_index=True).to_csv(
             metrics_dir / "tfr_metrics_all.csv", index=False
@@ -1054,6 +1099,205 @@ def run_full_pipeline(args, defaults=None):
 
     print(f"\nSaved QC summary -> {out_dir / 'qc_summary.csv'}")
     print(f"Saved grand averages -> {d_ga}")
+
+
+def _subject_from_epochs_path(p: Path) -> str:
+    stem = p.stem
+    if stem.endswith("-epo"):
+        stem = stem[:-4]
+    return stem
+
+
+def run_metrics_only(args):
+    """Compute ERP/TFR metrics from existing epochs in out_dir/02_epochs."""
+    out_dir = Path(args.out_dir)
+    epochs_dir = out_dir / "02_epochs"
+    metrics_dir = out_dir / "05_metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+
+    files = sorted(epochs_dir.glob("*-epo.fif"))
+    if not files:
+        raise RuntimeError(f"No epochs found in {epochs_dir} (expected *-epo.fif).")
+
+    do_erp = bool(getattr(args, "metrics_erp_enabled", True))
+    do_tfr = bool(getattr(args, "metrics_tfr_enabled", True))
+
+    if not (do_erp or do_tfr):
+        print("[WARN] Metrics requested but both ERP and TFR are disabled in config.")
+        return
+
+    channels = getattr(args, "metrics_channels", None) or ["Fp1", "Fz", "Cz"]
+
+    erp_windows = None
+    if do_erp:
+        if getattr(args, "erp_window", None):
+            erp_windows = [
+                ERPWindow(name=w[0], tmin=float(w[1]), tmax=float(w[2]))
+                for w in args.erp_window
+            ]
+        else:
+            erp_windows = [ERPWindow("MMN_150_250", 0.15, 0.25)]
+
+    tfr_params = None
+    if do_tfr:
+        tfr_params = TFRParams(
+            fmin=float(getattr(args, "tfr_fmin", 1.0)),
+            fmax=float(getattr(args, "tfr_fmax", 30.0)),
+            fstep=float(getattr(args, "tfr_fstep", 1.0)),
+            method=str(getattr(args, "tfr_method", "multitaper")),
+            n_cycles_div=float(getattr(args, "tfr_n_cycles_div", 10.0)),
+            decim=int(getattr(args, "tfr_decim", 1)),
+            baseline=(
+                float(getattr(args, "tfr_baseline", [-0.1, 0.0])[0]),
+                float(getattr(args, "tfr_baseline", [-0.1, 0.0])[1]),
+            ),
+            mode=str(getattr(args, "tfr_baseline_mode", "logratio")),
+        )
+
+    erp_metrics_all: list[pd.DataFrame] = []
+    tfr_metrics_all: list[pd.DataFrame] = []
+    erp_timeseries_all: list[pd.DataFrame] = []
+
+    for p in files:
+        subj = _subject_from_epochs_path(p)
+        loaded = load_epochs(p)
+        epochs = loaded.epochs
+
+        if do_erp and erp_windows is not None:
+            try:
+                df_erp = compute_erp_metrics(
+                    epochs,
+                    subject=subj,
+                    channels=channels,
+                    conditions=["Standard", "Deviant"],
+                    windows=erp_windows,
+                    compute_mmn=bool(getattr(args, "compute_mmn", 1)),
+                )
+                df_erp.to_csv(metrics_dir / f"{subj}_erp_metrics.csv", index=False)
+                erp_metrics_all.append(df_erp)
+            except Exception as e:
+                print(f"[WARN] ERP metrics failed for {subj}: {e}")
+
+        if bool(getattr(args, "metrics_erp_timeseries", False)):
+            try:
+                if args.metrics_channels is None:
+                    eeg_picks = mne.pick_types(epochs.info, eeg=True, eog=False)
+                    ts_channels = [epochs.ch_names[i] for i in eeg_picks]
+                else:
+                    ts_channels = channels
+
+                ts_params = ERPTimeSeriesParams(
+                    tmin=float(args.tmin),
+                    tmax=float(args.tmax),
+                    baseline=(float(args.baseline[0]), float(args.baseline[1])),
+                    decim=1,
+                )
+                df_ts = compute_erp_timeseries(
+                    epochs,
+                    subject=subj,
+                    channels=ts_channels,
+                    params=ts_params,
+                    conditions=["Standard", "Deviant"],
+                    include_difference_wave=False,
+                )
+                ts_dir = metrics_dir / "erp_timeseries"
+                ts_dir.mkdir(parents=True, exist_ok=True)
+                df_ts.to_parquet(ts_dir / f"{subj}_erp_timeseries.parquet", index=False)
+                erp_timeseries_all.append(df_ts)
+            except Exception as e:
+                print(f"[WARN] ERP timeseries failed for {subj}: {e}")
+
+        if do_tfr and tfr_params is not None:
+            try:
+                df_tfr = compute_tfr_metrics(
+                    epochs,
+                    subject=subj,
+                    channels=channels,
+                    conditions=["Standard", "Deviant"],
+                    params=tfr_params,
+                    tmin=float(getattr(args, "tfr_tmin", -0.2)),
+                    tmax=float(getattr(args, "tfr_tmax", 0.6)),
+                    time_decim=int(getattr(args, "tfr_time_decim", 1)),
+                )
+                df_tfr.to_csv(metrics_dir / f"{subj}_tfr_metrics.csv", index=False)
+                tfr_metrics_all.append(df_tfr)
+            except Exception as e:
+                print(f"[WARN] TFR metrics failed for {subj}: {e}")
+
+    if erp_metrics_all:
+        pd.concat(erp_metrics_all, ignore_index=True).to_csv(
+            metrics_dir / "erp_metrics_all.csv", index=False
+        )
+    if erp_timeseries_all:
+        pd.concat(erp_timeseries_all, ignore_index=True).to_parquet(
+            metrics_dir / "erp_timeseries_all.parquet", index=False
+        )
+    if tfr_metrics_all:
+        pd.concat(tfr_metrics_all, ignore_index=True).to_csv(
+            metrics_dir / "tfr_metrics_all.csv", index=False
+        )
+
+
+def _resolve_figure_time_window(args) -> tuple[float, float]:
+    if args.figure_time_window is not None:
+        return float(args.figure_time_window[0]), float(args.figure_time_window[1])
+    if getattr(args, "erp_window", None):
+        w = args.erp_window[0]
+        return float(w[1]), float(w[2])
+    return float(args.tmin), float(args.tmax)
+
+
+def _resolve_figure_freq_band(args) -> tuple[float, float] | None:
+    if args.figure_freq_band is not None:
+        return float(args.figure_freq_band[0]), float(args.figure_freq_band[1])
+    return float(getattr(args, "tfr_fmin", 1.0)), float(getattr(args, "tfr_fmax", 30.0))
+
+
+def _prompt_yes_no(msg: str) -> bool:
+    if not sys.stdin.isatty():
+        return False
+    resp = input(msg).strip().lower()
+    return resp in {"y", "yes"}
+
+
+def run_plot_figures(args):
+    from eeg_pipeline.viz import paper_figures
+
+    out_dir = Path(args.out_dir)
+    metrics_dir = out_dir / "05_metrics"
+    fig_dir = Path(args.figures_out_dir) if args.figures_out_dir else out_dir / "figures"
+
+    erp_parquet = metrics_dir / "erp_timeseries_all.parquet"
+    tfr_file = metrics_dir / "tfr_metrics_all.csv"
+
+    erp_exists = erp_parquet.exists()
+    tfr_exists = tfr_file.exists()
+
+    if not erp_exists and not tfr_exists:
+        raise FileNotFoundError(
+            f"No metrics found for plotting. Expected {erp_parquet} and/or {tfr_file}."
+        )
+
+    time_window = _resolve_figure_time_window(args)
+    freq_band = _resolve_figure_freq_band(args) if tfr_exists else None
+
+    argv = [
+        "--out_dir", str(fig_dir),
+        "--time_window", str(time_window[0]), str(time_window[1]),
+    ]
+    if erp_exists:
+        argv += ["--erp_parquet", str(erp_parquet)]
+    if tfr_exists and freq_band is not None:
+        argv += [
+            "--tfr_file", str(tfr_file),
+            "--freq_band", str(freq_band[0]), str(freq_band[1]),
+        ]
+    if args.figure_diff_heatmap:
+        argv.append("--diff_heatmap")
+    if args.figure_channels:
+        argv += ["--channels", *args.figure_channels]
+
+    paper_figures.main(argv)
 
 def prepare_output_dirs(out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1070,6 +1314,9 @@ def prepare_output_dirs(out_dir: Path):
 def build_arg_parser():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, help="Path to YAML/JSON config file")
+    ap.add_argument("--process_data", action="store_true", help="Process raw data into epochs/evokeds/QC")
+    ap.add_argument("--get_metrics", action="store_true", help="Compute ERP/TFR metrics")
+    ap.add_argument("--plot_figures", action="store_true", help="Generate paper-ready figures")
     ap.add_argument("--raw_dir",  help="Folder containing BrainVision .vhdr files")
     ap.add_argument("--subject_csv_dir",  help="Folder containing subject-###.csv files")
     ap.add_argument("--out_dir", help="Output root folder")
@@ -1097,6 +1344,12 @@ def build_arg_parser():
     )
 
     ap.add_argument("--montage", default="standard_1020", help="Montage name")
+    ap.add_argument(
+        "--reref",
+        default="average",
+        choices=["average", "none"],
+        help="EEG re-reference mode (average or none).",
+    )
     ap.add_argument("--l_freq", type=float, default=0.1, help="High-pass Hz")
     ap.add_argument("--h_freq", type=float, default=30.0, help="Low-pass Hz")
     ap.add_argument("--notch", type=float, nargs="*", default=[60.0], help="Notch freqs Hz")
@@ -1188,32 +1441,6 @@ def build_arg_parser():
     )
     ap.add_argument("--save_ica", default=1, type=int, help="Save ICA object to out_dir/00_ica (1=yes,0=no).")
 
-    # --- Metrics controls ---
-    ap.add_argument(
-        "--run_metrics",
-        type=int,
-        default=1,
-        help="Compute ERP/TFR metrics into out_dir/05_metrics (1=yes,0=no).",
-    )
-    ap.add_argument(
-        "--metric_picks",
-        nargs="*",
-        default=None,
-        help="Optional channel names to compute metrics on (e.g., Fz Cz Pz). If omitted, uses all EEG channels.",
-    )
-    ap.add_argument(
-        "--erp_window",
-        action="append",
-        default=[],
-        help="ERP window spec name:tmin:tmax. Repeatable. Example: --erp_window mmn:0.1:0.25",
-    )
-    ap.add_argument(
-        "--tfr_window",
-        action="append",
-        default=[],
-        help="TFR window spec name:tmin:tmax:fmin:fmax. Repeatable. Example: --tfr_window mmn:0.1:0.25:4:8",
-    )
-
     ap.add_argument(
         "--on_bv_link_mismatch",
         choices=["skip", "fail"],
@@ -1250,14 +1477,29 @@ def build_arg_parser():
     )
 
     # TFR settings (kept simple; can be overridden in config)
+    ap.add_argument("--tfr_tmin", type=float, default=-0.2)
+    ap.add_argument("--tfr_tmax", type=float, default=0.6)
     ap.add_argument("--tfr_fmin", type=float, default=1.0)
     ap.add_argument("--tfr_fmax", type=float, default=30.0)
     ap.add_argument("--tfr_fstep", type=float, default=1.0)
     ap.add_argument("--tfr_method", default="multitaper", choices=["multitaper", "morlet"])
     ap.add_argument("--tfr_n_cycles_div", type=float, default=10.0)
     ap.add_argument("--tfr_decim", type=int, default=1)
+    ap.add_argument(
+        "--tfr_time_decim",
+        type=int,
+        default=1,
+        help="Downsample TFR time points in metrics output (1 = no downsample).",
+    )
     ap.add_argument("--tfr_baseline", nargs=2, type=float, default=[-0.1, 0.0])
     ap.add_argument("--tfr_baseline_mode", default="logratio")
+
+    # --- Figure controls ---
+    ap.add_argument("--figure_time_window", nargs=2, type=float, default=None, metavar=("TMIN", "TMAX"))
+    ap.add_argument("--figure_freq_band", nargs=2, type=float, default=None, metavar=("FMIN", "FMAX"))
+    ap.add_argument("--figure_diff_heatmap", action="store_true", help="Add deviant-standard heatmap")
+    ap.add_argument("--figure_channels", nargs="+", default=None, help="Optional channel subset for ERP plots")
+    ap.add_argument("--figures_out_dir", default=None, help="Output directory for figures (default: out_dir/figures)")
     return ap
 
 
@@ -1294,5 +1536,47 @@ def main(argv=None):
         summarize_one_file(args, Path(args.summarize_one_file))
         return
 
-    # Pass defaults through so run_full_pipeline can honour CLI overrides
-    run_full_pipeline(args, defaults=defaults)
+    if not (args.process_data or args.get_metrics or args.plot_figures):
+        # Default behavior: process data + metrics
+        args.process_data = True
+        args.get_metrics = True
+        args.plot_figures = False
+
+    # Apply config once for all stages
+    cfg = apply_config(args, defaults)
+
+    if args.plot_figures:
+        # Ensure ERP time-series is available for plotting
+        args.metrics_erp_timeseries = True
+
+    if args.process_data:
+        if not args.get_metrics:
+            args.metrics = 0
+        else:
+            args.metrics = 1
+        run_full_pipeline(args, defaults=defaults, cfg=cfg)
+    elif args.get_metrics:
+        run_metrics_only(args)
+
+    if args.plot_figures:
+        metrics_dir = Path(args.out_dir) / "05_metrics"
+        erp_parquet = metrics_dir / "erp_timeseries_all.parquet"
+        tfr_file = metrics_dir / "tfr_metrics_all.csv"
+
+        missing = []
+        if not erp_parquet.exists():
+            missing.append(str(erp_parquet))
+        if not tfr_file.exists():
+            missing.append(str(tfr_file))
+
+        if missing:
+            print(f"[WARN] Missing figure inputs: {', '.join(missing)}")
+            if _prompt_yes_no("Run full pipeline now? [y/N] "):
+                args.process_data = True
+                args.get_metrics = True
+                args.metrics = 1
+                run_full_pipeline(args, defaults=defaults, cfg=cfg)
+            else:
+                print("[WARN] Proceeding with available metrics only.")
+
+        run_plot_figures(args)

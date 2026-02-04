@@ -1,0 +1,12 @@
+# Core dependencies
+mne
+numpy
+pandas
+pyarrow
+PyYAML
+
+# Visualization dependencies
+matplotlib
+seaborn
+# Optional extras
+# picard

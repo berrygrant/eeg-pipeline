@@ -18,7 +18,7 @@ This project is designed for **research-grade EEG workflows** with an emphasis o
 ### Core preprocessing
 - BrainVision (.vhdr / .vmrk) input
 - Standard montages (e.g., `standard_1020`)
-- Average rereferencing
+- Configurable re-reference (`average` or `none`)
 - Band-pass and notch filtering
 - Automatic handling of missing `.vmrk` or behavioral files (skip / warn / fail)
 
@@ -50,10 +50,11 @@ This project is designed for **research-grade EEG workflows** with an emphasis o
 - Condition-wise evoked responses (Standard / Deviant)
 - Grand averages across subjects
 - ERP window definitions via config (e.g., MMN, N1, P3a, P3b)
-- Optional channel-level ERP time series extraction (planned / in progress)
+- ERP time‑series extraction to Parquet (per subject + combined)
 
 ### Time–frequency analysis (optional)
-- Evoked TFR computation (multitaper or Morlet)
+- Evoked + total TFR computation (multitaper or Morlet)
+- Derived induced power (total - evoked) and inter-trial coherence (ITC)
 - Configurable frequency ranges, baselines, and time windows
 - Fully compatible with MNE `AverageTFR` objects
 
@@ -63,8 +64,14 @@ This project is designed for **research-grade EEG workflows** with an emphasis o
   - Event counts
   - Epoch rejection rates
   - Blink metrics
-  - ICA decisions and exclusions
+- ICA decisions and exclusions
 - Designed to support downstream statistical screening
+
+### Visualization (paper-ready figures)
+- ERP grand averages (all electrodes or per-electrode)
+- TFR time-series (evoked power, ITC) in a time/frequency window
+- TFR heatmaps (side-by-side + optional deviant–standard difference)
+- Half‑violin plots of evoked/induced power and ITC
 
 ---
 
@@ -83,9 +90,22 @@ eeg_pipeline/
 ├── ica_diagnostics.py    # Blink diagnostics and ICA recommendation logic
 ├── evoked.py             # Evoked and grand-average helpers
 ├── metrics/
-│   ├── erp.py            # ERP metrics (windowed + time series)
+│   ├── erp.py            # ERP windowed metrics
+│   ├── erp_timeseries.py # ERP time-series metrics (Parquet)
+│   ├── erp_windows.py    # Canonical ERP window definitions
+│   ├── io.py             # Epochs loaders (.fif, .set)
 │   └── tfr.py            # Time–frequency metrics
+├── viz/
+│   └── paper_figures.py  # Paper-ready plots from metrics outputs
 └── qc.py                 # QC summary writer
+
+scripts/
+├── process_eeg_data.py    # Process raw data → epochs/evokeds/QC
+├── compute_eeg_metrics.py # Metrics from existing epochs
+└── plot_eeg_figures.py    # Paper-ready figures from metrics outputs
+
+run_analysis.py           # Post-hoc ERP/TFR metrics on epochs
+run_metrics.py            # Legacy metrics runner (kept for compatibility)
 ```
 
 ---
@@ -109,6 +129,7 @@ channels:
 
 preprocess:
   montage: standard_1020
+  reref: average     # average | none
   l_freq: 0.1
   h_freq: 30
   notch_hz: [60]
@@ -137,28 +158,70 @@ metrics:
       - name: MMN_150_250
         tmin: 0.15
         tmax: 0.25
-    timeseries: false
+    timeseries: true
 
   tfr:
-    enabled: false
+    enabled: true
+    tmin: -0.2
+    tmax: 0.6
+    fmin: 3.0
+    fmax: 8.0
+    time_decim: 1
+    baseline: [-0.2, 0.0]
+    baseline_mode: logratio
 ```
 
 ## Running the Pipeline
 
-From the repository root:
+From the repository root (module invocation):
 
 ```bash
-python run_eeg_pipeline.py --config config.yaml
+python -m eeg_pipeline.cli --config config.yaml --process_data --get_metrics
 ```
+
+If you omit the stage flags, the default is `--process_data --get_metrics`.
 
 Optional debugging / inspection of a single file:
 
 ```bash
-python run_eeg_pipeline.py \
+python -m eeg_pipeline.cli \
   --config config.yaml \
   --summarize_one_file /path/to/S203.vhdr
 ```
 
+### Opinionated wrappers (optional)
+
+```bash
+python scripts/process_eeg_data.py --config config.yaml
+python scripts/compute_eeg_metrics.py --config config.yaml
+python scripts/plot_eeg_figures.py --config config.yaml
+```
+
+## Post-hoc metrics (on existing epochs)
+
+```bash
+python run_analysis.py \
+  --epochs_dir /path/to/02_epochs \
+  --out_dir /path/to/05_metrics \
+  --do_erp --do_tfr \
+  --channels Fz Cz \
+  --conditions Standard Deviant \
+  --erp_window MMN 0.15 0.25 \
+  --tfr_tmin -0.2 --tfr_tmax 0.6 \
+  --tfr_fmin 3 --tfr_fmax 8 --tfr_fstep 1
+```
+
+## Visualization (paper_figures)
+
+```bash
+python -m eeg_pipeline.viz.paper_figures \
+  --erp_parquet /path/to/05_metrics/erp_timeseries_all.parquet \
+  --tfr_file /path/to/05_metrics/tfr_metrics_all.csv \
+  --out_dir /path/to/figures \
+  --time_window 0.15 0.25 \
+  --freq_band 3 8 \
+  --diff_heatmap
+```
 
 ## Outputs
 
@@ -170,6 +233,10 @@ out_dir/
 ├── 03_evokeds/             # Subject-level evoked responses
 ├── 04_grand_averages/      # Grand-average evokeds
 ├── 05_metrics/             # ERP / TFR metrics (if enabled)
+│   ├── erp_metrics_all.csv
+│   ├── tfr_metrics_all.csv
+│   ├── erp_timeseries_all.parquet
+│   └── erp_timeseries/      # per-subject Parquet time-series
 └── qc_summary.csv          # Per-subject QC table
 ```
 
@@ -180,13 +247,6 @@ out_dir/
 - MATLAB-aware: folder structure and logic map cleanly to common EEGLAB workflows
 
 
-## Roadmap
-- ERP peak latency and amplitude metrics
-- Channel clusters and ROI definitions
-- Trial-level TFR metrics
-- BIDS-compatible export
-- Automated report generation
-
 ⸻
 
 ## Requirements
@@ -194,7 +254,15 @@ out_dir/
 - mne
 - numpy
 - pandas
+- pyarrow (Parquet)
+- matplotlib
+- seaborn
 - pyyaml (for YAML configs)
+
+Install:
+```bash
+pip install -r requirements.txt
+```
 
 ## Acknowledgments
 

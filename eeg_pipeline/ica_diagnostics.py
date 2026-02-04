@@ -3,7 +3,6 @@ from __future__ import annotations
 import numpy as np
 import mne
 
-from .artifacts import moving_window_ptp_mask
 from mne.preprocessing import find_eog_events
 
 
@@ -57,16 +56,14 @@ def compute_ica_diagnostics(
 
         # Prefer true EOG if present
         if len(eog_picks) > 0:
-            blink_mask = moving_window_ptp_mask(
-                raw.get_data(picks=eog_picks),
-                sfreq=sfreq,
-                win_ms=blink_win_ms,
-                step_ms=blink_step_ms,
-                threshold_uv=blink_threshold_uv,
-            )
-            blink_events_n = count_clusters(blink_mask)
-            metrics["blink_rate_per_min"] = float((blink_events_n) / duration_min)
-            metrics["blink_source"] = "eog"
+            eog_name = raw.info["ch_names"][eog_picks[0]]
+            try:
+                eog_events = find_eog_events(raw, ch_name=eog_name, verbose=False)
+                blink_events_n = len(eog_events)
+            except Exception:
+                blink_events_n = 0  # safe fallback
+            metrics["blink_rate_per_min"] = float(blink_events_n / duration_min)
+            metrics["blink_source"] = f"eog:{eog_name}"
 
         # Otherwise use frontal EEG proxy channel(s)
         else:
