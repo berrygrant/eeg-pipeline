@@ -942,10 +942,10 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                         )
                         ts_dir = metrics_dir / "erp_timeseries"
                         ts_dir.mkdir(parents=True, exist_ok=True)
-                        df_ts.to_parquet(ts_dir / f\"{subj}_erp_timeseries.parquet\", index=False)
+                        df_ts.to_parquet(ts_dir / f"{subj}_erp_timeseries.parquet", index=False)
                         erp_timeseries_all.append(df_ts)
                     except Exception as e:
-                        print(f\"[WARN] ERP timeseries failed for {subj}: {e}\")
+                        print(f"[WARN] ERP timeseries failed for {subj}: {e}")
 
             if do_tfr:
                 try:
@@ -1580,3 +1580,7 @@ def main(argv=None):
                 print("[WARN] Proceeding with available metrics only.")
 
         run_plot_figures(args)
+
+
+if __name__ == "__main__":
+    main()

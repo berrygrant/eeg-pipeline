@@ -154,16 +154,11 @@ def compute_tfr_metrics(
         # Total power + ITC (averaged across epochs)
         power_total, itc = _compute_tfr_epochs(ep_cond, freqs, params)
 
-        # Baseline in TF domain (logratio etc.)
-        if params.baseline is not None:
-            power_total.apply_baseline(params.baseline, mode=params.mode)
-            itc.apply_baseline(params.baseline, mode=params.mode)
+        # ERPLAB-style: no TF-domain baseline for power or ITC
 
         # Evoked power (power of the evoked response)
         ev = ep_cond.average()
         tfr_evoked = _compute_tfr_evoked(ev, freqs, params)
-        if params.baseline is not None:
-            tfr_evoked.apply_baseline(params.baseline, mode=params.mode)
 
         # Safety: ensure identical axes before subtraction
         if (

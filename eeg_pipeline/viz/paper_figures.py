@@ -166,15 +166,18 @@ def _tfr_timeseries(
         subj_avg.groupby(["condition", "time"], as_index=False)[["evoked_power", "itc"]]
         .mean()
     )
+    # ERPLAB-style: apply log10 transform after averaging
+    eps = 1e-30
+    ga["evoked_power_log10"] = np.log10(np.clip(ga["evoked_power"].to_numpy(), eps, None))
 
     # Evoked power time series
     fig, ax = plt.subplots(figsize=(7, 4))
     for cond, color in [(standard, "black"), (deviant, "red")]:
         s = ga[ga["condition"] == cond]
-        ax.plot(s["time"], s["evoked_power"], color=color, label=cond)
+        ax.plot(s["time"], s["evoked_power_log10"], color=color, label=cond)
     ax.axvspan(tmin, tmax, color="gray", alpha=0.2, zorder=0)
     ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Evoked power")
+    ax.set_ylabel("Evoked power (log10)")
     ax.set_title("TFR evoked power (avg over freq+channels)")
     ax.legend(frameon=False)
     _save_fig(fig, out_dir / "tfr_evoked_timeseries.png", dpi)
@@ -221,6 +224,9 @@ def _tfr_evoked_heatmap(
         df.groupby(["condition", "frequency", "time"], as_index=False)["evoked_power"]
         .mean()
     )
+    # ERPLAB-style: apply log10 transform after averaging
+    eps = 1e-30
+    avg["evoked_power_log10"] = np.log10(np.clip(avg["evoked_power"].to_numpy(), eps, None))
 
     conds = [c for c in [standard, deviant] if c in avg["condition"].unique()]
     if not conds:
@@ -234,7 +240,7 @@ def _tfr_evoked_heatmap(
     pivots = []
     for cond in conds:
         sub = avg[avg["condition"] == cond]
-        pivot = sub.pivot_table(index="frequency", columns="time", values="evoked_power")
+        pivot = sub.pivot_table(index="frequency", columns="time", values="evoked_power_log10")
         pivots.append(pivot)
     all_vals = np.concatenate([p.values.ravel() for p in pivots]) if pivots else np.array([])
     if all_vals.size:
@@ -245,11 +251,11 @@ def _tfr_evoked_heatmap(
 
     for ax, cond in zip(axes, conds):
         sub = avg[avg["condition"] == cond]
-        pivot = sub.pivot_table(index="frequency", columns="time", values="evoked_power")
+        pivot = sub.pivot_table(index="frequency", columns="time", values="evoked_power_log10")
         times = pivot.columns.values
         freqs = pivot.index.values
         im = ax.pcolormesh(times, freqs, pivot.values, shading="auto", vmin=vmin, vmax=vmax)
-        ax.set_title(f"Evoked power heatmap ({cond})")
+        ax.set_title(f"Evoked power heatmap ({cond}, log10)")
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Frequency (Hz)")
         fig.colorbar(im, ax=ax)
@@ -261,8 +267,8 @@ def _tfr_evoked_heatmap(
         std = avg[avg["condition"] == standard]
         dev = avg[avg["condition"] == deviant]
 
-        std_p = std.pivot_table(index="frequency", columns="time", values="evoked_power")
-        dev_p = dev.pivot_table(index="frequency", columns="time", values="evoked_power")
+        std_p = std.pivot_table(index="frequency", columns="time", values="evoked_power_log10")
+        dev_p = dev.pivot_table(index="frequency", columns="time", values="evoked_power_log10")
 
         # Align on common time/freq grid
         freqs = std_p.index.intersection(dev_p.index)
@@ -285,7 +291,7 @@ def _tfr_evoked_heatmap(
             vmin=-vmax,
             vmax=vmax,
         )
-        ax.set_title("Evoked power heatmap (Deviant - Standard)")
+        ax.set_title("Evoked power heatmap (Deviant - Standard, log10)")
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Frequency (Hz)")
         fig.colorbar(im, ax=ax)
@@ -321,12 +327,23 @@ def _tfr_half_violin(
         ]
         .mean()
     )
+    # ERPLAB-style: apply log10 transform after averaging
+    eps = 1e-30
+    agg["log10_evoked"] = np.log10(np.clip(agg["evoked_power"].to_numpy(), eps, None))
+    agg["log10_induced"] = np.log10(np.clip(agg["induced_power"].to_numpy(), eps, None))
 
     long_df = agg.melt(
         id_vars=["subject", "condition"],
-        value_vars=["evoked_power", "induced_power", "itc"],
+        value_vars=["log10_evoked", "log10_induced", "itc"],
         var_name="metric",
         value_name="value",
+    )
+    long_df["metric"] = long_df["metric"].map(
+        {
+            "log10_evoked": "Evoked Power (log10)",
+            "log10_induced": "Induced Power (log10)",
+            "itc": "ITC",
+        }
     )
 
     fig, ax = plt.subplots(figsize=(8, 4))
