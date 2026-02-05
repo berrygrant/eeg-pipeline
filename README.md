@@ -55,7 +55,8 @@ This project is designed for **research-grade EEG workflows** with an emphasis o
 ### Time–frequency analysis (optional)
 - Evoked + total TFR computation (multitaper or Morlet)
 - Derived induced power (total - evoked) and inter-trial coherence (ITC)
-- Configurable frequency ranges, baselines, and time windows
+- Configurable frequency ranges and time windows
+- TF-domain baselines are intentionally **not** applied (ERPLAB‑equivalent); ITC is kept raw
 - Fully compatible with MNE `AverageTFR` objects
 
 ### Quality control
@@ -72,6 +73,7 @@ This project is designed for **research-grade EEG workflows** with an emphasis o
 - TFR time-series (evoked power, ITC) in a time/frequency window
 - TFR heatmaps (side-by-side + optional deviant–standard difference)
 - Half‑violin plots of evoked/induced power and ITC
+- Power plots use **log10 transform after averaging** (ERPLAB‑style)
 
 ---
 
@@ -167,8 +169,7 @@ metrics:
     fmin: 3.0
     fmax: 8.0
     time_decim: 1
-    baseline: [-0.2, 0.0]
-    baseline_mode: logratio
+    # TF-domain baseline is intentionally not applied (ERPLAB-equivalent)
 ```
 
 ## Running the Pipeline

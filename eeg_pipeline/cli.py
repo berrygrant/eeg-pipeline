@@ -790,7 +790,11 @@ def run_full_pipeline(args, defaults=None, cfg=None):
 
         keep_mask = np.isin(events[:, 2], stddev_set)
         md_full = derive_metadata_v1(codes.tolist(), token_map=token_map)
-        epochs.metadata = md_full.loc[keep_mask].reset_index(drop=True)
+        md = md_full.loc[keep_mask].reset_index(drop=True)
+        # Align metadata with epochs that survive MNE's internal dropping
+        if len(md) != len(epochs):
+            md = md.iloc[epochs.selection].reset_index(drop=True)
+        epochs.metadata = md
 
         epochs_test = epochs.copy().crop(tmin=args.art_test_tmin, tmax=args.art_test_tmax)
 
