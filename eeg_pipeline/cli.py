@@ -57,6 +57,7 @@ from eeg_pipeline.config import load_config
 # Metrics (ERP + TFR)
 from eeg_pipeline.metrics import compute_erp_metrics, compute_tfr_metrics, load_epochs
 from eeg_pipeline.metrics.erp import ERPWindow
+from eeg_pipeline.metrics.erp_windows import ERP_WINDOWS
 from eeg_pipeline.metrics.erp_timeseries import ERPTimeSeriesParams, compute_erp_timeseries
 from eeg_pipeline.metrics.tfr import TFRParams
 
@@ -458,6 +459,12 @@ def apply_config(args, defaults=None):
         defaults,
         "compute_mmn",
         int(bool(erp_cfg.get("compute_mmn", metrics_cfg.get("compute_mmn", args.compute_mmn)))),
+    )
+    set_if_default(
+        args,
+        defaults,
+        "compute_p300",
+        int(bool(erp_cfg.get("compute_p300", metrics_cfg.get("compute_p300", args.compute_p300)))),
     )
 
     set_if_default(args, defaults, "tfr_tmin", float(tfr_cfg.get("tmin", args.tfr_tmin)))
@@ -900,13 +907,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
 
             if do_erp:
                 # ERP windows
-                if getattr(args, "erp_window", None):
-                    erp_windows = [
-                        ERPWindow(name=w[0], tmin=float(w[1]), tmax=float(w[2]))
-                        for w in args.erp_window
-                    ]
-                else:
-                    erp_windows = [ERPWindow("MMN_150_250", 0.15, 0.25)]
+                erp_windows = _build_erp_windows(args)
 
                 try:
                     df_erp = compute_erp_metrics(
@@ -915,7 +916,6 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                         channels=channels,
                         conditions=["Standard", "Deviant"],
                         windows=erp_windows,
-                        compute_mmn=bool(getattr(args, "compute_mmn", 1)),
                     )
                     df_erp.to_csv(metrics_dir / f"{subj}_erp_metrics.csv", index=False)
                     erp_metrics_all.append(df_erp)
@@ -1134,13 +1134,7 @@ def run_metrics_only(args):
 
     erp_windows = None
     if do_erp:
-        if getattr(args, "erp_window", None):
-            erp_windows = [
-                ERPWindow(name=w[0], tmin=float(w[1]), tmax=float(w[2]))
-                for w in args.erp_window
-            ]
-        else:
-            erp_windows = [ERPWindow("MMN_150_250", 0.15, 0.25)]
+        erp_windows = _build_erp_windows(args)
 
     tfr_params = None
     if do_tfr:
@@ -1175,7 +1169,6 @@ def run_metrics_only(args):
                     channels=channels,
                     conditions=["Standard", "Deviant"],
                     windows=erp_windows,
-                    compute_mmn=bool(getattr(args, "compute_mmn", 1)),
                 )
                 df_erp.to_csv(metrics_dir / f"{subj}_erp_metrics.csv", index=False)
                 erp_metrics_all.append(df_erp)
@@ -1255,6 +1248,23 @@ def _resolve_figure_freq_band(args) -> tuple[float, float] | None:
     if args.figure_freq_band is not None:
         return float(args.figure_freq_band[0]), float(args.figure_freq_band[1])
     return float(getattr(args, "tfr_fmin", 1.0)), float(getattr(args, "tfr_fmax", 30.0))
+
+
+def _build_erp_windows(args) -> list[ERPWindow]:
+    windows: list[ERPWindow] = []
+    if getattr(args, "erp_window", None):
+        windows = [
+            ERPWindow(name=w[0], tmin=float(w[1]), tmax=float(w[2]))
+            for w in args.erp_window
+        ]
+        return windows
+
+    if bool(getattr(args, "compute_mmn", 0)):
+        windows.append(ERP_WINDOWS["MMN"])
+    if bool(getattr(args, "compute_p300", 0)):
+        windows.append(ERP_WINDOWS["P300"])
+
+    return windows
 
 
 def _prompt_yes_no(msg: str) -> bool:
@@ -1477,7 +1487,13 @@ def build_arg_parser():
         "--compute_mmn",
         type=int,
         default=1,
-        help="If 1, also compute Deviant-Standard for ERP windows (MMN-style).",
+        help="If 1, include the default MMN window when ERP windows are not otherwise specified.",
+    )
+    ap.add_argument(
+        "--compute_p300",
+        type=int,
+        default=0,
+        help="If 1, include the default P300 window when ERP windows are not otherwise specified.",
     )
 
     # TFR settings (kept simple; can be overridden in config)

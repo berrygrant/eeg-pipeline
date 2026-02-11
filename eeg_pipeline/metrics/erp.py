@@ -106,10 +106,6 @@ def compute_erp_metrics(
     channels: Sequence[str],
     windows: Sequence[ERPWindow],
     conditions: Sequence[str] = ("Standard", "Deviant"),
-    compute_mmn: bool = True,
-    mmn_name: str = "MMN",
-    mmn_deviant: str = "Deviant",
-    mmn_standard: str = "Standard",
 ) -> pd.DataFrame:
     """
     Compute ERP window metrics (mean + peak) per subject × condition × channel × window.
@@ -137,24 +133,5 @@ def compute_erp_metrics(
                 source_conditions=None,
             )
         )
-
-    # Derived MMN (difference wave): Deviant - Standard
-    if compute_mmn:
-        ev_dev = _get_evoked(epochs, mmn_deviant)
-        ev_std = _get_evoked(epochs, mmn_standard)
-        if (ev_dev is not None) and (ev_std is not None):
-            mmn = mne.combine_evoked([ev_dev, ev_std], weights=[1.0, -1.0])
-            rows.extend(
-                _rows_for_evoked(
-                    evoked=mmn,
-                    epochs=epochs,
-                    subject=subject,
-                    condition=mmn_name,
-                    channels=channels,
-                    windows=windows,
-                    status="OK",
-                    source_conditions=f"{mmn_deviant}-{mmn_standard}",
-                )
-            )
 
     return pd.DataFrame(rows)

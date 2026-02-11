@@ -132,7 +132,6 @@ def main(argv=None):
             channels=args.channels,
             windows=windows,
             conditions=args.conditions,
-            compute_mmn=bool(args.compute_mmn),
         )
         erp_rows.append(df_erp)
 
