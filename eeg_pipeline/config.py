@@ -139,6 +139,9 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     set_default(cfg, "labels.token_map", None)
 
+    set_default(cfg, "compute.use_gpu", False)
+    set_default(cfg, "compute.gpu_device", None)
+
     set_default(cfg, "metrics.erp.enabled", True)
     set_default(cfg, "metrics.erp.windows", [])
     set_default(cfg, "metrics.erp.timeseries", False)
@@ -327,6 +330,12 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         else:
             cfg["metrics"]["erp"]["conditions"] = [str(conds)]
 
+    # Compute (optional GPU acceleration)
+    compute_cfg = cfg.get("compute", {})
+    cfg["compute"]["use_gpu"] = bool(compute_cfg.get("use_gpu", False))
+    gd = compute_cfg.get("gpu_device", None)
+    cfg["compute"]["gpu_device"] = None if gd in (None, "null", "None", "") else int(gd)
+
     return cfg
 
 
@@ -407,8 +416,6 @@ def _normalize_token_map(token_map: Any) -> Optional[Dict[str, str]]:
         a, b = s.split(None, 1)
         return {"token1": a, "token2": b}
     return None
-<<<<<<< Updated upstream
-=======
 
 
 def _normalize_condition_map(condition_map: Any) -> Optional[Dict[str, list[int]]]:
@@ -425,4 +432,3 @@ def _normalize_condition_map(condition_map: Any) -> Optional[Dict[str, list[int]
             codes = [int(v)]
         out[name] = codes
     return out
->>>>>>> Stashed changes

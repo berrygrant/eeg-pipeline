@@ -13,6 +13,7 @@ from eeg_pipeline.metrics import (
 )
 from eeg_pipeline.metrics.erp_windows import ERP_WINDOWS
 from eeg_pipeline.metrics.tfr import TFRParams
+from eeg_pipeline.gpu import configure as configure_gpu, capability_report, format_capability_report
 
 
 def _subject_from_filename(p: Path) -> str:
@@ -32,6 +33,9 @@ def build_arg_parser():
     ap.add_argument("--epochs_dir", required=True, help="Folder containing *-epo.fif files")
     ap.add_argument("--out_dir", required=True, help="Output folder (e.g., 05_metrics)")
     ap.add_argument("--pattern", default="*-epo.fif", help="Glob pattern (default: *-epo.fif)")
+
+    ap.add_argument("--use_gpu", action="store_true", help="Enable GPU acceleration where available (MNE/CuPy).")
+    ap.add_argument("--gpu_device", type=int, default=None, help="Optional GPU device index (default: first visible).")
 
     # ERP settings
     ap.add_argument(
@@ -92,6 +96,17 @@ def build_arg_parser():
 def main(argv=None):
     ap = build_arg_parser()
     args = ap.parse_args(argv)
+
+    gpu_status = configure_gpu(bool(args.use_gpu), device=args.gpu_device)
+    if args.use_gpu:
+        cap_msg = format_capability_report(capability_report())
+        if cap_msg:
+            print(cap_msg)
+        if not gpu_status["enabled"]:
+            print(
+                "[WARN] GPU requested but not available; falling back to CPU "
+                f"(mne_cuda={gpu_status['mne_cuda']}, cupy={gpu_status['cupy']})"
+            )
 
     epochs_dir = Path(args.epochs_dir)
     out_dir = Path(args.out_dir)

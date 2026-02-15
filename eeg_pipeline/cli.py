@@ -25,6 +25,7 @@ from .evoked import compute_evokeds, grand_averages
 from .qc import write_qc_summary
 from .ica_diagnostics import compute_ica_diagnostics, recommend_ica
 from .ica import ICAParams, fit_ica, find_ica_excludes, apply_ica
+from .gpu import configure as configure_gpu, capability_report, format_capability_report
 
 # Helper for config integration.  When merging configuration values
 # into command‑line arguments we want to honour user‑supplied flags.
@@ -202,12 +203,12 @@ def summarize_one_file(args, raw_path: Path):
     )
 
     trigger_diag = {
-    "trigger_burst_flag": burst_diag["burst_flag"],
-    "trigger_n_short_iti": burst_diag["n_short_iti"],
-    "trigger_min_iti_s": burst_diag["min_iti_s"],
-    "trigger_burst_max_in_window": burst_diag["burst_max_in_window"],
-    "trigger_burst_n_windows_ge_thresh": burst_diag["burst_n_windows_ge_thresh"],
-    "trigger_burst_params": burst_diag.get("burst_params", ""),
+        "trigger_burst_flag": burst_diag["burst_flag"],
+        "trigger_n_short_iti": burst_diag["n_short_iti"],
+        "trigger_min_iti_s": burst_diag["min_iti_s"],
+        "trigger_burst_max_in_window": burst_diag["burst_max_in_window"],
+        "trigger_burst_n_windows_ge_thresh": burst_diag["burst_n_windows_ge_thresh"],
+        "trigger_burst_params": burst_diag.get("burst_params", ""),
     }
 
     burst_qc = {
@@ -538,6 +539,11 @@ def apply_config(args, defaults=None):
         "tfr_baseline_mode",
         tfr_cfg.get("baseline_mode", tfr_cfg.get("mode", args.tfr_baseline_mode)),
     )
+
+    # Compute
+    compute_cfg = cfg.get("compute", {})
+    set_if_default(args, defaults, "use_gpu", bool(compute_cfg.get("use_gpu", args.use_gpu)))
+    set_if_default(args, defaults, "gpu_device", compute_cfg.get("gpu_device", args.gpu_device))
 
     # Token map
     if args.token_map is None:
@@ -1512,6 +1518,9 @@ def build_arg_parser():
     ap.add_argument("--out_dir", help="Output root folder")
     ap.add_argument("--summarize_one_file", default=None, help="If provided, summarize this raw file (.vhdr or .set) and exit.")
 
+    ap.add_argument("--use_gpu", action="store_true", help="Enable GPU acceleration where available (MNE/CuPy).")
+    ap.add_argument("--gpu_device", type=int, default=None, help="Optional GPU device index (default: first visible).")
+
     ap.add_argument(
         "--subjects",
         nargs="*",
@@ -1766,6 +1775,23 @@ def main(argv=None):
 
     # Apply config once for all stages
     cfg = apply_config(args, defaults)
+
+    gpu_status = configure_gpu(bool(args.use_gpu), device=args.gpu_device)
+    if args.use_gpu:
+        cap_msg = format_capability_report(capability_report())
+        if cap_msg:
+            print(cap_msg)
+        if gpu_status["enabled"]:
+            print(
+                "[GPU] enabled (backend="
+                f"{gpu_status['backend']}, mne_cuda={gpu_status['mne_cuda']}, "
+                f"cupy={gpu_status['cupy']})"
+            )
+        else:
+            print(
+                "[WARN] GPU requested but not available; falling back to CPU "
+                f"(mne_cuda={gpu_status['mne_cuda']}, cupy={gpu_status['cupy']})"
+            )
 
     if args.plot_figures:
         # Ensure ERP time-series is available for plotting

@@ -208,6 +208,14 @@ python scripts/compute_eeg_metrics.py --config config.yaml
 python scripts/plot_eeg_figures.py --config config.yaml
 ```
 
+## GPU Acceleration (Optional)
+
+Enable GPU acceleration to speed up supported steps.
+
+- Config (recommended): add `compute.use_gpu: true` and optionally `compute.gpu_device: 0`.
+- CLI: pass `--use_gpu` and optionally `--gpu_device 0`.
+- Behavior: the pipeline attempts to initialize MNE CUDA (if available) and uses CuPy for internal array operations (artifact rejection). If GPU libraries are missing, it falls back to CPU and prints a warning.
+
 ## Post-hoc metrics (on existing epochs)
 
 ```bash
