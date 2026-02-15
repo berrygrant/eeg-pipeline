@@ -123,19 +123,24 @@ def subject_number_from_stem(stem: str) -> str:
     return digits
 
 
-def summarize_one_file(args, vhdr_path: Path):
-    subj = vhdr_path.stem
+def summarize_one_file(args, raw_path: Path):
+    subj = raw_path.stem
     subj_num = subject_number_from_stem(subj)
     subject_csv = Path(args.subject_csv_dir) / f"subject-{subj_num}.csv"
-    vmrk_path = vhdr_path.with_suffix(".vmrk")
+    is_bv = raw_path.suffix.lower() == ".vhdr"
+    vmrk_path = raw_path.with_suffix(".vmrk") if is_bv else None
 
     print(f"\n=== SUMMARY: {subj} ===")
-    print("Raw file:", vhdr_path)
+    print("Raw file:", raw_path)
     print("Subject CSV:", subject_csv)
-    print("VMRK file:", vmrk_path)
+    if is_bv:
+        print("VMRK file:", vmrk_path)
 
     # Show annotation descriptions without any preprocessing (debug)
-    raw0 = mne.io.read_raw_brainvision(vhdr_path, preload=True)
+    if is_bv:
+        raw0 = mne.io.read_raw_brainvision(raw_path, preload=True)
+    else:
+        raw0 = mne.io.read_raw_eeglab(raw_path, preload=True)
     descs = list(dict.fromkeys(raw0.annotations.description))
     print("\nAnnotation descriptions (first 30 unique):")
     print(descs[:30])
@@ -143,7 +148,7 @@ def summarize_one_file(args, vhdr_path: Path):
 
     # Preprocess (montage/reference/filter)
     raw = read_raw_preprocess(
-        vhdr_path=vhdr_path,
+        raw_path=raw_path,
         montage=args.montage,
         eog_chs=args.eog_chs,
         aux_chs=args.aux_chs,
@@ -229,7 +234,7 @@ def summarize_one_file(args, vhdr_path: Path):
         print(f"  gap_s={g:>4}: keep {len(keep_idx)}/{len(markers_pos)}")
 
     # Parse .vmrk if present (debug)
-    if vmrk_path.exists():
+    if is_bv and vmrk_path and vmrk_path.exists():
         mk = parse_vmrk_markers(vmrk_path)
         print("\nMarkers from .vmrk:")
         print("  total markers:", len(mk))
@@ -237,7 +242,7 @@ def summarize_one_file(args, vhdr_path: Path):
             print("  marker types:\n", mk["mtype"].value_counts().to_string())
             print("  unique desc count:", mk["desc"].nunique())
             print("  desc distribution (top 10):\n", mk["desc"].value_counts().head(10).to_string())
-    else:
+    elif is_bv:
         print("\n[WARN] .vmrk file not found next to .vhdr; cannot parse markers directly.")
 
     # Subject CSV required to complete behavioral summary
@@ -545,28 +550,33 @@ def run_full_pipeline(args, defaults=None, cfg=None):
     tfr_metrics_all: list[pd.DataFrame] = []
     erp_timeseries_all: list[pd.DataFrame] = []
 
-    vhdr_files = sorted(raw_dir.glob("*.vhdr"))
-    if not vhdr_files:
-        raise RuntimeError(f"No .vhdr files found in {raw_dir}")
+    raw_files = [p for p in raw_dir.rglob("*.vhdr") if p.is_file() and ".git" not in p.parts]
+    raw_files = sorted(raw_files)
+    if not raw_files:
+        raw_files = [p for p in raw_dir.rglob("*.set") if p.is_file() and ".git" not in p.parts]
+        raw_files = sorted(raw_files)
+    if not raw_files:
+        raise RuntimeError(f"No .vhdr or .set files found in {raw_dir}")
 
     if args.subjects:
         wanted = {s.lower() for s in args.subjects}
-        vhdr_files = [p for p in vhdr_files if p.stem.lower() in wanted]
-        if not vhdr_files:
-            raise RuntimeError(f"No matching .vhdr files found for --subjects={args.subjects}")
+        raw_files = [p for p in raw_files if p.stem.lower() in wanted]
+        if not raw_files:
+            raise RuntimeError(f"No matching raw files found for --subjects={args.subjects}")
 
     std_codes = np.asarray(args.standard_codes, dtype=int)
     dev_codes = np.asarray(args.deviant_codes, dtype=int)
     stddev_set = np.r_[std_codes, dev_codes]
 
-    for vhdr in vhdr_files:
-        subj = vhdr.stem
+    for raw_path in raw_files:
+        subj = raw_path.stem
         subj_num = subject_number_from_stem(subj)
         subject_csv = subject_csv_dir / f"subject-{subj_num}.csv"
         subject_csv_name = subject_csv.name
         subject_csv_path = str(subject_csv)
         subject_csv_exists = bool(subject_csv.exists())
-        vmrk = vhdr.with_suffix(".vmrk")
+        is_bv = raw_path.suffix.lower() == ".vhdr"
+        vmrk = raw_path.with_suffix(".vmrk") if is_bv else None
 
         print(f"\n=== {subj} ===")
 
@@ -580,49 +590,50 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             "trigger_burst_params": "",
         }
 
-        if not vmrk.exists():
-            msg = f"Missing .vmrk for {subj}: {vmrk}"
-            if args.on_missing_vmrk == "fail":
-                raise FileNotFoundError(msg)
-            if args.on_missing_vmrk == "skip":
+        if is_bv:
+            if not vmrk or not vmrk.exists():
+                msg = f"Missing .vmrk for {subj}: {vmrk}"
+                if args.on_missing_vmrk == "fail":
+                    raise FileNotFoundError(msg)
+                if args.on_missing_vmrk == "skip":
+                    print("[WARN]", msg, "-> skipping")
+                    rows.append(
+                        {
+                            "subject": subj,
+                            "raw_file": str(raw_path.name),
+                            "subject_csv": subject_csv_name,
+                            "subject_csv_path": subject_csv_path,
+                            "subject_csv_exists": subject_csv_exists,
+                            **burst_qc,
+                            "status": "SKIP_MISSING_VMRK",
+                            "error": msg,
+                        }
+                    )
+                    continue
+                print("[WARN]", msg)
+
+            ok, reason = brainvision_links_ok(raw_path)
+            if not ok:
+                msg = f"BrainVision link mismatch in {raw_path.name}: {reason}"
+                if args.on_bv_link_mismatch == "fail":
+                    raise FileNotFoundError(msg)
                 print("[WARN]", msg, "-> skipping")
                 rows.append(
-                    {
-                        "subject": subj,
-                        "raw_file": str(vhdr.name),
-                        "subject_csv": subject_csv_name,
-                        "subject_csv_path": subject_csv_path,
-                        "subject_csv_exists": subject_csv_exists,
-                        **burst_qc,
-                        "status": "SKIP_MISSING_VMRK",
-                        "error": msg,
-                    }
+                        {
+                            "subject": subj,
+                            "raw_file": str(raw_path.name),
+                            "subject_csv": subject_csv_name,
+                            "subject_csv_path": subject_csv_path,
+                            "subject_csv_exists": subject_csv_exists,
+                            **burst_qc,
+                            "status": "SKIP_BV_LINK_MISMATCH",
+                            "error": msg,
+                        }
                 )
                 continue
-            print("[WARN]", msg)
-
-        ok, reason = brainvision_links_ok(vhdr)
-        if not ok:
-            msg = f"BrainVision link mismatch in {vhdr.name}: {reason}"
-            if args.on_bv_link_mismatch == "fail":
-                raise FileNotFoundError(msg)
-            print("[WARN]", msg, "-> skipping")
-            rows.append(
-                    {
-                        "subject": subj,
-                        "raw_file": str(vhdr.name),
-                        "subject_csv": subject_csv_name,
-                        "subject_csv_path": subject_csv_path,
-                        "subject_csv_exists": subject_csv_exists,
-                        **burst_qc,
-                        "status": "SKIP_BV_LINK_MISMATCH",
-                        "error": msg,
-                    }
-            )
-            continue
 
         raw = read_raw_preprocess(
-            vhdr_path=vhdr,
+            raw_path=raw_path,
             montage=args.montage,
             eog_chs=args.eog_chs,
             aux_chs=args.aux_chs,
@@ -729,7 +740,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             rows.append(
                     {
                         "subject": subj,
-                        "raw_file": str(vhdr.name),
+                        "raw_file": str(raw_path.name),
                         "subject_csv": subject_csv_name,
                         "subject_csv_path": subject_csv_path,
                         "subject_csv_exists": subject_csv_exists,
@@ -757,7 +768,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             rows.append(
                     {
                         "subject": subj,
-                        "raw_file": str(vhdr.name),
+                        "raw_file": str(raw_path.name),
                         "subject_csv": subject_csv_name,
                         "subject_csv_path": subject_csv_path,
                         "subject_csv_exists": subject_csv_exists,
@@ -793,6 +804,22 @@ def run_full_pipeline(args, defaults=None, cfg=None):
 
         events = build_events_from_positions_and_codes(markers_aligned, codes)
         events_stddev, event_id = select_and_recode_stddev(events, args.standard_codes, args.deviant_codes)
+        if len(events_stddev) == 0:
+            msg = f"No standard/deviant events after filtering for {subj}"
+            print("[WARN]", msg, "-> skipping")
+            rows.append(
+                {
+                    "subject": subj,
+                    "raw_file": str(raw_path.name),
+                    "subject_csv": subject_csv_name,
+                    "subject_csv_path": subject_csv_path,
+                    "subject_csv_exists": subject_csv_exists,
+                    **burst_qc,
+                    "status": "SKIP_NO_STDDEV_EVENTS",
+                    "error": msg,
+                }
+            )
+            continue
         epochs = make_epochs(raw, events_stddev, event_id, ep)
 
         keep_mask = np.isin(events[:, 2], stddev_set)
@@ -849,7 +876,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             rows.append(
                     {
                         "subject": subj,
-                        "raw_file": str(vhdr.name),
+                        "raw_file": str(raw_path.name),
                         "subject_csv": subject_csv_name,
                         "subject_csv_path": subject_csv_path,
                         "subject_csv_exists": subject_csv_exists,
@@ -872,7 +899,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             rows.append(
                     {
                         "subject": subj,
-                        "raw_file": str(vhdr.name),
+                        "raw_file": str(raw_path.name),
                         "subject_csv": subject_csv_name,
                         "subject_csv_path": subject_csv_path,
                         "subject_csv_exists": subject_csv_exists,
@@ -1004,7 +1031,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         rows.append(
             {
                 "subject": subj,
-                "raw_file": str(vhdr.name),
+                "raw_file": str(raw_path.name),
                 "subject_csv": subject_csv_name,
                         "subject_csv_path": subject_csv_path,
                         "subject_csv_exists": subject_csv_exists,
@@ -1331,16 +1358,16 @@ def build_arg_parser():
     ap.add_argument("--process_data", action="store_true", help="Process raw data into epochs/evokeds/QC")
     ap.add_argument("--get_metrics", action="store_true", help="Compute ERP/TFR metrics")
     ap.add_argument("--plot_figures", action="store_true", help="Generate paper-ready figures")
-    ap.add_argument("--raw_dir",  help="Folder containing BrainVision .vhdr files")
+    ap.add_argument("--raw_dir",  help="Folder containing BrainVision .vhdr or EEGLAB .set files (recurses)")
     ap.add_argument("--subject_csv_dir",  help="Folder containing subject-###.csv files")
     ap.add_argument("--out_dir", help="Output root folder")
-    ap.add_argument("--summarize_one_file", default=None, help="If provided, summarize this .vhdr and exit.")
+    ap.add_argument("--summarize_one_file", default=None, help="If provided, summarize this raw file (.vhdr or .set) and exit.")
 
     ap.add_argument(
         "--subjects",
         nargs="*",
         default=None,
-        help="Optional list of subject stems to run (e.g., S203 s204). If omitted, runs all .vhdr files in raw_dir.",
+        help="Optional list of subject stems to run (e.g., S203 s204). If omitted, runs all .vhdr/.set files in raw_dir.",
     )
 
     ap.add_argument(

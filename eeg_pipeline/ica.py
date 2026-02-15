@@ -214,7 +214,7 @@ def find_ica_excludes(
     if use_eog:
         # Use the first available EOG channel for blink detection
         eog_name = info["ch_names"][eog_picks[0]]
-        inds, scores = ica.find_bads_eog(raw, ch_name=eog_name, threshold=None, verbose=False)
+        inds, scores = ica.find_bads_eog(raw, ch_name=eog_name, threshold="auto", verbose=False)
         # Sort identified components by absolute score (descending)
         inds_scores = sorted(
             [(i, float(scores[i])) for i in inds], key=lambda x: abs(x[1]), reverse=True
