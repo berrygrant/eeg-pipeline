@@ -91,7 +91,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--compute_mmn",
         action="store_true",
-        help="Compute Deviant–Standard difference wave (MMN) if supported",
+        help="Compute Deviant–Standard difference wave if supported",
+    )
+    ap.add_argument(
+        "--difference_label",
+        default=None,
+        help="Optional label for the Deviant–Standard difference wave (default: DEV_MINUS_STD).",
     )
 
     # TFR settings (defaults match run_metrics.py)
@@ -406,6 +411,8 @@ def main(argv=None):
                 channels=args.channels,
                 windows=windows,
                 conditions=args.conditions,
+                compute_mmn=bool(args.compute_mmn),
+                mmn_name=args.difference_label or "DEV_MINUS_STD",
             )
             erp_rows.append(df_erp)
 

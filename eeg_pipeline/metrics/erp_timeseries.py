@@ -63,7 +63,7 @@ def compute_erp_timeseries(
     params: ERPTimeSeriesParams = ERPTimeSeriesParams(),
     conditions: Sequence[str] = ("Standard", "Deviant"),
     include_difference_wave: bool = True,
-    difference_label: str = "MMN_DEV_MINUS_STD",
+    difference_label: str = "DEV_MINUS_STD",
 ) -> pd.DataFrame:
     """
     Compute time-series ERPs per subject × condition × channel × time.

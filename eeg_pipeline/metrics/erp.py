@@ -64,7 +64,7 @@ def _rows_for_evoked(
         data_uv = ev_crop.data * 1e6  # V → µV
         crop_times = ev_crop.times
 
-        # epoch count: for derived conditions (e.g., MMN), epochs[condition] won't exist
+        # epoch count: for derived conditions (difference waves), epochs[condition] won't exist
         if condition in epochs.event_id:
             n_epochs = int(len(epochs[condition]))
         else:
@@ -106,6 +106,10 @@ def compute_erp_metrics(
     channels: Sequence[str],
     windows: Sequence[ERPWindow],
     conditions: Sequence[str] = ("Standard", "Deviant"),
+    compute_mmn: bool = True,
+    mmn_name: str = "DEV_MINUS_STD",
+    mmn_deviant: str = "Deviant",
+    mmn_standard: str = "Standard",
 ) -> pd.DataFrame:
     """
     Compute ERP window metrics (mean + peak) per subject × condition × channel × window.
@@ -133,5 +137,24 @@ def compute_erp_metrics(
                 source_conditions=None,
             )
         )
+
+    # Derived difference wave: Deviant - Standard
+    if compute_mmn:
+        ev_dev = _get_evoked(epochs, mmn_deviant)
+        ev_std = _get_evoked(epochs, mmn_standard)
+        if (ev_dev is not None) and (ev_std is not None):
+            diff = mne.combine_evoked([ev_dev, ev_std], weights=[1.0, -1.0])
+            rows.extend(
+                _rows_for_evoked(
+                    evoked=diff,
+                    epochs=epochs,
+                    subject=subject,
+                    condition=mmn_name or "DEV_MINUS_STD",
+                    channels=channels,
+                    windows=windows,
+                    status="OK",
+                    source_conditions=f"{mmn_deviant}-{mmn_standard}",
+                )
+            )
 
     return pd.DataFrame(rows)

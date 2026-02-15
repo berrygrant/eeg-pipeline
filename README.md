@@ -16,7 +16,7 @@ This project is designed for **research-grade EEG workflows** with an emphasis o
 ## Key Features
 
 ### Core preprocessing
-- BrainVision (.vhdr / .vmrk) input
+- BrainVision (.vhdr / .vmrk) and EEGLAB (.set) input
 - Standard montages (e.g., `standard_1020`)
 - Configurable re-reference (`average` or `none`)
 - Band-pass and notch filtering
@@ -156,6 +156,8 @@ ica:
 metrics:
   erp:
     enabled: true
+    # Label for Deviant-Standard difference wave (optional)
+    difference_label: DEV_MINUS_STD
     windows:
       - name: MMN_150_250
         tmin: 0.15
@@ -188,6 +190,14 @@ Optional debugging / inspection of a single file:
 python -m eeg_pipeline.cli \
   --config config.yaml \
   --summarize_one_file /path/to/S203.vhdr
+```
+
+EEGLAB example:
+
+```bash
+python -m eeg_pipeline.cli \
+  --config config.yaml \
+  --summarize_one_file /path/to/sub-1001_task-WordPR_eeg.set
 ```
 
 ### Opinionated wrappers (optional)

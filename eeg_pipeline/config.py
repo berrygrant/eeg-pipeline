@@ -104,6 +104,7 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
     set_default(cfg, "events.behavioral_keep_codes", [])
     set_default(cfg, "events.standard_codes", [])
     set_default(cfg, "events.deviant_codes", [])
+    set_default(cfg, "events.condition_map", None)
     set_default(cfg, "events.drop_eeg_markers_by_gap_s", None)
     set_default(cfg, "events.auto_drop_to_count", True)
 
@@ -112,9 +113,14 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
     set_default(cfg, "epoching.baseline", [-0.2, 0.0])
 
     set_default(cfg, "artifacts.test_window", [-0.2, 0.3])
+    set_default(cfg, "artifacts.max_reject_rate", None)
     set_default(cfg, "artifacts.blink.threshold_uv", 75.0)
     set_default(cfg, "artifacts.blink.win_ms", 200.0)
     set_default(cfg, "artifacts.blink.step_ms", 10.0)
+    set_default(cfg, "artifacts.voltage.method", "simple")  # simple | window_ptp
+    set_default(cfg, "artifacts.voltage.threshold_uv", 150.0)
+    set_default(cfg, "artifacts.voltage.win_ms", 200.0)
+    set_default(cfg, "artifacts.voltage.step_ms", 10.0)
     set_default(cfg, "artifacts.voltage.pos_uv", 150.0)
     set_default(cfg, "artifacts.voltage.neg_uv", -150.0)
 
@@ -136,6 +142,8 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
     set_default(cfg, "metrics.erp.enabled", True)
     set_default(cfg, "metrics.erp.windows", [])
     set_default(cfg, "metrics.erp.timeseries", False)
+    set_default(cfg, "metrics.erp.difference_label", None)
+    set_default(cfg, "metrics.erp.conditions", None)
 
     set_default(cfg, "metrics.tfr.enabled", False)
     set_default(cfg, "metrics.tfr.method", "multitaper")
@@ -181,6 +189,10 @@ def _validate_config(cfg: Dict[str, Any]) -> None:
     if ica_mode not in {"off", "auto", "on"}:
         errors.append("ica.mode must be one of: off | auto | on.")
 
+    volt_method = str(config_get(cfg, "artifacts.voltage.method", "simple")).lower()
+    if volt_method not in {"simple", "window_ptp"}:
+        errors.append("artifacts.voltage.method must be one of: simple | window_ptp.")
+
     # Disjoint standard/deviant
     try:
         std_set = set(int(x) for x in std)
@@ -190,6 +202,28 @@ def _validate_config(cfg: Dict[str, Any]) -> None:
             errors.append(f"Standard/deviant code overlap not allowed: {overlap}")
     except Exception:
         errors.append("events.standard_codes / deviant_codes must be integers.")
+
+    # Condition map (optional)
+    cond_map = config_get(cfg, "events.condition_map", None)
+    if cond_map is not None:
+        if not isinstance(cond_map, dict):
+            errors.append("events.condition_map must be a mapping of name -> code(s).")
+        else:
+            seen = set()
+            try:
+                for name, codes in cond_map.items():
+                    codes_list = codes if isinstance(codes, (list, tuple, set)) else [codes]
+                    if len(codes_list) != 1:
+                        errors.append(
+                            f"events.condition_map['{name}'] must map to a single code."
+                        )
+                        continue
+                    c = int(list(codes_list)[0])
+                    if c in seen:
+                        errors.append(f"events.condition_map has duplicate code: {c}")
+                    seen.add(c)
+            except Exception:
+                errors.append("events.condition_map values must be integers (or lists of integers).")
 
     # ERP windows sanity
     erp_windows = config_get(cfg, "metrics.erp.windows", [])
@@ -241,6 +275,7 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     cfg["events"]["behavioral_keep_codes"] = _as_int_list(cfg["events"].get("behavioral_keep_codes", []))
     cfg["events"]["standard_codes"] = _as_int_list(cfg["events"].get("standard_codes", []))
     cfg["events"]["deviant_codes"] = _as_int_list(cfg["events"].get("deviant_codes", []))
+    cfg["events"]["condition_map"] = _normalize_condition_map(cfg["events"].get("condition_map", None))
 
     # Floats
     cfg["preprocess"]["l_freq"] = float(cfg["preprocess"]["l_freq"])
@@ -260,6 +295,13 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         float(cfg["artifacts"]["test_window"][0]),
         float(cfg["artifacts"]["test_window"][1]),
     ]
+    cfg["artifacts"]["max_reject_rate"] = (
+        None if cfg["artifacts"]["max_reject_rate"] in (None, "null", "None") else float(cfg["artifacts"]["max_reject_rate"])
+    )
+    cfg["artifacts"]["voltage"]["method"] = str(cfg["artifacts"]["voltage"].get("method", "simple")).lower()
+    cfg["artifacts"]["voltage"]["threshold_uv"] = float(cfg["artifacts"]["voltage"].get("threshold_uv", 150.0))
+    cfg["artifacts"]["voltage"]["win_ms"] = float(cfg["artifacts"]["voltage"].get("win_ms", 200.0))
+    cfg["artifacts"]["voltage"]["step_ms"] = float(cfg["artifacts"]["voltage"].get("step_ms", 10.0))
 
     # ICA
     cfg["ica"]["mode"] = str(cfg["ica"]["mode"]).lower()
@@ -276,6 +318,14 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     # Token map convenience normalization -> {"token1": "...", "token2": "..."} or None
     cfg["labels"]["token_map"] = _normalize_token_map(cfg["labels"].get("token_map"))
+
+    # Metrics conditions (optional)
+    conds = cfg["metrics"]["erp"].get("conditions", None)
+    if conds is not None:
+        if isinstance(conds, (list, tuple)):
+            cfg["metrics"]["erp"]["conditions"] = [str(c) for c in conds]
+        else:
+            cfg["metrics"]["erp"]["conditions"] = [str(conds)]
 
     return cfg
 
@@ -357,3 +407,22 @@ def _normalize_token_map(token_map: Any) -> Optional[Dict[str, str]]:
         a, b = s.split(None, 1)
         return {"token1": a, "token2": b}
     return None
+<<<<<<< Updated upstream
+=======
+
+
+def _normalize_condition_map(condition_map: Any) -> Optional[Dict[str, list[int]]]:
+    if condition_map is None:
+        return None
+    if not isinstance(condition_map, dict):
+        raise ValueError("events.condition_map must be a mapping of name -> code(s).")
+    out: Dict[str, list[int]] = {}
+    for k, v in condition_map.items():
+        name = str(k)
+        if isinstance(v, (list, tuple, set)):
+            codes = [int(x) for x in v]
+        else:
+            codes = [int(v)]
+        out[name] = codes
+    return out
+>>>>>>> Stashed changes

@@ -7,7 +7,7 @@ import pandas as pd
 
 
 def read_raw_preprocess(
-    vhdr_path: Path,
+    raw_path: Path,
     montage: str,
     eog_chs: list[str],
     aux_chs: list[str],
@@ -16,7 +16,13 @@ def read_raw_preprocess(
     h_freq: float,
     notch: list[float] | None,
 ):
-    raw = mne.io.read_raw_brainvision(vhdr_path, preload=True)
+    suffix = raw_path.suffix.lower()
+    if suffix == ".vhdr":
+        raw = mne.io.read_raw_brainvision(raw_path, preload=True)
+    elif suffix == ".set":
+        raw = mne.io.read_raw_eeglab(raw_path, preload=True)
+    else:
+        raise ValueError(f"Unsupported raw file extension: {raw_path.suffix}")
 
     ch_types = {ch: "eog" for ch in eog_chs if ch in raw.ch_names}
     if ch_types:

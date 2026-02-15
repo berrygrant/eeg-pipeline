@@ -58,6 +58,11 @@ def build_arg_parser():
         default=1,
         help="Compute Deviant–Standard difference wave (1=yes, 0=no)",
     )
+    ap.add_argument(
+        "--difference_label",
+        default=None,
+        help="Optional label for the Deviant–Standard difference wave (default: DEV_MINUS_STD).",
+    )
 
     # TFR settings
     ap.add_argument("--tfr_tmin", type=float, default=-0.2)
@@ -132,6 +137,8 @@ def main(argv=None):
             channels=args.channels,
             windows=windows,
             conditions=args.conditions,
+            compute_mmn=bool(args.compute_mmn),
+            mmn_name=args.difference_label or "DEV_MINUS_STD",
         )
         erp_rows.append(df_erp)
 

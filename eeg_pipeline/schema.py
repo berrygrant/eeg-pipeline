@@ -156,3 +156,86 @@ def derive_metadata_v1(
     df["trial_token"] = df["trial_token_role"].map(token_map).fillna(df["trial_token_role"])
 
     return df
+
+
+def derive_metadata_from_condition_map(
+    codes,
+    condition_map: dict,
+):
+    """
+    Build metadata using a condition map (name -> code).
+
+    For ds003620-style labels, we parse condition names like:
+      ntDontcount_lab
+      t_count_campus
+    into stimulus/task/environment fields.
+    """
+    import numpy as np
+    import pandas as pd
+
+    if not isinstance(condition_map, dict) or not condition_map:
+        raise ValueError("condition_map must be a non-empty dict of name -> code.")
+
+    # Reverse lookup: code -> condition name
+    code_to_name: dict[int, str] = {}
+    for name, code in condition_map.items():
+        if isinstance(code, (list, tuple, set)):
+            codes_list = [int(c) for c in code]
+        else:
+            codes_list = [int(code)]
+        for c in codes_list:
+            code_to_name[int(c)] = str(name)
+
+    codes_arr = np.asarray(codes, dtype=int)
+    cond = [code_to_name.get(int(c), "UNKNOWN") for c in codes_arr]
+
+    # Parse condition name -> stimulus/task/environment (best-effort)
+    stim = []
+    task = []
+    env = []
+    for name in cond:
+        parts = str(name).split("_")
+        if len(parts) >= 3:
+            stim.append(parts[0])
+            task.append(parts[1])
+            env.append(parts[2])
+        elif len(parts) == 2:
+            # Handle compact labels like "ntDontcount_lab"
+            left, right = parts
+            left_l = left.lower()
+            if left_l.startswith("nt"):
+                stim.append("nt")
+                task.append(left[2:] or "NA")
+            elif left_l.startswith("t"):
+                stim.append("t")
+                task.append(left[1:] or "NA")
+            else:
+                stim.append(left)
+                task.append("NA")
+            env.append(right)
+        elif len(parts) == 1:
+            stim.append(parts[0])
+            task.append("NA")
+            env.append("NA")
+        else:
+            stim.append("NA")
+            task.append("NA")
+            env.append("NA")
+
+    df = pd.DataFrame(
+        {
+            "code": codes_arr,
+            "condition": cond,
+            "stimulus": stim,
+            "task": task,
+            "environment": env,
+        }
+    )
+
+    # Ensure string dtype for robust .str access (even when empty)
+    df["stimulus"] = df["stimulus"].astype(str)
+    stim_l = df["stimulus"].str.lower()
+    df["is_standard"] = stim_l.eq("nt")
+    df["is_deviant"] = stim_l.eq("t")
+
+    return df
