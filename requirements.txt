@@ -1,6 +1,7 @@
 # Core dependencies
 mne
 numpy
+scipy
 pandas
 pyarrow
 PyYAML
@@ -10,3 +11,4 @@ matplotlib
 seaborn
 # Optional extras
 # picard
+# cupy-cuda11x   # optional GPU acceleration (CUDA 11.x)
