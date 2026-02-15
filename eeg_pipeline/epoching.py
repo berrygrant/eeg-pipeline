@@ -47,6 +47,7 @@ def make_epochs(raw, events_stddev: np.ndarray, event_id: dict, ep: EpochParams)
         baseline=ep.baseline,
         preload=True,
         reject_by_annotation=True,
+        on_missing="warn",
         detrend=None,
     )
     return epochs
