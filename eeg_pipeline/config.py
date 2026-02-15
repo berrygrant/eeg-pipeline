@@ -133,6 +133,9 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     set_default(cfg, "labels.token_map", None)
 
+    set_default(cfg, "compute.use_gpu", False)
+    set_default(cfg, "compute.gpu_device", None)
+
     set_default(cfg, "metrics.erp.enabled", True)
     set_default(cfg, "metrics.erp.windows", [])
     set_default(cfg, "metrics.erp.timeseries", False)
@@ -276,6 +279,12 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     # Token map convenience normalization -> {"token1": "...", "token2": "..."} or None
     cfg["labels"]["token_map"] = _normalize_token_map(cfg["labels"].get("token_map"))
+
+    # Compute (optional GPU acceleration)
+    compute_cfg = cfg.get("compute", {})
+    cfg["compute"]["use_gpu"] = bool(compute_cfg.get("use_gpu", False))
+    gd = compute_cfg.get("gpu_device", None)
+    cfg["compute"]["gpu_device"] = None if gd in (None, "null", "None", "") else int(gd)
 
     return cfg
 
