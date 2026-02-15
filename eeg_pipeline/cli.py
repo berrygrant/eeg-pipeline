@@ -615,10 +615,6 @@ def run_full_pipeline(args, defaults=None, cfg=None):
     dev_codes = np.asarray(args.deviant_codes, dtype=int)
     stddev_set = np.r_[std_codes, dev_codes]
 
-<<<<<<< Updated upstream
-    for raw_path in raw_files:
-        subj = raw_path.stem
-=======
     condition_map = getattr(args, "condition_map", None)
     condition_codes: list[int] | None = None
     if condition_map:
@@ -637,9 +633,8 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         else:
             metrics_conditions = ["Standard", "Deviant"]
 
-    for vhdr in vhdr_files:
-        subj = vhdr.stem
->>>>>>> Stashed changes
+    for raw_path in raw_files:
+        subj = raw_path.stem
         subj_num = subject_number_from_stem(subj)
         subject_csv = subject_csv_dir / f"subject-{subj_num}.csv"
         subject_csv_name = subject_csv.name
