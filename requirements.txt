@@ -12,3 +12,5 @@ matplotlib
 seaborn
 # Optional extras
 # picard
+# asrpy
+# mne-icalabel

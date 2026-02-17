@@ -15,6 +15,8 @@ def read_raw_preprocess(
     l_freq: float,
     h_freq: float,
     notch: list[float] | None,
+    resample_hz: float | None = None,
+    apply_h_freq: bool = True,
 ):
     suffix = raw_path.suffix.lower()
     if suffix == ".vhdr":
@@ -77,9 +79,14 @@ def read_raw_preprocess(
             f"Unsupported reref mode: {reref!r} (use 'average', 'none', or 'p9_p10'/'tp9_tp10')"
         )
 
+    if resample_hz is not None:
+        raw.resample(float(resample_hz), npad="auto", verbose=False)
+
     if notch:
         raw.notch_filter(list(notch))
-    raw.filter(l_freq=l_freq, h_freq=h_freq)
+    h_use = h_freq if apply_h_freq else None
+    if (l_freq is not None) or (h_use is not None):
+        raw.filter(l_freq=l_freq, h_freq=h_use)
     return raw
 
 

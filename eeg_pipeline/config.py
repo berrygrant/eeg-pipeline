@@ -100,6 +100,8 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
     set_default(cfg, "preprocess.notch_hz", [60.0])
     set_default(cfg, "preprocess.l_freq", 0.1)
     set_default(cfg, "preprocess.h_freq", 30.0)
+    set_default(cfg, "preprocess.resample_hz", None)
+    set_default(cfg, "preprocess.lowpass_after_asr", False)
 
     set_default(cfg, "events.behavioral_keep_codes", [])
     set_default(cfg, "events.standard_codes", [])
@@ -107,6 +109,7 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
     set_default(cfg, "events.condition_map", None)
     set_default(cfg, "events.drop_eeg_markers_by_gap_s", None)
     set_default(cfg, "events.auto_drop_to_count", True)
+    set_default(cfg, "events.shift_s", 0.0)
 
     set_default(cfg, "epoching.tmin", -0.2)
     set_default(cfg, "epoching.tmax", 0.6)
@@ -127,6 +130,19 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
     set_default(cfg, "artifacts.voltage.step_uv_per_ms", None)
     set_default(cfg, "artifacts.voltage.auto_percentile", None)
 
+    set_default(cfg, "asr.enabled", False)
+    set_default(cfg, "asr.cutoff", 20.0)
+    set_default(cfg, "asr.blocksize", 100)
+    set_default(cfg, "asr.win_len", 0.5)
+    set_default(cfg, "asr.win_overlap", 0.66)
+    set_default(cfg, "asr.max_dropout_fraction", 0.1)
+    set_default(cfg, "asr.min_clean_fraction", 0.25)
+    set_default(cfg, "asr.max_bad_chans", 0.1)
+    set_default(cfg, "asr.method", "euclid")
+    set_default(cfg, "asr.lookahead", 0.25)
+    set_default(cfg, "asr.stepsize", 32)
+    set_default(cfg, "asr.maxdims", 0.66)
+
     set_default(cfg, "ica.mode", "off")  # off | auto | on
     set_default(cfg, "ica.auto_blink_rate_per_min", 15.0)
     set_default(cfg, "ica.method", "fastica")
@@ -139,6 +155,10 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
     set_default(cfg, "ica.corr_thresh", 0.30)
     set_default(cfg, "ica.max_exclude", 3)
     set_default(cfg, "ica.save_ica", True)
+    set_default(cfg, "ica.infomax_extended", True)
+    set_default(cfg, "ica.iclabel.enabled", False)
+    set_default(cfg, "ica.iclabel.threshold", 0.9)
+    set_default(cfg, "ica.iclabel.classes", ["ocular", "cardiac"])
 
     set_default(cfg, "labels.token_map", None)
 
@@ -150,6 +170,7 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
     set_default(cfg, "metrics.erp.timeseries", False)
     set_default(cfg, "metrics.erp.difference_label", None)
     set_default(cfg, "metrics.erp.conditions", None)
+    set_default(cfg, "metrics.erp.grand_average_weighting", "equal")
 
     set_default(cfg, "metrics.tfr.enabled", False)
     set_default(cfg, "metrics.tfr.method", "multitaper")
@@ -190,6 +211,29 @@ def _validate_config(cfg: Dict[str, Any]) -> None:
     if not (isinstance(baseline, list) and len(baseline) == 2):
         errors.append("epoching.baseline must be a 2-item list: [tmin, tmax].")
 
+    # Preprocess sanity
+    lf = config_get(cfg, "preprocess.l_freq", None)
+    hf = config_get(cfg, "preprocess.h_freq", None)
+    if lf not in (None, "null", "None"):
+        try:
+            if float(lf) < 0:
+                errors.append("preprocess.l_freq must be >= 0 (or null).")
+        except Exception:
+            errors.append("preprocess.l_freq must be a number (or null).")
+    if hf not in (None, "null", "None"):
+        try:
+            if float(hf) <= 0:
+                errors.append("preprocess.h_freq must be > 0 (or null).")
+        except Exception:
+            errors.append("preprocess.h_freq must be a number (or null).")
+    rs = config_get(cfg, "preprocess.resample_hz", None)
+    if rs not in (None, "null", "None"):
+        try:
+            if float(rs) <= 0:
+                errors.append("preprocess.resample_hz must be > 0 (or null).")
+        except Exception:
+            errors.append("preprocess.resample_hz must be a number (or null).")
+
     # ICA mode
     ica_mode = str(config_get(cfg, "ica.mode", "off")).lower()
     if ica_mode not in {"off", "auto", "on"}:
@@ -221,6 +265,11 @@ def _validate_config(cfg: Dict[str, Any]) -> None:
                 errors.append("artifacts.voltage.auto_percentile must be in (0, 100].")
         except Exception:
             errors.append("artifacts.voltage.auto_percentile must be a number in (0, 100].")
+
+    # Grand-average weighting
+    ga_w = str(config_get(cfg, "metrics.erp.grand_average_weighting", "equal")).lower()
+    if ga_w not in {"equal", "nave"}:
+        errors.append("metrics.erp.grand_average_weighting must be 'equal' or 'nave'.")
 
     # Disjoint standard/deviant
     try:
@@ -305,10 +354,16 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     cfg["events"]["standard_codes"] = _as_int_list(cfg["events"].get("standard_codes", []))
     cfg["events"]["deviant_codes"] = _as_int_list(cfg["events"].get("deviant_codes", []))
     cfg["events"]["condition_map"] = _normalize_condition_map(cfg["events"].get("condition_map", None))
+    cfg["events"]["shift_s"] = float(cfg["events"].get("shift_s", 0.0))
 
     # Floats
-    cfg["preprocess"]["l_freq"] = float(cfg["preprocess"]["l_freq"])
-    cfg["preprocess"]["h_freq"] = float(cfg["preprocess"]["h_freq"])
+    lf = cfg["preprocess"].get("l_freq", None)
+    cfg["preprocess"]["l_freq"] = None if lf in (None, "null", "None") else float(lf)
+    hf = cfg["preprocess"].get("h_freq", None)
+    cfg["preprocess"]["h_freq"] = None if hf in (None, "null", "None") else float(hf)
+    rs = cfg["preprocess"].get("resample_hz", None)
+    cfg["preprocess"]["resample_hz"] = None if rs in (None, "null", "None") else float(rs)
+    cfg["preprocess"]["lowpass_after_asr"] = bool(cfg["preprocess"].get("lowpass_after_asr", False))
     cfg["preprocess"]["notch_hz"] = _as_float_list(cfg["preprocess"].get("notch_hz", []))
 
     # Epoching
@@ -344,6 +399,21 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         None if volt_auto in (None, "null", "None") else float(volt_auto)
     )
 
+    # ASR
+    asr_cfg = cfg.get("asr", {})
+    cfg["asr"]["enabled"] = bool(asr_cfg.get("enabled", False))
+    cfg["asr"]["cutoff"] = float(asr_cfg.get("cutoff", 20.0))
+    cfg["asr"]["blocksize"] = int(asr_cfg.get("blocksize", 100))
+    cfg["asr"]["win_len"] = float(asr_cfg.get("win_len", 0.5))
+    cfg["asr"]["win_overlap"] = float(asr_cfg.get("win_overlap", 0.66))
+    cfg["asr"]["max_dropout_fraction"] = float(asr_cfg.get("max_dropout_fraction", 0.1))
+    cfg["asr"]["min_clean_fraction"] = float(asr_cfg.get("min_clean_fraction", 0.25))
+    cfg["asr"]["max_bad_chans"] = float(asr_cfg.get("max_bad_chans", 0.1))
+    cfg["asr"]["method"] = str(asr_cfg.get("method", "euclid"))
+    cfg["asr"]["lookahead"] = float(asr_cfg.get("lookahead", 0.25))
+    cfg["asr"]["stepsize"] = int(asr_cfg.get("stepsize", 32))
+    cfg["asr"]["maxdims"] = float(asr_cfg.get("maxdims", 0.66))
+
     # ICA
     cfg["ica"]["mode"] = str(cfg["ica"]["mode"]).lower()
     cfg["ica"]["auto_blink_rate_per_min"] = float(cfg["ica"]["auto_blink_rate_per_min"])
@@ -356,6 +426,18 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     cfg["ica"]["corr_thresh"] = float(cfg["ica"]["corr_thresh"])
     cfg["ica"]["max_exclude"] = int(cfg["ica"]["max_exclude"])
     cfg["ica"]["save_ica"] = bool(cfg["ica"]["save_ica"])
+    cfg["ica"]["infomax_extended"] = bool(cfg["ica"].get("infomax_extended", True))
+    iclabel_cfg = cfg["ica"].get("iclabel", {})
+    iclabel_classes = iclabel_cfg.get("classes", [])
+    if isinstance(iclabel_classes, (list, tuple)):
+        iclabel_classes = [str(c).lower() for c in iclabel_classes]
+    else:
+        iclabel_classes = [str(iclabel_classes).lower()]
+    cfg["ica"]["iclabel"] = {
+        "enabled": bool(iclabel_cfg.get("enabled", False)),
+        "threshold": float(iclabel_cfg.get("threshold", 0.9)),
+        "classes": iclabel_classes,
+    }
 
     # Token map convenience normalization -> {"token1": "...", "token2": "..."} or None
     cfg["labels"]["token_map"] = _normalize_token_map(cfg["labels"].get("token_map"))
@@ -367,6 +449,9 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
             cfg["metrics"]["erp"]["conditions"] = [str(c) for c in conds]
         else:
             cfg["metrics"]["erp"]["conditions"] = [str(conds)]
+    cfg["metrics"]["erp"]["grand_average_weighting"] = str(
+        cfg["metrics"]["erp"].get("grand_average_weighting", "equal")
+    ).lower()
 
     # Compute (optional GPU acceleration)
     compute_cfg = cfg.get("compute", {})

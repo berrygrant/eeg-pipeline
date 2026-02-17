@@ -19,15 +19,19 @@ def compute_evokeds(epochs, conditions):
     return evokeds
 
 
-def grand_averages(evokeds_by_cond):
+def grand_averages(evokeds_by_cond, *, weighting: str = "equal"):
     """
     Compute grand averages for each condition.
     evokeds_by_cond: dict[str, list[Evoked]]
     Returns dict[str, Evoked].
     """
     ga = {}
+    weighting = str(weighting).lower()
     for cond, ev_list in evokeds_by_cond.items():
         if not ev_list:
             continue
-        ga[cond] = mne.grand_average(ev_list)
+        if weighting == "nave":
+            ga[cond] = mne.combine_evoked(ev_list, weights="nave")
+        else:
+            ga[cond] = mne.grand_average(ev_list)
     return ga

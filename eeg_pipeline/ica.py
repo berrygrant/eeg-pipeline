@@ -49,6 +49,7 @@ class ICAParams:
     decim: int = 3
     corr_thresh: float = 0.30
     max_exclude: int = 3
+    infomax_extended: bool = True
 
 
 def _safe_pick_channels(info: mne.Info, names: list[str]) -> list[int]:
@@ -109,11 +110,15 @@ def fit_ica(raw: mne.io.BaseRaw, params: ICAParams) -> Tuple[Optional[mne.prepro
         return None, diag
 
     def _try_fit(n_components: Union[float, int]) -> mne.preprocessing.ICA:
+        fit_params = None
+        if str(params.method).lower() == "infomax":
+            fit_params = {"extended": bool(params.infomax_extended)}
         ica = mne.preprocessing.ICA(
             method=params.method,
             n_components=n_components,
             random_state=params.random_state,
             max_iter=params.max_iter,
+            fit_params=fit_params,
         )
         ica.fit(raw_fit, picks=picks_eeg, decim=params.decim, verbose=False)
         return ica
@@ -283,3 +288,58 @@ def apply_ica(raw: mne.io.BaseRaw, ica: mne.preprocessing.ICA, exclude: list[int
     ica.exclude = list(map(int, exclude))
     ica.apply(raw_clean, verbose=False)
     return raw_clean
+
+
+def find_ica_excludes_iclabel(
+    ica: mne.preprocessing.ICA,
+    raw: mne.io.BaseRaw,
+    *,
+    classes: list[str] | tuple[str, ...] = ("ocular", "cardiac"),
+    threshold: float = 0.9,
+) -> tuple[list[int], dict[str, Any]]:
+    """
+    Identify ICA components to exclude using ICLabel probabilities.
+    Components whose predicted label is in ``classes`` and whose probability
+    exceeds ``threshold`` are marked for exclusion.
+    """
+    classes_norm = [str(c).lower() for c in classes]
+    diag: dict[str, Any] = {
+        "ica_label_method": "iclabel",
+        "ica_label_available": True,
+        "ica_label_classes": ",".join(classes_norm),
+        "ica_label_threshold": float(threshold),
+        "ica_label_error": "",
+    }
+
+    try:
+        from mne_icalabel import label_components  # type: ignore
+    except Exception as e:  # pragma: no cover - import guard
+        diag["ica_label_available"] = False
+        diag["ica_label_error"] = str(e)
+        return [], diag
+
+    try:
+        comp = label_components(raw, ica, method="iclabel")
+        labels = comp.get("labels", [])
+        probs = comp.get("y_pred_proba", [])
+        exclude: list[int] = []
+        exclude_labels: list[str] = []
+        exclude_probs: list[float] = []
+        for i, (lab, prob) in enumerate(zip(labels, probs)):
+            if str(lab).lower() in classes_norm and float(prob) >= float(threshold):
+                exclude.append(int(i))
+                exclude_labels.append(str(lab))
+                exclude_probs.append(float(prob))
+        diag.update(
+            {
+                "ica_label_excluded": exclude,
+                "ica_label_excluded_labels": exclude_labels,
+                "ica_label_excluded_probs": exclude_probs,
+                "ica_label_n_components": int(len(labels)),
+            }
+        )
+        return exclude, diag
+    except Exception as e:
+        diag["ica_label_available"] = False
+        diag["ica_label_error"] = str(e)
+        return [], diag

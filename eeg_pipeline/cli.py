@@ -29,7 +29,8 @@ from .artifacts import (
 from .evoked import compute_evokeds, grand_averages
 from .qc import write_qc_summary
 from .ica_diagnostics import compute_ica_diagnostics, recommend_ica
-from .ica import ICAParams, fit_ica, find_ica_excludes, apply_ica
+from .ica import ICAParams, fit_ica, find_ica_excludes, find_ica_excludes_iclabel, apply_ica
+from .asr import ASRParams, apply_asr
 from .gpu import configure as configure_gpu, capability_report, format_capability_report
 
 # Helper for config integration.  When merging configuration values
@@ -159,6 +160,7 @@ def summarize_one_file(args, raw_path: Path):
     print("Unique annotation count:", len(set(raw0.annotations.description)))
 
     # Preprocess (montage/reference/filter)
+    apply_h_freq = not (bool(getattr(args, "asr", 0)) and bool(getattr(args, "lowpass_after_asr", 0)))
     raw = read_raw_preprocess(
         raw_path=raw_path,
         montage=args.montage,
@@ -168,7 +170,32 @@ def summarize_one_file(args, raw_path: Path):
         l_freq=args.l_freq,
         h_freq=args.h_freq,
         notch=args.notch,
+        resample_hz=getattr(args, "resample_hz", None),
+        apply_h_freq=apply_h_freq,
     )
+
+    asr_params = ASRParams(
+        enabled=bool(getattr(args, "asr", 0)),
+        cutoff=float(getattr(args, "asr_cutoff", 20.0)),
+        blocksize=int(getattr(args, "asr_blocksize", 100)),
+        win_len=float(getattr(args, "asr_win_len", 0.5)),
+        win_overlap=float(getattr(args, "asr_win_overlap", 0.66)),
+        max_dropout_fraction=float(getattr(args, "asr_max_dropout_fraction", 0.1)),
+        min_clean_fraction=float(getattr(args, "asr_min_clean_fraction", 0.25)),
+        max_bad_chans=float(getattr(args, "asr_max_bad_chans", 0.1)),
+        method=str(getattr(args, "asr_method", "euclid")),
+        lookahead=float(getattr(args, "asr_lookahead", 0.25)),
+        stepsize=int(getattr(args, "asr_stepsize", 32)),
+        maxdims=float(getattr(args, "asr_maxdims", 0.66)),
+    )
+    raw, asr_diag = apply_asr(raw, asr_params)
+    if bool(asr_diag.get("asr_applied", False)) and bool(getattr(args, "lowpass_after_asr", 0)):
+        if args.h_freq is not None:
+            raw.filter(l_freq=None, h_freq=float(args.h_freq), picks="eeg", method="fir", phase="zero", verbose=False)
+
+    if bool(asr_diag.get("asr_enabled", False)):
+        print("\nASR diagnostics:")
+        print(pd.Series(asr_diag).to_string())
 
     # ICA diagnostics (non-destructive)
     ica_diag = compute_ica_diagnostics(
@@ -367,6 +394,8 @@ def apply_config(args, defaults=None):
     set_if_default(args, defaults, "l_freq", cfg["preprocess"].get("l_freq", args.l_freq))
     set_if_default(args, defaults, "h_freq", cfg["preprocess"].get("h_freq", args.h_freq))
     set_if_default(args, defaults, "notch", cfg["preprocess"].get("notch_hz", args.notch))
+    set_if_default(args, defaults, "resample_hz", cfg["preprocess"].get("resample_hz", args.resample_hz))
+    set_if_default(args, defaults, "lowpass_after_asr", cfg["preprocess"].get("lowpass_after_asr", args.lowpass_after_asr))
 
     # Channel selections
     set_if_default(args, defaults, "eog_chs", cfg["channels"].get("eog_chs", args.eog_chs))
@@ -388,6 +417,7 @@ def apply_config(args, defaults=None):
         args, defaults, "auto_drop_to_count",
         int(bool(cfg["events"].get("auto_drop_to_count", args.auto_drop_to_count)))
     )
+    set_if_default(args, defaults, "event_shift_s", cfg["events"].get("shift_s", args.event_shift_s))
     # Optional condition map (name -> code)
     cond_map = cfg["events"].get("condition_map", None)
     if cond_map is not None:
@@ -443,6 +473,21 @@ def apply_config(args, defaults=None):
     else:
         set_if_default(args, defaults, "max_reject_rate", art.get("max_reject_rate", args.max_reject_rate))
 
+    # ASR
+    asr_cfg = cfg.get("asr", {})
+    set_if_default(args, defaults, "asr", int(bool(asr_cfg.get("enabled", args.asr))))
+    set_if_default(args, defaults, "asr_cutoff", asr_cfg.get("cutoff", args.asr_cutoff))
+    set_if_default(args, defaults, "asr_blocksize", asr_cfg.get("blocksize", args.asr_blocksize))
+    set_if_default(args, defaults, "asr_win_len", asr_cfg.get("win_len", args.asr_win_len))
+    set_if_default(args, defaults, "asr_win_overlap", asr_cfg.get("win_overlap", args.asr_win_overlap))
+    set_if_default(args, defaults, "asr_max_dropout_fraction", asr_cfg.get("max_dropout_fraction", args.asr_max_dropout_fraction))
+    set_if_default(args, defaults, "asr_min_clean_fraction", asr_cfg.get("min_clean_fraction", args.asr_min_clean_fraction))
+    set_if_default(args, defaults, "asr_max_bad_chans", asr_cfg.get("max_bad_chans", args.asr_max_bad_chans))
+    set_if_default(args, defaults, "asr_method", asr_cfg.get("method", args.asr_method))
+    set_if_default(args, defaults, "asr_lookahead", asr_cfg.get("lookahead", args.asr_lookahead))
+    set_if_default(args, defaults, "asr_stepsize", asr_cfg.get("stepsize", args.asr_stepsize))
+    set_if_default(args, defaults, "asr_maxdims", asr_cfg.get("maxdims", args.asr_maxdims))
+
     # ICA
     ica_cfg = cfg.get("ica", {})
     set_if_default(args, defaults, "ica", ica_cfg.get("mode", args.ica))
@@ -460,6 +505,11 @@ def apply_config(args, defaults=None):
     set_if_default(args, defaults, "ica_corr_thresh", ica_cfg.get("corr_thresh", args.ica_corr_thresh))
     set_if_default(args, defaults, "ica_max_exclude", ica_cfg.get("max_exclude", args.ica_max_exclude))
     set_if_default(args, defaults, "save_ica", int(bool(ica_cfg.get("save_ica", args.save_ica))))
+    set_if_default(args, defaults, "ica_infomax_extended", int(bool(ica_cfg.get("infomax_extended", args.ica_infomax_extended))))
+    iclabel_cfg = ica_cfg.get("iclabel", {})
+    set_if_default(args, defaults, "ica_iclabel", int(bool(iclabel_cfg.get("enabled", args.ica_iclabel))))
+    set_if_default(args, defaults, "ica_iclabel_threshold", iclabel_cfg.get("threshold", args.ica_iclabel_threshold))
+    set_if_default(args, defaults, "ica_iclabel_classes", iclabel_cfg.get("classes", args.ica_iclabel_classes))
 
     # Metrics
     metrics_cfg = cfg.get("metrics", {})
@@ -479,6 +529,12 @@ def apply_config(args, defaults=None):
     args.metrics_erp_enabled = erp_enabled
     args.metrics_tfr_enabled = tfr_enabled
     args.metrics_erp_timeseries = bool(erp_cfg.get("timeseries", False))
+    set_if_default(
+        args,
+        defaults,
+        "grand_average_weighting",
+        str(erp_cfg.get("grand_average_weighting", getattr(args, "grand_average_weighting", "equal"))).lower(),
+    )
 
     # Only override these from config when the user didn't specify them
     if args.metrics_channels is None:
@@ -736,6 +792,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                 )
                 continue
 
+        apply_h_freq = not (bool(getattr(args, "asr", 0)) and bool(getattr(args, "lowpass_after_asr", 0)))
         raw = read_raw_preprocess(
             raw_path=raw_path,
             montage=args.montage,
@@ -745,7 +802,28 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             l_freq=args.l_freq,
             h_freq=args.h_freq,
             notch=args.notch,
+            resample_hz=getattr(args, "resample_hz", None),
+            apply_h_freq=apply_h_freq,
         )
+
+        asr_params = ASRParams(
+            enabled=bool(getattr(args, "asr", 0)),
+            cutoff=float(getattr(args, "asr_cutoff", 20.0)),
+            blocksize=int(getattr(args, "asr_blocksize", 100)),
+            win_len=float(getattr(args, "asr_win_len", 0.5)),
+            win_overlap=float(getattr(args, "asr_win_overlap", 0.66)),
+            max_dropout_fraction=float(getattr(args, "asr_max_dropout_fraction", 0.1)),
+            min_clean_fraction=float(getattr(args, "asr_min_clean_fraction", 0.25)),
+            max_bad_chans=float(getattr(args, "asr_max_bad_chans", 0.1)),
+            method=str(getattr(args, "asr_method", "euclid")),
+            lookahead=float(getattr(args, "asr_lookahead", 0.25)),
+            stepsize=int(getattr(args, "asr_stepsize", 32)),
+            maxdims=float(getattr(args, "asr_maxdims", 0.66)),
+        )
+        raw, asr_diag = apply_asr(raw, asr_params)
+        if bool(asr_diag.get("asr_applied", False)) and bool(getattr(args, "lowpass_after_asr", 0)):
+            if args.h_freq is not None:
+                raw.filter(l_freq=None, h_freq=float(args.h_freq), picks="eeg", method="fir", phase="zero", verbose=False)
 
         ica_diag = compute_ica_diagnostics(
             raw,
@@ -762,9 +840,10 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         ica_fit_diag: dict = {}
         ica_find_diag: dict = {}
 
-        if args.ica == "auto":
-            do_ica = False
-
+        do_ica = False
+        if args.ica == "on":
+            do_ica = True
+        elif args.ica == "auto":
             rate = float(ica_diag.get("blink_rate_per_min", np.nan))
             proxy_rate = float(ica_diag.get("blink_proxy_rate_per_min", np.nan))
             blink_rate = rate if np.isfinite(rate) and rate > 0 else proxy_rate
@@ -775,24 +854,47 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             elif np.isfinite(max_corr) and max_corr >= args.ica_corr_thresh:
                 do_ica = True
 
-            if do_ica:
-                ica_params = ICAParams(
-                    method=args.ica_method,
-                    n_components=_parse_n_components(args.ica_n_components),
-                    random_state=args.ica_random_state,
-                    max_iter=args.ica_max_iter,
-                    fit_l_freq=args.ica_fit_l_freq,
-                    fit_h_freq=args.ica_fit_h_freq,
-                    corr_thresh=args.ica_corr_thresh,
-                    max_exclude=args.ica_max_exclude,
-                    decim=args.ica_decim,
-                )
+        if do_ica:
+            ica_params = ICAParams(
+                method=args.ica_method,
+                n_components=_parse_n_components(args.ica_n_components),
+                random_state=args.ica_random_state,
+                max_iter=args.ica_max_iter,
+                fit_l_freq=args.ica_fit_l_freq,
+                fit_h_freq=args.ica_fit_h_freq,
+                corr_thresh=args.ica_corr_thresh,
+                max_exclude=args.ica_max_exclude,
+                decim=args.ica_decim,
+                infomax_extended=bool(getattr(args, "ica_infomax_extended", 1)),
+            )
 
-                ica_obj, ica_fit_diag = fit_ica(raw, ica_params)
-                if ica_obj is None:
-                    print(f"[WARN] ICA fit failed for {subj}; continuing without ICA.")
+            ica_obj, ica_fit_diag = fit_ica(raw, ica_params)
+            if ica_obj is None:
+                print(f"[WARN] ICA fit failed for {subj}; continuing without ICA.")
+            else:
+                ica_ran = True
+                if bool(getattr(args, "ica_iclabel", 0)):
+                    classes = getattr(args, "ica_iclabel_classes", ["ocular", "cardiac"])
+                    if isinstance(classes, str):
+                        classes = [classes]
+                    ica_exclude, ica_find_diag = find_ica_excludes_iclabel(
+                        ica_obj,
+                        raw,
+                        classes=list(classes),
+                        threshold=float(getattr(args, "ica_iclabel_threshold", 0.9)),
+                    )
+                    if not ica_find_diag.get("ica_label_available", True):
+                        # Fallback to EOG/proxy correlations if ICLabel is unavailable
+                        ica_exclude, fallback_diag = find_ica_excludes(
+                            ica_obj,
+                            raw,
+                            eog_chs=args.eog_chs,
+                            proxy_chs=args.blink_proxy_chs,
+                            corr_thresh=args.ica_corr_thresh,
+                            max_exclude=args.ica_max_exclude,
+                        )
+                        ica_find_diag.update({f"ica_fallback_{k}": v for k, v in fallback_diag.items()})
                 else:
-                    ica_ran = True
                     ica_exclude, ica_find_diag = find_ica_excludes(
                         ica_obj,
                         raw,
@@ -801,13 +903,13 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                         corr_thresh=args.ica_corr_thresh,
                         max_exclude=args.ica_max_exclude,
                     )
-                    if len(ica_exclude) > 0:
-                        raw = apply_ica(raw, ica_obj, ica_exclude)
-                        ica_applied = True
-                    if bool(args.save_ica):
-                        ica_path = out_dir / "00_ica" / f"{subj}-ica.fif"
-                        ica_path.parent.mkdir(parents=True, exist_ok=True)
-                        ica_obj.save(ica_path, overwrite=True)
+                if len(ica_exclude) > 0:
+                    raw = apply_ica(raw, ica_obj, ica_exclude)
+                    ica_applied = True
+                if bool(args.save_ica):
+                    ica_path = out_dir / "00_ica" / f"{subj}-ica.fif"
+                    ica_path.parent.mkdir(parents=True, exist_ok=True)
+                    ica_obj.save(ica_path, overwrite=True)
 
         # Events from annotations
         events_ann = events_from_annotations_positions(raw)
@@ -905,6 +1007,23 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         if diag.get("markers_original", 0) < 0.9 * len(codes):
             review_flag = True
             review_reasons.append("markers<behavior")
+
+        shift_s = float(getattr(args, "event_shift_s", 0.0))
+        shift_samples = int(round(shift_s * float(raw.info["sfreq"])))
+        shift_dropped = 0
+        if shift_samples != 0:
+            shifted = markers_aligned.astype(int) + shift_samples
+            keep = shifted >= 0
+            if not np.all(keep):
+                shift_dropped = int(np.sum(~keep))
+                shifted = shifted[keep]
+                codes = codes[keep]
+            markers_aligned = shifted
+        shift_diag = {
+            "event_shift_s": float(shift_s),
+            "event_shift_samples": int(shift_samples),
+            "event_shift_dropped": int(shift_dropped),
+        }
 
         events = build_events_from_positions_and_codes(markers_aligned, codes)
         events_stddev, event_id = select_and_recode_stddev(events, args.standard_codes, args.deviant_codes)
@@ -1297,6 +1416,8 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                 "behavioral_keep_codes": " ".join(map(str, args.behavioral_keep_codes)) if args.behavioral_keep_codes else "",
                 **diag,
                 **burst_qc,
+                **shift_diag,
+                **asr_diag,
                 **threshold_info,
                 "n_events_used": int(len(events)),
                 "n_events_kept_stddev": int(len(events_epo)),
@@ -1363,7 +1484,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         print(f"Saved QC summary -> {out_dir / 'qc_summary.csv'}")
         return
 
-    ga_by_cond = grand_averages(evokeds_by_cond)
+    ga_by_cond = grand_averages(evokeds_by_cond, weighting=getattr(args, "grand_average_weighting", "equal"))
     for cond, ga in ga_by_cond.items():
         ga.save(d_ga / f"grand_average_{cond}-ave.fif", overwrite=True)
 
@@ -1668,6 +1789,13 @@ def build_arg_parser():
     ap.add_argument("--l_freq", type=float, default=0.1, help="High-pass Hz")
     ap.add_argument("--h_freq", type=float, default=30.0, help="Low-pass Hz")
     ap.add_argument("--notch", type=float, nargs="*", default=[60.0], help="Notch freqs Hz")
+    ap.add_argument("--resample_hz", type=float, default=None, help="Optional resample rate (Hz).")
+    ap.add_argument(
+        "--lowpass_after_asr",
+        type=int,
+        default=0,
+        help="If 1 and ASR enabled, apply low-pass after ASR instead of before.",
+    )
 
     ap.add_argument("--tmin", type=float, default=-0.2, help="Epoch start (s)")
     ap.add_argument("--tmax", type=float, default=0.6, help="Epoch end (s)")
@@ -1701,6 +1829,12 @@ def build_arg_parser():
         type=int,
         default=1,
         help="If EEG markers > behavioral codes used, auto-drop extra markers to match count (1=yes,0=no).",
+    )
+    ap.add_argument(
+        "--event_shift_s",
+        type=float,
+        default=0.0,
+        help="Shift EEG event markers by this many seconds (negative shifts earlier).",
     )
 
     ap.add_argument("--standard_codes", nargs="*", type=int, default=[110, 210], help="Codes considered Standard")
@@ -1755,6 +1889,20 @@ def build_arg_parser():
         help="If set, skip evokeds/metrics when epoch reject rate exceeds this fraction (e.g., 0.5).",
     )
 
+    # --- ASR controls ---
+    ap.add_argument("--asr", type=int, default=0, help="Enable ASR artifact correction (1=yes,0=no).")
+    ap.add_argument("--asr_cutoff", type=float, default=20.0, help="ASR cutoff (std dev).")
+    ap.add_argument("--asr_blocksize", type=int, default=100, help="ASR block size (samples).")
+    ap.add_argument("--asr_win_len", type=float, default=0.5, help="ASR window length (s).")
+    ap.add_argument("--asr_win_overlap", type=float, default=0.66, help="ASR window overlap fraction.")
+    ap.add_argument("--asr_max_dropout_fraction", type=float, default=0.1, help="ASR max dropout fraction.")
+    ap.add_argument("--asr_min_clean_fraction", type=float, default=0.25, help="ASR min clean fraction.")
+    ap.add_argument("--asr_max_bad_chans", type=float, default=0.1, help="ASR max bad channels fraction.")
+    ap.add_argument("--asr_method", default="euclid", choices=["euclid"], help="ASR method.")
+    ap.add_argument("--asr_lookahead", type=float, default=0.25, help="ASR lookahead (s).")
+    ap.add_argument("--asr_stepsize", type=int, default=32, help="ASR stepsize (samples).")
+    ap.add_argument("--asr_maxdims", type=float, default=0.66, help="ASR max dims (fraction).")
+
     # --- ICA controls ---
     ap.add_argument(
         "--ica",
@@ -1788,6 +1936,30 @@ def build_arg_parser():
         help="If --ica auto, run ICA when blink rate >= this threshold (per minute).",
     )
     ap.add_argument("--save_ica", default=1, type=int, help="Save ICA object to out_dir/00_ica (1=yes,0=no).")
+    ap.add_argument(
+        "--ica_infomax_extended",
+        type=int,
+        default=1,
+        help="Use extended infomax when --ica_method infomax (1=yes,0=no).",
+    )
+    ap.add_argument(
+        "--ica_iclabel",
+        type=int,
+        default=0,
+        help="Use ICLabel to select ICA components for exclusion (1=yes,0=no).",
+    )
+    ap.add_argument(
+        "--ica_iclabel_threshold",
+        type=float,
+        default=0.9,
+        help="ICLabel probability threshold for exclusion.",
+    )
+    ap.add_argument(
+        "--ica_iclabel_classes",
+        nargs="*",
+        default=["ocular", "cardiac"],
+        help="ICLabel classes to exclude (e.g., ocular cardiac).",
+    )
 
     ap.add_argument(
         "--on_bv_link_mismatch",
@@ -1839,6 +2011,12 @@ def build_arg_parser():
         type=int,
         default=0,
         help="If 1, include the default P300 window when ERP windows are not otherwise specified.",
+    )
+    ap.add_argument(
+        "--grand_average_weighting",
+        default="equal",
+        choices=["equal", "nave"],
+        help="Grand-average weighting (equal or nave).",
     )
 
     # TFR settings (kept simple; can be overridden in config)
