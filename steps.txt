@@ -1,0 +1,81 @@
+1. Created working folder:
+   /Users/grantberry/Library/CloudStorage/OneDrive-VillanovaUniversity/Research/Grant's Research/eeg-pipeline_Paper/ds007052_Test
+
+2. Cloned the pipeline repo:
+   git clone https://github.com/berrygrant/eeg-pipeline.git
+
+3. Checked out the dev_v1 branch:
+   cd eeg-pipeline
+   git checkout dev_v1
+
+4. Cloned the OpenNeuro dataset:
+   cd ..
+   git clone https://github.com/OpenNeuroDatasets/ds007052.git
+
+5. OpenNeuro dataset changes required (git-annex content retrieval):
+   - The EEG .set files are git-annex pointers (symlinks into .git/annex/objects).
+   - To download actual data content, run inside the dataset repo:
+       cd ds007052
+       git annex get .
+   - If any files are reported "not available", enable a data remote (usually s3-PUBLIC) then retry:
+       git annex enableremote s3-PUBLIC
+       git annex get .
+   - This does not modify dataset content, only retrieves annexed files.
+
+
+6. Subject CSV creation notes (provenance):
+   - Each subject CSV was derived from the OpenNeuro events file:
+       ds007052/sub-XXXX/eeg/sub-XXXX_task-WordPR_events.tsv
+   - The 'value' column was extracted in order.
+   - The string value 'boundary' was mapped to numeric 999.
+   - The resulting sequence was saved as a single-column CSV with header:
+       EventCode
+   - Example mapping check (sub-1059):
+       events.tsv value list -> [999 if value=='boundary' else int(value)]
+       matches subject-1059.csv exactly.
+
+6. Copied subject CSVs needed by the pipeline (behavioral EventCode files):
+   - Source:
+     /Users/grantberry/Library/CloudStorage/OneDrive-VillanovaUniversity/Research/LUV_Lab/Scripts/EEG_Pipeline/ds007052_subject_csv
+   - Destination:
+     /Users/grantberry/Library/CloudStorage/OneDrive-VillanovaUniversity/Research/Grant's Research/eeg-pipeline_Paper/ds007052_Test/ds007052_subject_csv
+
+7. Created output folder for the run:
+   /Users/grantberry/Library/CloudStorage/OneDrive-VillanovaUniversity/Research/Grant's Research/eeg-pipeline_Paper/ds007052_Test/Pipeline_Run
+
+8. Adapted config file for this run:
+   - Created:
+     /Users/grantberry/Library/CloudStorage/OneDrive-VillanovaUniversity/Research/Grant's Research/eeg-pipeline_Paper/ds007052_Test/eeg-pipeline/config_ds007052_erpcore_like.yaml
+   - Updated paths:
+     raw_dir:        /Users/grantberry/Library/CloudStorage/OneDrive-VillanovaUniversity/Research/Grant's Research/eeg-pipeline_Paper/ds007052_Test/ds007052
+     subject_csv_dir:/Users/grantberry/Library/CloudStorage/OneDrive-VillanovaUniversity/Research/Grant's Research/eeg-pipeline_Paper/ds007052_Test/ds007052_subject_csv
+     out_dir:        /Users/grantberry/Library/CloudStorage/OneDrive-VillanovaUniversity/Research/Grant's Research/eeg-pipeline_Paper/ds007052_Test/Pipeline_Run
+
+9. Pipeline command to run (from the eeg-pipeline repo):
+   python -m eeg_pipeline.cli --config config_ds007052_erpcore_like.yaml --process_data --get_metrics
+
+10. Outputs will be written under:
+    /Users/grantberry/Library/CloudStorage/OneDrive-VillanovaUniversity/Research/Grant's Research/eeg-pipeline_Paper/ds007052_Test/Pipeline_Run
+
+11. Config adjustment (dev_v1 validation):
+    - preprocess.h_freq cannot be null in dev_v1; set to 30.0 in config_ds007052_erpcore_like.yaml.
+
+12. Config adjustment (dev_v1 preprocessing):
+    - reref 'p9_p10' is not supported in dev_v1; set preprocess.reref to 'average'.
+
+13. Retrieved annexed EEG data for ds007052:
+    - cd ds007052
+    - git annex get .
+
+14. Ran the pipeline (from the eeg-pipeline repo):
+    python -m eeg_pipeline.cli --config config_ds007052_erpcore_like.yaml --process_data --get_metrics
+
+15. Runtime notes:
+    - Warnings about 'boundary' annotations and missing montage positions for FP1/FP2 (case mismatch) were emitted.
+    - qc_summary.csv shows 190 OK, 91 SKIP_EMPTY_EPOCHS, 4 SKIP_EMPTY_CONDITION, 3 SKIP_MISSING_SUBJECT_CSV.
+      Missing subject CSVs: sub-2002, sub-2025, sub-3042.
+
+16. Channel name normalization update and rerun:
+    - Added FP1->Fp1 and FP2->Fp2 renaming in eeg_pipeline/io_brainvision.py to align with montage labels.
+    - Re-ran the pipeline (same command as step 14) with outputs overwritten in Pipeline_Run.
+    - QC summary remained: 190 OK, 91 SKIP_EMPTY_EPOCHS, 4 SKIP_EMPTY_CONDITION, 3 SKIP_MISSING_SUBJECT_CSV.
