@@ -20,7 +20,12 @@ from .epoching import (
     select_and_filter_conditions,
     make_epochs,
 )
-from .artifacts import moving_window_ptp_mask, simple_voltage_threshold_mask
+from .artifacts import (
+    moving_window_ptp_mask,
+    moving_window_ptp_max,
+    simple_voltage_threshold_mask,
+    step_threshold_mask,
+)
 from .evoked import compute_evokeds, grand_averages
 from .qc import write_qc_summary
 from .ica_diagnostics import compute_ica_diagnostics, recommend_ica
@@ -403,6 +408,7 @@ def apply_config(args, defaults=None):
     set_if_default(args, defaults, "blink_threshold_uv", blink_cfg.get("threshold_uv", args.blink_threshold_uv))
     set_if_default(args, defaults, "blink_win_ms", blink_cfg.get("win_ms", args.blink_win_ms))
     set_if_default(args, defaults, "blink_step_ms", blink_cfg.get("step_ms", args.blink_step_ms))
+    set_if_default(args, defaults, "blink_auto_percentile", blink_cfg.get("auto_percentile", args.blink_auto_percentile))
     volt_cfg = art.get("voltage", {})
     set_if_default(args, defaults, "volt_pos_uv", volt_cfg.get("pos_uv", args.volt_pos_uv))
     set_if_default(args, defaults, "volt_neg_uv", volt_cfg.get("neg_uv", args.volt_neg_uv))
@@ -423,6 +429,14 @@ def apply_config(args, defaults=None):
         setattr(args, "volt_step_ms", volt_cfg.get("step_ms", 10.0))
     else:
         set_if_default(args, defaults, "volt_step_ms", volt_cfg.get("step_ms", args.volt_step_ms))
+    if "volt_step_uv_per_ms" not in defaults:
+        setattr(args, "volt_step_uv_per_ms", volt_cfg.get("step_uv_per_ms", None))
+    else:
+        set_if_default(args, defaults, "volt_step_uv_per_ms", volt_cfg.get("step_uv_per_ms", args.volt_step_uv_per_ms))
+    if "volt_auto_percentile" not in defaults:
+        setattr(args, "volt_auto_percentile", volt_cfg.get("auto_percentile", None))
+    else:
+        set_if_default(args, defaults, "volt_auto_percentile", volt_cfg.get("auto_percentile", args.volt_auto_percentile))
 
     if "max_reject_rate" not in defaults:
         setattr(args, "max_reject_rate", art.get("max_reject_rate", None))
@@ -556,6 +570,25 @@ def apply_config(args, defaults=None):
             args.token_map = None
 
     return cfg
+
+
+def apply_erp_core_preset(args, defaults):
+    """Apply ERP CORE-style defaults (TP9/TP10, 0.1–20 Hz, ICA on, individualized thresholds)."""
+    if not getattr(args, "erp_core", False):
+        return
+    # Store for logging
+    args._erp_core_preset_enabled = True
+    # Preprocessing: ERP CORE uses TP9/TP10 and 0.1 Hz high-pass.
+    set_if_default(args, defaults, "reref", "tp9_tp10")
+    set_if_default(args, defaults, "l_freq", 0.1)
+    # Apply 20 Hz low-pass to align with ERP CORE measurement filtering.
+    set_if_default(args, defaults, "h_freq", 20.0)
+    # Artifact thresholds: individualized via percentile-based rule.
+    set_if_default(args, defaults, "volt_method", "simple")
+    set_if_default(args, defaults, "volt_auto_percentile", 97.5)
+    set_if_default(args, defaults, "blink_auto_percentile", 99.0)
+    # ERP CORE runs ICA by default.
+    set_if_default(args, defaults, "ica", "on")
 
 
 def run_full_pipeline(args, defaults=None, cfg=None):
@@ -933,43 +966,116 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         epochs_test = epochs.copy().crop(tmin=args.art_test_tmin, tmax=args.art_test_tmax)
 
         eog_picks = mne.pick_types(epochs_test.info, eog=True, eeg=False)
-        blink_bad = np.zeros(len(epochs_test), dtype=bool)
-
-        if len(eog_picks) > 0:
-            blink_bad = moving_window_ptp_mask(
-                epochs_test.get_data(picks=eog_picks),
-                sfreq=float(epochs_test.info["sfreq"]),
-                win_ms=args.blink_win_ms,
-                step_ms=args.blink_step_ms,
-                threshold_uv=args.blink_threshold_uv,
-            )
-        else:
+        blink_threshold_uv = float(args.blink_threshold_uv)
+        blink_auto_pct = getattr(args, "blink_auto_percentile", None)
+        if blink_auto_pct in ("None", "null"):
+            blink_auto_pct = None
+        if blink_auto_pct is not None:
+            blink_auto_pct = float(blink_auto_pct)
+        blink_picks = eog_picks
+        if len(blink_picks) == 0:
             proxy = [ch for ch in args.blink_proxy_chs if ch in epochs_test.ch_names]
             if proxy:
-                proxy_picks = mne.pick_channels(epochs_test.ch_names, include=proxy)
-                blink_bad = moving_window_ptp_mask(
-                    epochs_test.get_data(picks=proxy_picks),
+                blink_picks = mne.pick_channels(epochs_test.ch_names, include=proxy)
+        if blink_auto_pct is not None and len(blink_picks) > 0:
+            blink_data = epochs_test.get_data(picks=blink_picks)
+            if blink_data.size:
+                ptp_max = moving_window_ptp_max(
+                    blink_data,
                     sfreq=float(epochs_test.info["sfreq"]),
                     win_ms=args.blink_win_ms,
                     step_ms=args.blink_step_ms,
-                    threshold_uv=args.blink_threshold_uv,
                 )
+                if np.isfinite(ptp_max).any():
+                    blink_threshold_uv = float(np.nanpercentile(ptp_max, blink_auto_pct))
+        blink_bad = np.zeros(len(epochs_test), dtype=bool)
+
+        if len(blink_picks) > 0:
+            blink_bad = moving_window_ptp_mask(
+                epochs_test.get_data(picks=blink_picks),
+                sfreq=float(epochs_test.info["sfreq"]),
+                win_ms=args.blink_win_ms,
+                step_ms=args.blink_step_ms,
+                threshold_uv=blink_threshold_uv,
+            )
 
         eeg_picks = mne.pick_types(epochs_test.info, eeg=True, eog=False)
-        if str(getattr(args, "volt_method", "simple")).lower() == "window_ptp":
+        volt_method = str(getattr(args, "volt_method", "simple")).lower()
+        volt_pos_uv = float(args.volt_pos_uv)
+        volt_neg_uv = float(args.volt_neg_uv)
+        volt_threshold_uv = float(getattr(args, "volt_threshold_uv", 150.0))
+        volt_auto_pct = getattr(args, "volt_auto_percentile", None)
+        if volt_auto_pct in ("None", "null"):
+            volt_auto_pct = None
+        if volt_auto_pct is not None:
+            volt_auto_pct = float(volt_auto_pct)
+        if volt_auto_pct is not None and len(eeg_picks) > 0:
+            eeg_data = epochs_test.get_data(picks=eeg_picks)
+            if eeg_data.size:
+                max_abs = np.nanmax(np.abs(eeg_data) * 1e6, axis=(1, 2))
+                if np.isfinite(max_abs).any():
+                    thr_abs = float(np.nanpercentile(max_abs, volt_auto_pct))
+                    if volt_method in {"simple", "combined"}:
+                        volt_pos_uv = thr_abs
+                        volt_neg_uv = -thr_abs
+                if volt_method in {"window_ptp", "combined"}:
+                    ptp_max = moving_window_ptp_max(
+                        eeg_data,
+                        sfreq=float(epochs_test.info["sfreq"]),
+                        win_ms=float(getattr(args, "volt_win_ms", 200.0)),
+                        step_ms=float(getattr(args, "volt_step_ms", 10.0)),
+                    )
+                    if np.isfinite(ptp_max).any():
+                        volt_threshold_uv = float(np.nanpercentile(ptp_max, volt_auto_pct))
+        if volt_method == "window_ptp":
             muscle_bad = moving_window_ptp_mask(
                 epochs_test.get_data(picks=eeg_picks),
                 sfreq=float(epochs_test.info["sfreq"]),
                 win_ms=float(getattr(args, "volt_win_ms", 200.0)),
                 step_ms=float(getattr(args, "volt_step_ms", 10.0)),
-                threshold_uv=float(getattr(args, "volt_threshold_uv", 150.0)),
+                threshold_uv=volt_threshold_uv,
             )
+        elif volt_method == "combined":
+            simple_bad = simple_voltage_threshold_mask(
+                epochs_test.get_data(picks=eeg_picks),
+                pos_limit_uv=volt_pos_uv,
+                neg_limit_uv=volt_neg_uv,
+            )
+            ptp_bad = moving_window_ptp_mask(
+                epochs_test.get_data(picks=eeg_picks),
+                sfreq=float(epochs_test.info["sfreq"]),
+                win_ms=float(getattr(args, "volt_win_ms", 200.0)),
+                step_ms=float(getattr(args, "volt_step_ms", 10.0)),
+                threshold_uv=volt_threshold_uv,
+            )
+            muscle_bad = simple_bad | ptp_bad
         else:
             muscle_bad = simple_voltage_threshold_mask(
                 epochs_test.get_data(picks=eeg_picks),
-                pos_limit_uv=args.volt_pos_uv,
-                neg_limit_uv=args.volt_neg_uv,
+                pos_limit_uv=volt_pos_uv,
+                neg_limit_uv=volt_neg_uv,
             )
+
+        step_thresh = getattr(args, "volt_step_uv_per_ms", None)
+        if step_thresh not in (None, "None", "null"):
+            step_bad = step_threshold_mask(
+                epochs_test.get_data(picks=eeg_picks),
+                sfreq=float(epochs_test.info["sfreq"]),
+                threshold_uv_per_ms=float(step_thresh),
+            )
+            muscle_bad = muscle_bad | step_bad
+
+        threshold_info = {
+            "blink_threshold_uv_used": float(blink_threshold_uv),
+            "blink_auto_percentile": "" if blink_auto_pct is None else float(blink_auto_pct),
+            "volt_pos_uv_used": float(volt_pos_uv),
+            "volt_neg_uv_used": float(volt_neg_uv),
+            "volt_ptp_threshold_uv_used": (
+                float(volt_threshold_uv) if volt_method in {"window_ptp", "combined"} else ""
+            ),
+            "volt_auto_percentile": "" if volt_auto_pct is None else float(volt_auto_pct),
+            "volt_method": volt_method,
+        }
 
         bad = blink_bad | muscle_bad
         bad_idx = np.where(bad)[0].tolist()
@@ -991,6 +1097,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                         "subject_csv_exists": subject_csv_exists,
                         **diag,
                         **burst_qc,
+                        **threshold_info,
                         "n_epochs_before_artifact": int(n_before),
                         "n_epochs_final": 0,
                     "status": "SKIP_EMPTY_EPOCHS",
@@ -1019,6 +1126,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                         "subject_csv_exists": subject_csv_exists,
                         **diag,
                         **burst_qc,
+                        **threshold_info,
                         "n_epochs_before_artifact": int(n_before),
                         "n_epochs_final": int(n_after),
                     "n_standard_final": int(n_std),
@@ -1048,6 +1156,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                     "subject_csv_exists": subject_csv_exists,
                     **diag,
                     **burst_qc,
+                    **threshold_info,
                     "n_epochs_before_artifact": int(n_before),
                     "n_epochs_final": int(n_after),
                     "n_standard_final": int(n_std),
@@ -1188,6 +1297,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                 "behavioral_keep_codes": " ".join(map(str, args.behavioral_keep_codes)) if args.behavioral_keep_codes else "",
                 **diag,
                 **burst_qc,
+                **threshold_info,
                 "n_events_used": int(len(events)),
                 "n_events_kept_stddev": int(len(events_epo)),
                 "n_epochs_before_artifact": int(n_before),
@@ -1510,6 +1620,12 @@ def prepare_output_dirs(out_dir: Path):
 def build_arg_parser():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, help="Path to YAML/JSON config file")
+    ap.add_argument(
+        "--erp-core",
+        dest="erp_core",
+        action="store_true",
+        help="Use ERP CORE-style defaults (TP9/TP10, 0.1–20 Hz, ICA on, individualized thresholds).",
+    )
     ap.add_argument("--process_data", action="store_true", help="Process raw data into epochs/evokeds/QC")
     ap.add_argument("--get_metrics", action="store_true", help="Compute ERP/TFR metrics")
     ap.add_argument("--plot_figures", action="store_true", help="Generate paper-ready figures")
@@ -1546,8 +1662,8 @@ def build_arg_parser():
     ap.add_argument(
         "--reref",
         default="average",
-        choices=["average", "none"],
-        help="EEG re-reference mode (average or none).",
+        choices=["average", "none", "p9_p10", "tp9_tp10", "mastoids"],
+        help="EEG re-reference mode (average, none, or p9_p10/tp9_tp10 mastoids).",
     )
     ap.add_argument("--l_freq", type=float, default=0.1, help="High-pass Hz")
     ap.add_argument("--h_freq", type=float, default=30.0, help="Low-pass Hz")
@@ -1603,17 +1719,35 @@ def build_arg_parser():
     ap.add_argument("--blink_threshold_uv", type=float, default=75.0)
     ap.add_argument("--blink_win_ms", type=float, default=200.0)
     ap.add_argument("--blink_step_ms", type=float, default=10.0)
+    ap.add_argument(
+        "--blink_auto_percentile",
+        type=float,
+        default=None,
+        help="Optional per-subject percentile for blink peak-to-peak threshold (e.g., 99).",
+    )
     ap.add_argument("--volt_pos_uv", type=float, default=150.0)
     ap.add_argument("--volt_neg_uv", type=float, default=-150.0)
     ap.add_argument(
         "--volt_method",
         default="simple",
-        choices=["simple", "window_ptp"],
-        help="EEG artifact rejection method (simple threshold or windowed peak-to-peak).",
+        choices=["simple", "window_ptp", "combined"],
+        help="EEG artifact rejection method (simple threshold, windowed peak-to-peak, or combined).",
     )
     ap.add_argument("--volt_threshold_uv", type=float, default=150.0)
     ap.add_argument("--volt_win_ms", type=float, default=200.0)
     ap.add_argument("--volt_step_ms", type=float, default=10.0)
+    ap.add_argument(
+        "--volt_step_uv_per_ms",
+        type=float,
+        default=None,
+        help="Optional voltage step threshold (uV/ms). If set, epochs exceeding this step are rejected.",
+    )
+    ap.add_argument(
+        "--volt_auto_percentile",
+        type=float,
+        default=None,
+        help="Optional per-subject percentile for EEG voltage thresholds (e.g., 97.5).",
+    )
     ap.add_argument(
         "--max_reject_rate",
         type=float,
@@ -1773,8 +1907,27 @@ def main(argv=None):
         args.get_metrics = True
         args.plot_figures = False
 
+    # Apply ERP CORE preset before config so it can override config defaults.
+    apply_erp_core_preset(args, defaults)
+
     # Apply config once for all stages
     cfg = apply_config(args, defaults)
+
+    if getattr(args, "_erp_core_preset_enabled", False):
+        print("[ERP-CORE] preset enabled")
+        print(
+            "[ERP-CORE] reref={reref} l_freq={l_freq} h_freq={h_freq} "
+            "volt_method={volt_method} volt_auto_percentile={volt_auto} "
+            "blink_auto_percentile={blink_auto} ica={ica}".format(
+                reref=getattr(args, "reref", ""),
+                l_freq=getattr(args, "l_freq", ""),
+                h_freq=getattr(args, "h_freq", ""),
+                volt_method=getattr(args, "volt_method", ""),
+                volt_auto=getattr(args, "volt_auto_percentile", ""),
+                blink_auto=getattr(args, "blink_auto_percentile", ""),
+                ica=getattr(args, "ica", ""),
+            )
+        )
 
     gpu_status = configure_gpu(bool(args.use_gpu), device=args.gpu_device)
     if args.use_gpu:

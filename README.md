@@ -184,6 +184,29 @@ python -m eeg_pipeline.cli --config config.yaml --process_data --get_metrics
 
 If you omit the stage flags, the default is `--process_data --get_metrics`.
 
+### ERP CORE preset (optional)
+
+You can enable an [ERP CORE‑style preset](https://doi.org/10.1016/j.neuroimage.2020.117465) (Kappeman et al., 2021) via `--erp-core`. This applies the following defaults:
+
+- `preprocess.reref = tp9_tp10`
+- `preprocess.l_freq = 0.1`
+- `preprocess.h_freq = 20.0`
+- `artifacts.voltage.method = simple`
+- `artifacts.voltage.auto_percentile = 97.5`
+- `artifacts.blink.auto_percentile = 99.0`
+- `ica = on`
+
+Example:
+
+```bash
+python -m eeg_pipeline.cli \
+  --config config.yaml \
+  --erp-core \
+  --process_data --get_metrics
+```
+
+CLI flags still override these defaults if explicitly provided.
+
 Optional debugging / inspection of a single file:
 
 ```bash

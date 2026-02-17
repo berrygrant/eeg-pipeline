@@ -96,7 +96,7 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
     set_default(cfg, "channels.drop_aux_chs", ["AUX"])
 
     set_default(cfg, "preprocess.montage", "standard_1020")
-    set_default(cfg, "preprocess.reref", "average")  # average | none
+    set_default(cfg, "preprocess.reref", "average")  # average | none | p9_p10/tp9_tp10
     set_default(cfg, "preprocess.notch_hz", [60.0])
     set_default(cfg, "preprocess.l_freq", 0.1)
     set_default(cfg, "preprocess.h_freq", 30.0)
@@ -117,12 +117,15 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
     set_default(cfg, "artifacts.blink.threshold_uv", 75.0)
     set_default(cfg, "artifacts.blink.win_ms", 200.0)
     set_default(cfg, "artifacts.blink.step_ms", 10.0)
+    set_default(cfg, "artifacts.blink.auto_percentile", None)
     set_default(cfg, "artifacts.voltage.method", "simple")  # simple | window_ptp
     set_default(cfg, "artifacts.voltage.threshold_uv", 150.0)
     set_default(cfg, "artifacts.voltage.win_ms", 200.0)
     set_default(cfg, "artifacts.voltage.step_ms", 10.0)
     set_default(cfg, "artifacts.voltage.pos_uv", 150.0)
     set_default(cfg, "artifacts.voltage.neg_uv", -150.0)
+    set_default(cfg, "artifacts.voltage.step_uv_per_ms", None)
+    set_default(cfg, "artifacts.voltage.auto_percentile", None)
 
     set_default(cfg, "ica.mode", "off")  # off | auto | on
     set_default(cfg, "ica.auto_blink_rate_per_min", 15.0)
@@ -192,9 +195,32 @@ def _validate_config(cfg: Dict[str, Any]) -> None:
     if ica_mode not in {"off", "auto", "on"}:
         errors.append("ica.mode must be one of: off | auto | on.")
 
+    # Re-reference mode
+    reref_mode = str(config_get(cfg, "preprocess.reref", "average")).lower()
+    if reref_mode not in {"average", "avg", "none", "no", "p9_p10", "tp9_tp10", "mastoids", "mastoid", "linked_mastoids", "linked"}:
+        errors.append("preprocess.reref must be one of: average | none | p9_p10/tp9_tp10 (mastoids).")
+
     volt_method = str(config_get(cfg, "artifacts.voltage.method", "simple")).lower()
-    if volt_method not in {"simple", "window_ptp"}:
-        errors.append("artifacts.voltage.method must be one of: simple | window_ptp.")
+    if volt_method not in {"simple", "window_ptp", "combined"}:
+        errors.append("artifacts.voltage.method must be one of: simple | window_ptp | combined.")
+
+    blink_auto = config_get(cfg, "artifacts.blink.auto_percentile", None)
+    if blink_auto not in (None, "null", "None"):
+        try:
+            blink_auto = float(blink_auto)
+            if not (0 < blink_auto <= 100):
+                errors.append("artifacts.blink.auto_percentile must be in (0, 100].")
+        except Exception:
+            errors.append("artifacts.blink.auto_percentile must be a number in (0, 100].")
+
+    volt_auto = config_get(cfg, "artifacts.voltage.auto_percentile", None)
+    if volt_auto not in (None, "null", "None"):
+        try:
+            volt_auto = float(volt_auto)
+            if not (0 < volt_auto <= 100):
+                errors.append("artifacts.voltage.auto_percentile must be in (0, 100].")
+        except Exception:
+            errors.append("artifacts.voltage.auto_percentile must be a number in (0, 100].")
 
     # Disjoint standard/deviant
     try:
@@ -305,6 +331,18 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     cfg["artifacts"]["voltage"]["threshold_uv"] = float(cfg["artifacts"]["voltage"].get("threshold_uv", 150.0))
     cfg["artifacts"]["voltage"]["win_ms"] = float(cfg["artifacts"]["voltage"].get("win_ms", 200.0))
     cfg["artifacts"]["voltage"]["step_ms"] = float(cfg["artifacts"]["voltage"].get("step_ms", 10.0))
+    step_uv = cfg["artifacts"]["voltage"].get("step_uv_per_ms", None)
+    cfg["artifacts"]["voltage"]["step_uv_per_ms"] = (
+        None if step_uv in (None, "null", "None") else float(step_uv)
+    )
+    blink_auto = cfg["artifacts"]["blink"].get("auto_percentile", None)
+    cfg["artifacts"]["blink"]["auto_percentile"] = (
+        None if blink_auto in (None, "null", "None") else float(blink_auto)
+    )
+    volt_auto = cfg["artifacts"]["voltage"].get("auto_percentile", None)
+    cfg["artifacts"]["voltage"]["auto_percentile"] = (
+        None if volt_auto in (None, "null", "None") else float(volt_auto)
+    )
 
     # ICA
     cfg["ica"]["mode"] = str(cfg["ica"]["mode"]).lower()
