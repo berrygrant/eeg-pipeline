@@ -24,6 +24,15 @@ def read_raw_preprocess(
     else:
         raise ValueError(f"Unsupported raw file extension: {raw_path.suffix}")
 
+    # Normalize common channel name case mismatches (e.g., FP1 -> Fp1)
+    rename_map = {}
+    if "FP1" in raw.ch_names and "Fp1" not in raw.ch_names:
+        rename_map["FP1"] = "Fp1"
+    if "FP2" in raw.ch_names and "Fp2" not in raw.ch_names:
+        rename_map["FP2"] = "Fp2"
+    if rename_map:
+        raw.rename_channels(rename_map)
+
     ch_types = {ch: "eog" for ch in eog_chs if ch in raw.ch_names}
     if ch_types:
         raw.set_channel_types(ch_types)
