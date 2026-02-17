@@ -1,0 +1,78 @@
+task: "n400_wordpr"
+
+paths:
+  raw_dir: "/Users/grantberry/Library/CloudStorage/OneDrive-VillanovaUniversity/Research/Grant's Research/eeg-pipeline_Paper/ds007052_Test/ds007052"
+  subject_csv_dir: "/Users/grantberry/Library/CloudStorage/OneDrive-VillanovaUniversity/Research/Grant's Research/eeg-pipeline_Paper/ds007052_Test/ds007052_subject_csv"
+  out_dir: "/Users/grantberry/Library/CloudStorage/OneDrive-VillanovaUniversity/Research/Grant's Research/eeg-pipeline_Paper/ds007052_Test/Pipeline_Run"
+
+channels:
+  eog_chs: ["HEOG R", "HEOG L", "VEOG L"]
+  blink_proxy_chs: ["Fp1"]
+  drop_aux_chs: []
+
+preprocess:
+  montage: "standard_1020"
+  reref: "average"
+  resample_sfreq: 256.0
+  notch_hz: null
+  l_freq: 0.1
+  h_freq: 30.0
+
+events:
+  behavioral_keep_codes: []
+  standard_codes: [211, 212]
+  deviant_codes: [221, 222]
+  drop_eeg_markers_by_gap_s: null
+  auto_drop_to_count: true
+
+epoching:
+  tmin: -0.2
+  tmax: 0.8
+  baseline: [-0.2, 0.0]
+
+artifacts:
+  test_window: [-0.2, 0.3]
+  blink:
+    threshold_uv: 75.0
+    win_ms: 200.0
+    step_ms: 10.0
+  voltage:
+    pos_uv: 150.0
+    neg_uv: -150.0
+
+ica:
+  mode: "on"
+  auto_blink_rate_per_min: 15.0
+  method: "infomax"
+  n_components: 0.99
+  random_state: 97
+  max_iter: 512
+  fit_l_freq: 1.0
+  fit_h_freq: null
+  decim: 3
+  corr_thresh: 0.30
+  max_exclude: 3
+  save_ica: true
+
+labels:
+  token_map: null
+
+metrics:
+  erp:
+    enabled: true
+    timeseries: false
+    difference_label: "N400_DIFF"
+    channels: ["CPz"]
+    compute_mmn: true
+    windows:
+      - { name: "N400_300_500", tmin: 0.30, tmax: 0.50 }
+
+  tfr:
+    enabled: false
+    method: "multitaper"
+    tmin: -0.2
+    tmax: 0.8
+    fmin: 3.0
+    fmax: 8.0
+    baseline: [-0.2, 0.0]
+    baseline_mode: "logratio"
