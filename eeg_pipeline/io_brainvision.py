@@ -7,7 +7,7 @@ import pandas as pd
 
 
 def read_raw_preprocess(
-    vhdr_path: Path,
+    raw_path: Path,
     montage: str,
     eog_chs: list[str],
     aux_chs: list[str],
@@ -16,7 +16,30 @@ def read_raw_preprocess(
     h_freq: float,
     notch: list[float] | None,
 ):
-    raw = mne.io.read_raw_brainvision(vhdr_path, preload=True)
+    suffix = raw_path.suffix.lower()
+    if suffix == ".vhdr":
+        raw = mne.io.read_raw_brainvision(raw_path, preload=True)
+    elif suffix == ".set":
+        raw = mne.io.read_raw_eeglab(raw_path, preload=True)
+    else:
+        raise ValueError(f"Unsupported raw file extension: {raw_path.suffix}")
+
+    # Normalize common channel name mismatches (case and aliases)
+    rename_map = {}
+
+    def _maybe_rename(src: str, dst: str) -> None:
+        if src in raw.ch_names and dst not in raw.ch_names:
+            rename_map[src] = dst
+
+    _maybe_rename("FP1", "Fp1")
+    _maybe_rename("FP2", "Fp2")
+    _maybe_rename("PZ", "Pz")
+    _maybe_rename("CZ", "Cz")
+    _maybe_rename("Mastoid L", "TP9")
+    _maybe_rename("Mastoid R", "TP10")
+
+    if rename_map:
+        raw.rename_channels(rename_map)
 
     ch_types = {ch: "eog" for ch in eog_chs if ch in raw.ch_names}
     if ch_types:
@@ -36,8 +59,23 @@ def read_raw_preprocess(
         raw.set_eeg_reference("average", projection=False)
     elif reref_mode in {"none", "no"}:
         pass
+    elif reref_mode in {"p9_p10", "tp9_tp10", "mastoids", "mastoid", "linked_mastoids", "linked"}:
+        ref_pairs = [("P9", "P10"), ("TP9", "TP10")]
+        ref_chs = None
+        for a, b in ref_pairs:
+            if a in raw.ch_names and b in raw.ch_names:
+                ref_chs = [a, b]
+                break
+        if ref_chs is None:
+            raise ValueError(
+                "Requested mastoid reference but neither P9/P10 nor TP9/TP10 were found. "
+                f"Available channels: {raw.ch_names}"
+            )
+        raw.set_eeg_reference(ref_channels=ref_chs, projection=False)
     else:
-        raise ValueError(f"Unsupported reref mode: {reref!r} (use 'average' or 'none')")
+        raise ValueError(
+            f"Unsupported reref mode: {reref!r} (use 'average', 'none', or 'p9_p10'/'tp9_tp10')"
+        )
 
     if notch:
         raw.notch_filter(list(notch))

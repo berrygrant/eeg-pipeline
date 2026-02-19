@@ -9,16 +9,28 @@ import numpy as np
 import pandas as pd
 import mne
 
-from .schema import parse_token_map, derive_metadata_v1
+from .schema import parse_token_map, derive_metadata_v1, derive_metadata_from_condition_map
 from .behavior import read_eventcodes_from_subject_csv, filter_codes
 from .io_brainvision import read_raw_preprocess, events_from_annotations_positions, parse_vmrk_markers
 from .align import marker_gap_stats, keep_by_gap_heuristic, align_marker_positions_to_codes
-from .epoching import EpochParams, build_events_from_positions_and_codes, select_and_recode_stddev, make_epochs
-from .artifacts import moving_window_ptp_mask, simple_voltage_threshold_mask
+from .epoching import (
+    EpochParams,
+    build_events_from_positions_and_codes,
+    select_and_recode_stddev,
+    select_and_filter_conditions,
+    make_epochs,
+)
+from .artifacts import (
+    moving_window_ptp_mask,
+    moving_window_ptp_max,
+    simple_voltage_threshold_mask,
+    step_threshold_mask,
+)
 from .evoked import compute_evokeds, grand_averages
 from .qc import write_qc_summary
 from .ica_diagnostics import compute_ica_diagnostics, recommend_ica
 from .ica import ICAParams, fit_ica, find_ica_excludes, apply_ica
+from .gpu import configure as configure_gpu, capability_report, format_capability_report
 
 # Helper for config integration.  When merging configuration values
 # into command‑line arguments we want to honour user‑supplied flags.
@@ -57,6 +69,7 @@ from eeg_pipeline.config import load_config
 # Metrics (ERP + TFR)
 from eeg_pipeline.metrics import compute_erp_metrics, compute_tfr_metrics, load_epochs
 from eeg_pipeline.metrics.erp import ERPWindow
+from eeg_pipeline.metrics.erp_windows import ERP_WINDOWS
 from eeg_pipeline.metrics.erp_timeseries import ERPTimeSeriesParams, compute_erp_timeseries
 from eeg_pipeline.metrics.tfr import TFRParams
 
@@ -122,19 +135,24 @@ def subject_number_from_stem(stem: str) -> str:
     return digits
 
 
-def summarize_one_file(args, vhdr_path: Path):
-    subj = vhdr_path.stem
+def summarize_one_file(args, raw_path: Path):
+    subj = raw_path.stem
     subj_num = subject_number_from_stem(subj)
     subject_csv = Path(args.subject_csv_dir) / f"subject-{subj_num}.csv"
-    vmrk_path = vhdr_path.with_suffix(".vmrk")
+    is_bv = raw_path.suffix.lower() == ".vhdr"
+    vmrk_path = raw_path.with_suffix(".vmrk") if is_bv else None
 
     print(f"\n=== SUMMARY: {subj} ===")
-    print("Raw file:", vhdr_path)
+    print("Raw file:", raw_path)
     print("Subject CSV:", subject_csv)
-    print("VMRK file:", vmrk_path)
+    if is_bv:
+        print("VMRK file:", vmrk_path)
 
     # Show annotation descriptions without any preprocessing (debug)
-    raw0 = mne.io.read_raw_brainvision(vhdr_path, preload=True)
+    if is_bv:
+        raw0 = mne.io.read_raw_brainvision(raw_path, preload=True)
+    else:
+        raw0 = mne.io.read_raw_eeglab(raw_path, preload=True)
     descs = list(dict.fromkeys(raw0.annotations.description))
     print("\nAnnotation descriptions (first 30 unique):")
     print(descs[:30])
@@ -142,7 +160,7 @@ def summarize_one_file(args, vhdr_path: Path):
 
     # Preprocess (montage/reference/filter)
     raw = read_raw_preprocess(
-        vhdr_path=vhdr_path,
+        raw_path=raw_path,
         montage=args.montage,
         eog_chs=args.eog_chs,
         aux_chs=args.aux_chs,
@@ -190,12 +208,12 @@ def summarize_one_file(args, vhdr_path: Path):
     )
 
     trigger_diag = {
-    "trigger_burst_flag": burst_diag["burst_flag"],
-    "trigger_n_short_iti": burst_diag["n_short_iti"],
-    "trigger_min_iti_s": burst_diag["min_iti_s"],
-    "trigger_burst_max_in_window": burst_diag["burst_max_in_window"],
-    "trigger_burst_n_windows_ge_thresh": burst_diag["burst_n_windows_ge_thresh"],
-    "trigger_burst_params": burst_diag.get("burst_params", ""),
+        "trigger_burst_flag": burst_diag["burst_flag"],
+        "trigger_n_short_iti": burst_diag["n_short_iti"],
+        "trigger_min_iti_s": burst_diag["min_iti_s"],
+        "trigger_burst_max_in_window": burst_diag["burst_max_in_window"],
+        "trigger_burst_n_windows_ge_thresh": burst_diag["burst_n_windows_ge_thresh"],
+        "trigger_burst_params": burst_diag.get("burst_params", ""),
     }
 
     burst_qc = {
@@ -228,7 +246,7 @@ def summarize_one_file(args, vhdr_path: Path):
         print(f"  gap_s={g:>4}: keep {len(keep_idx)}/{len(markers_pos)}")
 
     # Parse .vmrk if present (debug)
-    if vmrk_path.exists():
+    if is_bv and vmrk_path and vmrk_path.exists():
         mk = parse_vmrk_markers(vmrk_path)
         print("\nMarkers from .vmrk:")
         print("  total markers:", len(mk))
@@ -236,7 +254,7 @@ def summarize_one_file(args, vhdr_path: Path):
             print("  marker types:\n", mk["mtype"].value_counts().to_string())
             print("  unique desc count:", mk["desc"].nunique())
             print("  desc distribution (top 10):\n", mk["desc"].value_counts().head(10).to_string())
-    else:
+    elif is_bv:
         print("\n[WARN] .vmrk file not found next to .vhdr; cannot parse markers directly.")
 
     # Subject CSV required to complete behavioral summary
@@ -370,6 +388,10 @@ def apply_config(args, defaults=None):
         args, defaults, "auto_drop_to_count",
         int(bool(cfg["events"].get("auto_drop_to_count", args.auto_drop_to_count)))
     )
+    # Optional condition map (name -> code)
+    cond_map = cfg["events"].get("condition_map", None)
+    if cond_map is not None:
+        setattr(args, "condition_map", cond_map)
 
     # Epoching
     set_if_default(args, defaults, "tmin", cfg["epoching"].get("tmin", args.tmin))
@@ -386,9 +408,40 @@ def apply_config(args, defaults=None):
     set_if_default(args, defaults, "blink_threshold_uv", blink_cfg.get("threshold_uv", args.blink_threshold_uv))
     set_if_default(args, defaults, "blink_win_ms", blink_cfg.get("win_ms", args.blink_win_ms))
     set_if_default(args, defaults, "blink_step_ms", blink_cfg.get("step_ms", args.blink_step_ms))
+    set_if_default(args, defaults, "blink_auto_percentile", blink_cfg.get("auto_percentile", args.blink_auto_percentile))
     volt_cfg = art.get("voltage", {})
     set_if_default(args, defaults, "volt_pos_uv", volt_cfg.get("pos_uv", args.volt_pos_uv))
     set_if_default(args, defaults, "volt_neg_uv", volt_cfg.get("neg_uv", args.volt_neg_uv))
+    # Optional windowed EEG artifact rejection (if configured)
+    if "volt_method" not in defaults:
+        setattr(args, "volt_method", volt_cfg.get("method", "simple"))
+    else:
+        set_if_default(args, defaults, "volt_method", volt_cfg.get("method", args.volt_method))
+    if "volt_threshold_uv" not in defaults:
+        setattr(args, "volt_threshold_uv", volt_cfg.get("threshold_uv", 150.0))
+    else:
+        set_if_default(args, defaults, "volt_threshold_uv", volt_cfg.get("threshold_uv", args.volt_threshold_uv))
+    if "volt_win_ms" not in defaults:
+        setattr(args, "volt_win_ms", volt_cfg.get("win_ms", 200.0))
+    else:
+        set_if_default(args, defaults, "volt_win_ms", volt_cfg.get("win_ms", args.volt_win_ms))
+    if "volt_step_ms" not in defaults:
+        setattr(args, "volt_step_ms", volt_cfg.get("step_ms", 10.0))
+    else:
+        set_if_default(args, defaults, "volt_step_ms", volt_cfg.get("step_ms", args.volt_step_ms))
+    if "volt_step_uv_per_ms" not in defaults:
+        setattr(args, "volt_step_uv_per_ms", volt_cfg.get("step_uv_per_ms", None))
+    else:
+        set_if_default(args, defaults, "volt_step_uv_per_ms", volt_cfg.get("step_uv_per_ms", args.volt_step_uv_per_ms))
+    if "volt_auto_percentile" not in defaults:
+        setattr(args, "volt_auto_percentile", volt_cfg.get("auto_percentile", None))
+    else:
+        set_if_default(args, defaults, "volt_auto_percentile", volt_cfg.get("auto_percentile", args.volt_auto_percentile))
+
+    if "max_reject_rate" not in defaults:
+        setattr(args, "max_reject_rate", art.get("max_reject_rate", None))
+    else:
+        set_if_default(args, defaults, "max_reject_rate", art.get("max_reject_rate", args.max_reject_rate))
 
     # ICA
     ica_cfg = cfg.get("ica", {})
@@ -435,6 +488,16 @@ def apply_config(args, defaults=None):
         if isinstance(chs, (list, tuple)) and len(chs):
             args.metrics_channels = list(map(str, chs))
 
+    # Optional metrics conditions (for ERP/TFR)
+    if getattr(args, "metrics_conditions", None) is None:
+        conds = erp_cfg.get("conditions", None)
+        if conds is None:
+            conds = metrics_cfg.get("conditions", None)
+        if isinstance(conds, (list, tuple)) and len(conds):
+            args.metrics_conditions = list(map(str, conds))
+        elif conds is not None:
+            args.metrics_conditions = [str(conds)]
+
     # ERP windows: list[dict] (preferred) or list[list/tuple]
     if args.erp_window is None:
         wins = erp_cfg.get("windows", None)
@@ -459,6 +522,18 @@ def apply_config(args, defaults=None):
         "compute_mmn",
         int(bool(erp_cfg.get("compute_mmn", metrics_cfg.get("compute_mmn", args.compute_mmn)))),
     )
+    set_if_default(
+        args,
+        defaults,
+        "difference_label",
+        erp_cfg.get("difference_label", metrics_cfg.get("difference_label", args.difference_label)),
+    )
+    set_if_default(
+        args,
+        defaults,
+        "compute_p300",
+        int(bool(erp_cfg.get("compute_p300", metrics_cfg.get("compute_p300", args.compute_p300)))),
+    )
 
     set_if_default(args, defaults, "tfr_tmin", float(tfr_cfg.get("tmin", args.tfr_tmin)))
     set_if_default(args, defaults, "tfr_tmax", float(tfr_cfg.get("tmax", args.tfr_tmax)))
@@ -479,6 +554,11 @@ def apply_config(args, defaults=None):
         tfr_cfg.get("baseline_mode", tfr_cfg.get("mode", args.tfr_baseline_mode)),
     )
 
+    # Compute
+    compute_cfg = cfg.get("compute", {})
+    set_if_default(args, defaults, "use_gpu", bool(compute_cfg.get("use_gpu", args.use_gpu)))
+    set_if_default(args, defaults, "gpu_device", compute_cfg.get("gpu_device", args.gpu_device))
+
     # Token map
     if args.token_map is None:
         tm = cfg.get("labels", {}).get("token_map", None)
@@ -490,6 +570,25 @@ def apply_config(args, defaults=None):
             args.token_map = None
 
     return cfg
+
+
+def apply_erp_core_preset(args, defaults):
+    """Apply ERP CORE-style defaults (TP9/TP10, 0.1–20 Hz, ICA on, individualized thresholds)."""
+    if not getattr(args, "erp_core", False):
+        return
+    # Store for logging
+    args._erp_core_preset_enabled = True
+    # Preprocessing: ERP CORE uses TP9/TP10 and 0.1 Hz high-pass.
+    set_if_default(args, defaults, "reref", "tp9_tp10")
+    set_if_default(args, defaults, "l_freq", 0.1)
+    # Apply 20 Hz low-pass to align with ERP CORE measurement filtering.
+    set_if_default(args, defaults, "h_freq", 20.0)
+    # Artifact thresholds: individualized via percentile-based rule.
+    set_if_default(args, defaults, "volt_method", "simple")
+    set_if_default(args, defaults, "volt_auto_percentile", 97.5)
+    set_if_default(args, defaults, "blink_auto_percentile", 99.0)
+    # ERP CORE runs ICA by default.
+    set_if_default(args, defaults, "ica", "on")
 
 
 def run_full_pipeline(args, defaults=None, cfg=None):
@@ -530,36 +629,58 @@ def run_full_pipeline(args, defaults=None, cfg=None):
     token_map = parse_token_map(args.token_map)
 
     rows: list[dict] = []
-    evokeds_std = []
-    evokeds_dev = []
+    evokeds_by_cond: dict[str, list[mne.Evoked]] = {}
 
     # Metrics outputs collected across subjects
     erp_metrics_all: list[pd.DataFrame] = []
     tfr_metrics_all: list[pd.DataFrame] = []
     erp_timeseries_all: list[pd.DataFrame] = []
 
-    vhdr_files = sorted(raw_dir.glob("*.vhdr"))
-    if not vhdr_files:
-        raise RuntimeError(f"No .vhdr files found in {raw_dir}")
+    raw_files = [p for p in raw_dir.rglob("*.vhdr") if p.is_file() and ".git" not in p.parts]
+    raw_files = sorted(raw_files)
+    if not raw_files:
+        raw_files = [p for p in raw_dir.rglob("*.set") if p.is_file() and ".git" not in p.parts]
+        raw_files = sorted(raw_files)
+    if not raw_files:
+        raise RuntimeError(f"No .vhdr or .set files found in {raw_dir}")
 
     if args.subjects:
         wanted = {s.lower() for s in args.subjects}
-        vhdr_files = [p for p in vhdr_files if p.stem.lower() in wanted]
-        if not vhdr_files:
-            raise RuntimeError(f"No matching .vhdr files found for --subjects={args.subjects}")
+        raw_files = [p for p in raw_files if p.stem.lower() in wanted]
+        if not raw_files:
+            raise RuntimeError(f"No matching raw files found for --subjects={args.subjects}")
 
     std_codes = np.asarray(args.standard_codes, dtype=int)
     dev_codes = np.asarray(args.deviant_codes, dtype=int)
     stddev_set = np.r_[std_codes, dev_codes]
 
-    for vhdr in vhdr_files:
-        subj = vhdr.stem
+    condition_map = getattr(args, "condition_map", None)
+    condition_codes: list[int] | None = None
+    if condition_map:
+        codes_flat: list[int] = []
+        for v in condition_map.values():
+            if isinstance(v, (list, tuple, set)):
+                codes_flat.extend([int(c) for c in v])
+            else:
+                codes_flat.append(int(v))
+        condition_codes = sorted(set(codes_flat))
+
+    metrics_conditions = getattr(args, "metrics_conditions", None)
+    if not metrics_conditions:
+        if condition_map:
+            metrics_conditions = list(condition_map.keys())
+        else:
+            metrics_conditions = ["Standard", "Deviant"]
+
+    for raw_path in raw_files:
+        subj = raw_path.stem
         subj_num = subject_number_from_stem(subj)
         subject_csv = subject_csv_dir / f"subject-{subj_num}.csv"
         subject_csv_name = subject_csv.name
         subject_csv_path = str(subject_csv)
         subject_csv_exists = bool(subject_csv.exists())
-        vmrk = vhdr.with_suffix(".vmrk")
+        is_bv = raw_path.suffix.lower() == ".vhdr"
+        vmrk = raw_path.with_suffix(".vmrk") if is_bv else None
 
         print(f"\n=== {subj} ===")
 
@@ -573,49 +694,50 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             "trigger_burst_params": "",
         }
 
-        if not vmrk.exists():
-            msg = f"Missing .vmrk for {subj}: {vmrk}"
-            if args.on_missing_vmrk == "fail":
-                raise FileNotFoundError(msg)
-            if args.on_missing_vmrk == "skip":
+        if is_bv:
+            if not vmrk or not vmrk.exists():
+                msg = f"Missing .vmrk for {subj}: {vmrk}"
+                if args.on_missing_vmrk == "fail":
+                    raise FileNotFoundError(msg)
+                if args.on_missing_vmrk == "skip":
+                    print("[WARN]", msg, "-> skipping")
+                    rows.append(
+                        {
+                            "subject": subj,
+                            "raw_file": str(raw_path.name),
+                            "subject_csv": subject_csv_name,
+                            "subject_csv_path": subject_csv_path,
+                            "subject_csv_exists": subject_csv_exists,
+                            **burst_qc,
+                            "status": "SKIP_MISSING_VMRK",
+                            "error": msg,
+                        }
+                    )
+                    continue
+                print("[WARN]", msg)
+
+            ok, reason = brainvision_links_ok(raw_path)
+            if not ok:
+                msg = f"BrainVision link mismatch in {raw_path.name}: {reason}"
+                if args.on_bv_link_mismatch == "fail":
+                    raise FileNotFoundError(msg)
                 print("[WARN]", msg, "-> skipping")
                 rows.append(
-                    {
-                        "subject": subj,
-                        "raw_file": str(vhdr.name),
-                        "subject_csv": subject_csv_name,
-                        "subject_csv_path": subject_csv_path,
-                        "subject_csv_exists": subject_csv_exists,
-                        **burst_qc,
-                        "status": "SKIP_MISSING_VMRK",
-                        "error": msg,
-                    }
+                        {
+                            "subject": subj,
+                            "raw_file": str(raw_path.name),
+                            "subject_csv": subject_csv_name,
+                            "subject_csv_path": subject_csv_path,
+                            "subject_csv_exists": subject_csv_exists,
+                            **burst_qc,
+                            "status": "SKIP_BV_LINK_MISMATCH",
+                            "error": msg,
+                        }
                 )
                 continue
-            print("[WARN]", msg)
-
-        ok, reason = brainvision_links_ok(vhdr)
-        if not ok:
-            msg = f"BrainVision link mismatch in {vhdr.name}: {reason}"
-            if args.on_bv_link_mismatch == "fail":
-                raise FileNotFoundError(msg)
-            print("[WARN]", msg, "-> skipping")
-            rows.append(
-                    {
-                        "subject": subj,
-                        "raw_file": str(vhdr.name),
-                        "subject_csv": subject_csv_name,
-                        "subject_csv_path": subject_csv_path,
-                        "subject_csv_exists": subject_csv_exists,
-                        **burst_qc,
-                        "status": "SKIP_BV_LINK_MISMATCH",
-                        "error": msg,
-                    }
-            )
-            continue
 
         raw = read_raw_preprocess(
-            vhdr_path=vhdr,
+            raw_path=raw_path,
             montage=args.montage,
             eog_chs=args.eog_chs,
             aux_chs=args.aux_chs,
@@ -722,7 +844,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             rows.append(
                     {
                         "subject": subj,
-                        "raw_file": str(vhdr.name),
+                        "raw_file": str(raw_path.name),
                         "subject_csv": subject_csv_name,
                         "subject_csv_path": subject_csv_path,
                         "subject_csv_exists": subject_csv_exists,
@@ -750,7 +872,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             rows.append(
                     {
                         "subject": subj,
-                        "raw_file": str(vhdr.name),
+                        "raw_file": str(raw_path.name),
                         "subject_csv": subject_csv_name,
                         "subject_csv_path": subject_csv_path,
                         "subject_csv_exists": subject_csv_exists,
@@ -786,10 +908,55 @@ def run_full_pipeline(args, defaults=None, cfg=None):
 
         events = build_events_from_positions_and_codes(markers_aligned, codes)
         events_stddev, event_id = select_and_recode_stddev(events, args.standard_codes, args.deviant_codes)
+        if len(events_stddev) == 0:
+            msg = f"No standard/deviant events after filtering for {subj}"
+            print("[WARN]", msg, "-> skipping")
+            rows.append(
+                {
+                    "subject": subj,
+                    "raw_file": str(raw_path.name),
+                    "subject_csv": subject_csv_name,
+                    "subject_csv_path": subject_csv_path,
+                    "subject_csv_exists": subject_csv_exists,
+                    **burst_qc,
+                    "status": "SKIP_NO_STDDEV_EVENTS",
+                    "error": msg,
+                }
+            )
+            continue
         epochs = make_epochs(raw, events_stddev, event_id, ep)
+        if condition_map:
+            events_epo, event_id, cond_codes = select_and_filter_conditions(events, condition_map)
+            keep_mask = np.isin(events[:, 2], np.asarray(cond_codes, dtype=int))
+            md_full = derive_metadata_from_condition_map(codes.tolist(), condition_map)
+        else:
+            events_epo, event_id = select_and_recode_stddev(events, args.standard_codes, args.deviant_codes)
+            keep_mask = np.isin(events[:, 2], stddev_set)
+            md_full = derive_metadata_v1(codes.tolist(), token_map=token_map)
 
-        keep_mask = np.isin(events[:, 2], stddev_set)
-        md_full = derive_metadata_v1(codes.tolist(), token_map=token_map)
+        if len(events_epo) == 0:
+            reason = "condition_map" if condition_map else "standard/deviant codes"
+            msg = f"No matching events after applying {reason}; skipping."
+            print("[WARN]", msg)
+            rows.append(
+                {
+                    "subject": subj,
+                    "raw_file": str(vhdr.name),
+                    "subject_csv": subject_csv_name,
+                    "subject_csv_path": subject_csv_path,
+                    "subject_csv_exists": subject_csv_exists,
+                    **diag,
+                    **burst_qc,
+                    "n_events_used": int(len(events)),
+                    "n_events_kept_stddev": 0,
+                    "status": "SKIP_NO_CONDITION_EVENTS",
+                    "error": msg,
+                }
+            )
+            raw.save(d_raw / f"{subj}-raw.fif", overwrite=True)
+            continue
+
+        epochs = make_epochs(raw, events_epo, event_id, ep)
         md = md_full.loc[keep_mask].reset_index(drop=True)
         # Align metadata with epochs that survive MNE's internal dropping
         if len(md) != len(epochs):
@@ -799,34 +966,116 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         epochs_test = epochs.copy().crop(tmin=args.art_test_tmin, tmax=args.art_test_tmax)
 
         eog_picks = mne.pick_types(epochs_test.info, eog=True, eeg=False)
-        blink_bad = np.zeros(len(epochs_test), dtype=bool)
-
-        if len(eog_picks) > 0:
-            blink_bad = moving_window_ptp_mask(
-                epochs_test.get_data(picks=eog_picks),
-                sfreq=float(epochs_test.info["sfreq"]),
-                win_ms=args.blink_win_ms,
-                step_ms=args.blink_step_ms,
-                threshold_uv=args.blink_threshold_uv,
-            )
-        else:
+        blink_threshold_uv = float(args.blink_threshold_uv)
+        blink_auto_pct = getattr(args, "blink_auto_percentile", None)
+        if blink_auto_pct in ("None", "null"):
+            blink_auto_pct = None
+        if blink_auto_pct is not None:
+            blink_auto_pct = float(blink_auto_pct)
+        blink_picks = eog_picks
+        if len(blink_picks) == 0:
             proxy = [ch for ch in args.blink_proxy_chs if ch in epochs_test.ch_names]
             if proxy:
-                proxy_picks = mne.pick_channels(epochs_test.ch_names, include=proxy)
-                blink_bad = moving_window_ptp_mask(
-                    epochs_test.get_data(picks=proxy_picks),
+                blink_picks = mne.pick_channels(epochs_test.ch_names, include=proxy)
+        if blink_auto_pct is not None and len(blink_picks) > 0:
+            blink_data = epochs_test.get_data(picks=blink_picks)
+            if blink_data.size:
+                ptp_max = moving_window_ptp_max(
+                    blink_data,
                     sfreq=float(epochs_test.info["sfreq"]),
                     win_ms=args.blink_win_ms,
                     step_ms=args.blink_step_ms,
-                    threshold_uv=args.blink_threshold_uv,
                 )
+                if np.isfinite(ptp_max).any():
+                    blink_threshold_uv = float(np.nanpercentile(ptp_max, blink_auto_pct))
+        blink_bad = np.zeros(len(epochs_test), dtype=bool)
+
+        if len(blink_picks) > 0:
+            blink_bad = moving_window_ptp_mask(
+                epochs_test.get_data(picks=blink_picks),
+                sfreq=float(epochs_test.info["sfreq"]),
+                win_ms=args.blink_win_ms,
+                step_ms=args.blink_step_ms,
+                threshold_uv=blink_threshold_uv,
+            )
 
         eeg_picks = mne.pick_types(epochs_test.info, eeg=True, eog=False)
-        muscle_bad = simple_voltage_threshold_mask(
-            epochs_test.get_data(picks=eeg_picks),
-            pos_limit_uv=args.volt_pos_uv,
-            neg_limit_uv=args.volt_neg_uv,
-        )
+        volt_method = str(getattr(args, "volt_method", "simple")).lower()
+        volt_pos_uv = float(args.volt_pos_uv)
+        volt_neg_uv = float(args.volt_neg_uv)
+        volt_threshold_uv = float(getattr(args, "volt_threshold_uv", 150.0))
+        volt_auto_pct = getattr(args, "volt_auto_percentile", None)
+        if volt_auto_pct in ("None", "null"):
+            volt_auto_pct = None
+        if volt_auto_pct is not None:
+            volt_auto_pct = float(volt_auto_pct)
+        if volt_auto_pct is not None and len(eeg_picks) > 0:
+            eeg_data = epochs_test.get_data(picks=eeg_picks)
+            if eeg_data.size:
+                max_abs = np.nanmax(np.abs(eeg_data) * 1e6, axis=(1, 2))
+                if np.isfinite(max_abs).any():
+                    thr_abs = float(np.nanpercentile(max_abs, volt_auto_pct))
+                    if volt_method in {"simple", "combined"}:
+                        volt_pos_uv = thr_abs
+                        volt_neg_uv = -thr_abs
+                if volt_method in {"window_ptp", "combined"}:
+                    ptp_max = moving_window_ptp_max(
+                        eeg_data,
+                        sfreq=float(epochs_test.info["sfreq"]),
+                        win_ms=float(getattr(args, "volt_win_ms", 200.0)),
+                        step_ms=float(getattr(args, "volt_step_ms", 10.0)),
+                    )
+                    if np.isfinite(ptp_max).any():
+                        volt_threshold_uv = float(np.nanpercentile(ptp_max, volt_auto_pct))
+        if volt_method == "window_ptp":
+            muscle_bad = moving_window_ptp_mask(
+                epochs_test.get_data(picks=eeg_picks),
+                sfreq=float(epochs_test.info["sfreq"]),
+                win_ms=float(getattr(args, "volt_win_ms", 200.0)),
+                step_ms=float(getattr(args, "volt_step_ms", 10.0)),
+                threshold_uv=volt_threshold_uv,
+            )
+        elif volt_method == "combined":
+            simple_bad = simple_voltage_threshold_mask(
+                epochs_test.get_data(picks=eeg_picks),
+                pos_limit_uv=volt_pos_uv,
+                neg_limit_uv=volt_neg_uv,
+            )
+            ptp_bad = moving_window_ptp_mask(
+                epochs_test.get_data(picks=eeg_picks),
+                sfreq=float(epochs_test.info["sfreq"]),
+                win_ms=float(getattr(args, "volt_win_ms", 200.0)),
+                step_ms=float(getattr(args, "volt_step_ms", 10.0)),
+                threshold_uv=volt_threshold_uv,
+            )
+            muscle_bad = simple_bad | ptp_bad
+        else:
+            muscle_bad = simple_voltage_threshold_mask(
+                epochs_test.get_data(picks=eeg_picks),
+                pos_limit_uv=volt_pos_uv,
+                neg_limit_uv=volt_neg_uv,
+            )
+
+        step_thresh = getattr(args, "volt_step_uv_per_ms", None)
+        if step_thresh not in (None, "None", "null"):
+            step_bad = step_threshold_mask(
+                epochs_test.get_data(picks=eeg_picks),
+                sfreq=float(epochs_test.info["sfreq"]),
+                threshold_uv_per_ms=float(step_thresh),
+            )
+            muscle_bad = muscle_bad | step_bad
+
+        threshold_info = {
+            "blink_threshold_uv_used": float(blink_threshold_uv),
+            "blink_auto_percentile": "" if blink_auto_pct is None else float(blink_auto_pct),
+            "volt_pos_uv_used": float(volt_pos_uv),
+            "volt_neg_uv_used": float(volt_neg_uv),
+            "volt_ptp_threshold_uv_used": (
+                float(volt_threshold_uv) if volt_method in {"window_ptp", "combined"} else ""
+            ),
+            "volt_auto_percentile": "" if volt_auto_pct is None else float(volt_auto_pct),
+            "volt_method": volt_method,
+        }
 
         bad = blink_bad | muscle_bad
         bad_idx = np.where(bad)[0].tolist()
@@ -842,12 +1091,13 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             rows.append(
                     {
                         "subject": subj,
-                        "raw_file": str(vhdr.name),
+                        "raw_file": str(raw_path.name),
                         "subject_csv": subject_csv_name,
                         "subject_csv_path": subject_csv_path,
                         "subject_csv_exists": subject_csv_exists,
                         **diag,
                         **burst_qc,
+                        **threshold_info,
                         "n_epochs_before_artifact": int(n_before),
                         "n_epochs_final": 0,
                     "status": "SKIP_EMPTY_EPOCHS",
@@ -857,20 +1107,26 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             raw.save(d_raw / f"{subj}-raw.fif", overwrite=True)
             continue
 
-        n_std = len(epochs["Standard"])
-        n_dev = len(epochs["Deviant"])
-        if n_std == 0 or n_dev == 0:
+        if condition_map:
+            n_std = int(np.isin(epochs.events[:, 2], std_codes).sum())
+            n_dev = int(np.isin(epochs.events[:, 2], dev_codes).sum())
+        else:
+            n_std = len(epochs["Standard"])
+            n_dev = len(epochs["Deviant"])
+
+        if (not condition_map) and (n_std == 0 or n_dev == 0):
             msg = f"Empty condition after rejection (Standard={n_std}, Deviant={n_dev}); skipping evokeds."
             print("[WARN]", msg)
             rows.append(
                     {
                         "subject": subj,
-                        "raw_file": str(vhdr.name),
+                        "raw_file": str(raw_path.name),
                         "subject_csv": subject_csv_name,
                         "subject_csv_path": subject_csv_path,
                         "subject_csv_exists": subject_csv_exists,
                         **diag,
                         **burst_qc,
+                        **threshold_info,
                         "n_epochs_before_artifact": int(n_before),
                         "n_epochs_final": int(n_after),
                     "n_standard_final": int(n_std),
@@ -884,6 +1140,35 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             continue
 
         epoch_reject_rate = (n_before - n_after) / n_before if n_before > 0 else 0.0
+        max_rr = getattr(args, "max_reject_rate", None)
+        if max_rr is not None and epoch_reject_rate > float(max_rr):
+            msg = (
+                f"Epoch reject rate {epoch_reject_rate:.3f} exceeds max_reject_rate={float(max_rr):.3f}; "
+                "excluding subject from evoked/metrics."
+            )
+            print("[WARN]", msg)
+            rows.append(
+                {
+                    "subject": subj,
+                    "raw_file": str(vhdr.name),
+                    "subject_csv": subject_csv_name,
+                    "subject_csv_path": subject_csv_path,
+                    "subject_csv_exists": subject_csv_exists,
+                    **diag,
+                    **burst_qc,
+                    **threshold_info,
+                    "n_epochs_before_artifact": int(n_before),
+                    "n_epochs_final": int(n_after),
+                    "n_standard_final": int(n_std),
+                    "n_deviant_final": int(n_dev),
+                    "epoch_reject_rate": float(epoch_reject_rate),
+                    "status": "SKIP_REJECT_RATE",
+                    "error": msg,
+                }
+            )
+            raw.save(d_raw / f"{subj}-raw.fif", overwrite=True)
+            epochs.save(d_epo / f"{subj}-epo.fif", overwrite=True)
+            continue
 
         # ------------------------------------------------------------------
         # Metrics (ERP + TFR)
@@ -897,25 +1182,22 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                 metrics_dir.mkdir(parents=True, exist_ok=True)
 
             channels = getattr(args, "metrics_channels", None) or ["Fp1", "Fz", "Cz"]
+            conds = metrics_conditions
 
             if do_erp:
                 # ERP windows
-                if getattr(args, "erp_window", None):
-                    erp_windows = [
-                        ERPWindow(name=w[0], tmin=float(w[1]), tmax=float(w[2]))
-                        for w in args.erp_window
-                    ]
-                else:
-                    erp_windows = [ERPWindow("MMN_150_250", 0.15, 0.25)]
+                erp_windows = _build_erp_windows(args)
 
                 try:
+                    diff_label = getattr(args, "difference_label", None)
                     df_erp = compute_erp_metrics(
                         epochs,
                         subject=subj,
                         channels=channels,
-                        conditions=["Standard", "Deviant"],
+                        conditions=conds,
                         windows=erp_windows,
                         compute_mmn=bool(getattr(args, "compute_mmn", 1)),
+                        mmn_name=diff_label if diff_label else "DEV_MINUS_STD",
                     )
                     df_erp.to_csv(metrics_dir / f"{subj}_erp_metrics.csv", index=False)
                     erp_metrics_all.append(df_erp)
@@ -941,7 +1223,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                             subject=subj,
                             channels=ts_channels,
                             params=ts_params,
-                            conditions=["Standard", "Deviant"],
+                            conditions=conds,
                             include_difference_wave=False,
                         )
                         ts_dir = metrics_dir / "erp_timeseries"
@@ -970,7 +1252,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                         epochs,
                         subject=subj,
                         channels=channels,
-                        conditions=["Standard", "Deviant"],
+                        conditions=conds,
                         params=tfr_params,
                         tmin=float(getattr(args, "tfr_tmin", -0.2)),
                         tmax=float(getattr(args, "tfr_tmax", 0.6)),
@@ -994,17 +1276,16 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         raw.save(d_raw / f"{subj}-raw.fif", overwrite=True)
         epochs.save(d_epo / f"{subj}-epo.fif", overwrite=True)
 
-        evo_std, evo_dev = compute_evokeds(epochs)
-        evo_std.save(d_evk / f"{subj}_Standard-ave.fif", overwrite=True)
-        evo_dev.save(d_evk / f"{subj}_Deviant-ave.fif", overwrite=True)
-
-        evokeds_std.append(evo_std)
-        evokeds_dev.append(evo_dev)
+        evoked_conditions = list(event_id.keys())
+        evokeds = compute_evokeds(epochs, evoked_conditions)
+        for cond, ev in evokeds.items():
+            ev.save(d_evk / f"{subj}_{cond}-ave.fif", overwrite=True)
+            evokeds_by_cond.setdefault(cond, []).append(ev)
 
         rows.append(
             {
                 "subject": subj,
-                "raw_file": str(vhdr.name),
+                "raw_file": str(raw_path.name),
                 "subject_csv": subject_csv_name,
                         "subject_csv_path": subject_csv_path,
                         "subject_csv_exists": subject_csv_exists,
@@ -1016,15 +1297,16 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                 "behavioral_keep_codes": " ".join(map(str, args.behavioral_keep_codes)) if args.behavioral_keep_codes else "",
                 **diag,
                 **burst_qc,
+                **threshold_info,
                 "n_events_used": int(len(events)),
-                "n_events_kept_stddev": int(len(events_stddev)),
+                "n_events_kept_stddev": int(len(events_epo)),
                 "n_epochs_before_artifact": int(n_before),
                 "n_blink_bad": int(blink_bad.sum()),
                 "n_muscle_bad": int(muscle_bad.sum()),
                 "n_epochs_dropped": int(n_before - n_after),
                 "n_epochs_final": int(n_after),
-                "n_standard_final": int(len(epochs["Standard"])),
-                "n_deviant_final": int(len(epochs["Deviant"])),
+                "n_standard_final": int(n_std),
+                "n_deviant_final": int(n_dev),
                 "epoch_reject_rate": float(epoch_reject_rate),
                 "eog_corr_max": float(ica_diag.get("eog_corr_max", 0.0) or 0.0),
                 "eog_corr_mean": float(ica_diag.get("eog_corr_mean", 0.0) or 0.0),
@@ -1059,7 +1341,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             f"({ica_recommendation.get('ica_recommend_reason', '')})"
         )
 
-    if len(evokeds_std) == 0 or len(evokeds_dev) == 0:
+    if not any(evokeds_by_cond.values()):
         print("\n[WARN] No successful subjects to grand-average. Writing QC summary only.")
         write_qc_summary(rows, out_dir / "qc_summary.csv")
 
@@ -1081,9 +1363,9 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         print(f"Saved QC summary -> {out_dir / 'qc_summary.csv'}")
         return
 
-    ga_std, ga_dev = grand_averages(evokeds_std, evokeds_dev)
-    ga_std.save(d_ga / "grand_average_Standard-ave.fif", overwrite=True)
-    ga_dev.save(d_ga / "grand_average_Deviant-ave.fif", overwrite=True)
+    ga_by_cond = grand_averages(evokeds_by_cond)
+    for cond, ga in ga_by_cond.items():
+        ga.save(d_ga / f"grand_average_{cond}-ave.fif", overwrite=True)
 
     write_qc_summary(rows, out_dir / "qc_summary.csv")
 
@@ -1131,16 +1413,17 @@ def run_metrics_only(args):
         return
 
     channels = getattr(args, "metrics_channels", None) or ["Fp1", "Fz", "Cz"]
+    metrics_conditions = getattr(args, "metrics_conditions", None)
+    if not metrics_conditions:
+        cond_map = getattr(args, "condition_map", None)
+        if cond_map:
+            metrics_conditions = list(cond_map.keys())
+        else:
+            metrics_conditions = ["Standard", "Deviant"]
 
     erp_windows = None
     if do_erp:
-        if getattr(args, "erp_window", None):
-            erp_windows = [
-                ERPWindow(name=w[0], tmin=float(w[1]), tmax=float(w[2]))
-                for w in args.erp_window
-            ]
-        else:
-            erp_windows = [ERPWindow("MMN_150_250", 0.15, 0.25)]
+        erp_windows = _build_erp_windows(args)
 
     tfr_params = None
     if do_tfr:
@@ -1169,13 +1452,15 @@ def run_metrics_only(args):
 
         if do_erp and erp_windows is not None:
             try:
+                diff_label = getattr(args, "difference_label", None)
                 df_erp = compute_erp_metrics(
                     epochs,
                     subject=subj,
                     channels=channels,
-                    conditions=["Standard", "Deviant"],
+                    conditions=metrics_conditions,
                     windows=erp_windows,
                     compute_mmn=bool(getattr(args, "compute_mmn", 1)),
+                    mmn_name=diff_label if diff_label else "DEV_MINUS_STD",
                 )
                 df_erp.to_csv(metrics_dir / f"{subj}_erp_metrics.csv", index=False)
                 erp_metrics_all.append(df_erp)
@@ -1201,7 +1486,7 @@ def run_metrics_only(args):
                     subject=subj,
                     channels=ts_channels,
                     params=ts_params,
-                    conditions=["Standard", "Deviant"],
+                    conditions=metrics_conditions,
                     include_difference_wave=False,
                 )
                 ts_dir = metrics_dir / "erp_timeseries"
@@ -1217,7 +1502,7 @@ def run_metrics_only(args):
                     epochs,
                     subject=subj,
                     channels=channels,
-                    conditions=["Standard", "Deviant"],
+                    conditions=metrics_conditions,
                     params=tfr_params,
                     tmin=float(getattr(args, "tfr_tmin", -0.2)),
                     tmax=float(getattr(args, "tfr_tmax", 0.6)),
@@ -1255,6 +1540,23 @@ def _resolve_figure_freq_band(args) -> tuple[float, float] | None:
     if args.figure_freq_band is not None:
         return float(args.figure_freq_band[0]), float(args.figure_freq_band[1])
     return float(getattr(args, "tfr_fmin", 1.0)), float(getattr(args, "tfr_fmax", 30.0))
+
+
+def _build_erp_windows(args) -> list[ERPWindow]:
+    windows: list[ERPWindow] = []
+    if getattr(args, "erp_window", None):
+        windows = [
+            ERPWindow(name=w[0], tmin=float(w[1]), tmax=float(w[2]))
+            for w in args.erp_window
+        ]
+        return windows
+
+    if bool(getattr(args, "compute_mmn", 0)):
+        windows.append(ERP_WINDOWS["MMN"])
+    if bool(getattr(args, "compute_p300", 0)):
+        windows.append(ERP_WINDOWS["P300"])
+
+    return windows
 
 
 def _prompt_yes_no(msg: str) -> bool:
@@ -1318,19 +1620,28 @@ def prepare_output_dirs(out_dir: Path):
 def build_arg_parser():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, help="Path to YAML/JSON config file")
+    ap.add_argument(
+        "--erp-core",
+        dest="erp_core",
+        action="store_true",
+        help="Use ERP CORE-style defaults (TP9/TP10, 0.1–20 Hz, ICA on, individualized thresholds).",
+    )
     ap.add_argument("--process_data", action="store_true", help="Process raw data into epochs/evokeds/QC")
     ap.add_argument("--get_metrics", action="store_true", help="Compute ERP/TFR metrics")
     ap.add_argument("--plot_figures", action="store_true", help="Generate paper-ready figures")
-    ap.add_argument("--raw_dir",  help="Folder containing BrainVision .vhdr files")
+    ap.add_argument("--raw_dir",  help="Folder containing BrainVision .vhdr or EEGLAB .set files (recurses)")
     ap.add_argument("--subject_csv_dir",  help="Folder containing subject-###.csv files")
     ap.add_argument("--out_dir", help="Output root folder")
-    ap.add_argument("--summarize_one_file", default=None, help="If provided, summarize this .vhdr and exit.")
+    ap.add_argument("--summarize_one_file", default=None, help="If provided, summarize this raw file (.vhdr or .set) and exit.")
+
+    ap.add_argument("--use_gpu", action="store_true", help="Enable GPU acceleration where available (MNE/CuPy).")
+    ap.add_argument("--gpu_device", type=int, default=None, help="Optional GPU device index (default: first visible).")
 
     ap.add_argument(
         "--subjects",
         nargs="*",
         default=None,
-        help="Optional list of subject stems to run (e.g., S203 s204). If omitted, runs all .vhdr files in raw_dir.",
+        help="Optional list of subject stems to run (e.g., S203 s204). If omitted, runs all .vhdr/.set files in raw_dir.",
     )
 
     ap.add_argument(
@@ -1351,8 +1662,8 @@ def build_arg_parser():
     ap.add_argument(
         "--reref",
         default="average",
-        choices=["average", "none"],
-        help="EEG re-reference mode (average or none).",
+        choices=["average", "none", "p9_p10", "tp9_tp10", "mastoids"],
+        help="EEG re-reference mode (average, none, or p9_p10/tp9_tp10 mastoids).",
     )
     ap.add_argument("--l_freq", type=float, default=0.1, help="High-pass Hz")
     ap.add_argument("--h_freq", type=float, default=30.0, help="Low-pass Hz")
@@ -1408,8 +1719,41 @@ def build_arg_parser():
     ap.add_argument("--blink_threshold_uv", type=float, default=75.0)
     ap.add_argument("--blink_win_ms", type=float, default=200.0)
     ap.add_argument("--blink_step_ms", type=float, default=10.0)
+    ap.add_argument(
+        "--blink_auto_percentile",
+        type=float,
+        default=None,
+        help="Optional per-subject percentile for blink peak-to-peak threshold (e.g., 99).",
+    )
     ap.add_argument("--volt_pos_uv", type=float, default=150.0)
     ap.add_argument("--volt_neg_uv", type=float, default=-150.0)
+    ap.add_argument(
+        "--volt_method",
+        default="simple",
+        choices=["simple", "window_ptp", "combined"],
+        help="EEG artifact rejection method (simple threshold, windowed peak-to-peak, or combined).",
+    )
+    ap.add_argument("--volt_threshold_uv", type=float, default=150.0)
+    ap.add_argument("--volt_win_ms", type=float, default=200.0)
+    ap.add_argument("--volt_step_ms", type=float, default=10.0)
+    ap.add_argument(
+        "--volt_step_uv_per_ms",
+        type=float,
+        default=None,
+        help="Optional voltage step threshold (uV/ms). If set, epochs exceeding this step are rejected.",
+    )
+    ap.add_argument(
+        "--volt_auto_percentile",
+        type=float,
+        default=None,
+        help="Optional per-subject percentile for EEG voltage thresholds (e.g., 97.5).",
+    )
+    ap.add_argument(
+        "--max_reject_rate",
+        type=float,
+        default=None,
+        help="If set, skip evokeds/metrics when epoch reject rate exceeds this fraction (e.g., 0.5).",
+    )
 
     # --- ICA controls ---
     ap.add_argument(
@@ -1466,6 +1810,12 @@ def build_arg_parser():
         help="Channels used for metrics (default uses config or a small fronto-central set).",
     )
     ap.add_argument(
+        "--metrics_conditions",
+        nargs="+",
+        default=None,
+        help="Condition labels to use for ERP/TFR metrics (must exist in epochs.event_id).",
+    )
+    ap.add_argument(
         "--erp_window",
         nargs=3,
         action="append",
@@ -1477,7 +1827,18 @@ def build_arg_parser():
         "--compute_mmn",
         type=int,
         default=1,
-        help="If 1, also compute Deviant-Standard for ERP windows (MMN-style).",
+        help="If 1, include the default MMN window (when none specified) and compute Deviant-Standard difference.",
+    )
+    ap.add_argument(
+        "--difference_label",
+        default=None,
+        help="Optional label for the Deviant–Standard difference wave (default: DEV_MINUS_STD).",
+    )
+    ap.add_argument(
+        "--compute_p300",
+        type=int,
+        default=0,
+        help="If 1, include the default P300 window when ERP windows are not otherwise specified.",
     )
 
     # TFR settings (kept simple; can be overridden in config)
@@ -1546,8 +1907,44 @@ def main(argv=None):
         args.get_metrics = True
         args.plot_figures = False
 
+    # Apply ERP CORE preset before config so it can override config defaults.
+    apply_erp_core_preset(args, defaults)
+
     # Apply config once for all stages
     cfg = apply_config(args, defaults)
+
+    if getattr(args, "_erp_core_preset_enabled", False):
+        print("[ERP-CORE] preset enabled")
+        print(
+            "[ERP-CORE] reref={reref} l_freq={l_freq} h_freq={h_freq} "
+            "volt_method={volt_method} volt_auto_percentile={volt_auto} "
+            "blink_auto_percentile={blink_auto} ica={ica}".format(
+                reref=getattr(args, "reref", ""),
+                l_freq=getattr(args, "l_freq", ""),
+                h_freq=getattr(args, "h_freq", ""),
+                volt_method=getattr(args, "volt_method", ""),
+                volt_auto=getattr(args, "volt_auto_percentile", ""),
+                blink_auto=getattr(args, "blink_auto_percentile", ""),
+                ica=getattr(args, "ica", ""),
+            )
+        )
+
+    gpu_status = configure_gpu(bool(args.use_gpu), device=args.gpu_device)
+    if args.use_gpu:
+        cap_msg = format_capability_report(capability_report())
+        if cap_msg:
+            print(cap_msg)
+        if gpu_status["enabled"]:
+            print(
+                "[GPU] enabled (backend="
+                f"{gpu_status['backend']}, mne_cuda={gpu_status['mne_cuda']}, "
+                f"cupy={gpu_status['cupy']})"
+            )
+        else:
+            print(
+                "[WARN] GPU requested but not available; falling back to CPU "
+                f"(mne_cuda={gpu_status['mne_cuda']}, cupy={gpu_status['cupy']})"
+            )
 
     if args.plot_figures:
         # Ensure ERP time-series is available for plotting

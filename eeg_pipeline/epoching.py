@@ -37,6 +37,44 @@ def select_and_recode_stddev(
     return ev2, event_id
 
 
+def select_and_filter_conditions(
+    events: np.ndarray,
+    condition_map: dict,
+) -> tuple[np.ndarray, dict, list[int]]:
+    """
+    Filter events to those in condition_map and build event_id.
+
+    condition_map should map condition name -> int code (single code per condition).
+    Returns (events_filtered, event_id, codes_flat).
+    """
+    if not isinstance(condition_map, dict) or not condition_map:
+        raise ValueError("condition_map must be a non-empty dict of name -> code.")
+
+    event_id: dict[str, int] = {}
+    codes_flat: list[int] = []
+    seen: set[int] = set()
+
+    for name, code in condition_map.items():
+        if isinstance(code, (list, tuple, set)):
+            codes = [int(c) for c in code]
+        else:
+            codes = [int(code)]
+        if len(codes) != 1:
+            raise ValueError(
+                f"condition_map['{name}'] must map to a single code; got {codes}."
+            )
+        c = int(codes[0])
+        if c in seen:
+            raise ValueError(f"Duplicate code in condition_map: {c}")
+        seen.add(c)
+        event_id[str(name)] = c
+        codes_flat.append(c)
+
+    keep = np.isin(events[:, 2], np.asarray(codes_flat, dtype=int))
+    ev2 = events[keep].copy()
+    return ev2, event_id, codes_flat
+
+
 def make_epochs(raw, events_stddev: np.ndarray, event_id: dict, ep: EpochParams):
     epochs = mne.Epochs(
         raw,
@@ -47,6 +85,7 @@ def make_epochs(raw, events_stddev: np.ndarray, event_id: dict, ep: EpochParams)
         baseline=ep.baseline,
         preload=True,
         reject_by_annotation=True,
+        on_missing="warn",
         detrend=None,
     )
     return epochs

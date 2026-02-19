@@ -96,7 +96,7 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
     set_default(cfg, "channels.drop_aux_chs", ["AUX"])
 
     set_default(cfg, "preprocess.montage", "standard_1020")
-    set_default(cfg, "preprocess.reref", "average")  # average | none
+    set_default(cfg, "preprocess.reref", "average")  # average | none | p9_p10/tp9_tp10
     set_default(cfg, "preprocess.notch_hz", [60.0])
     set_default(cfg, "preprocess.l_freq", 0.1)
     set_default(cfg, "preprocess.h_freq", 30.0)
@@ -104,6 +104,7 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
     set_default(cfg, "events.behavioral_keep_codes", [])
     set_default(cfg, "events.standard_codes", [])
     set_default(cfg, "events.deviant_codes", [])
+    set_default(cfg, "events.condition_map", None)
     set_default(cfg, "events.drop_eeg_markers_by_gap_s", None)
     set_default(cfg, "events.auto_drop_to_count", True)
 
@@ -112,11 +113,19 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
     set_default(cfg, "epoching.baseline", [-0.2, 0.0])
 
     set_default(cfg, "artifacts.test_window", [-0.2, 0.3])
+    set_default(cfg, "artifacts.max_reject_rate", None)
     set_default(cfg, "artifacts.blink.threshold_uv", 75.0)
     set_default(cfg, "artifacts.blink.win_ms", 200.0)
     set_default(cfg, "artifacts.blink.step_ms", 10.0)
+    set_default(cfg, "artifacts.blink.auto_percentile", None)
+    set_default(cfg, "artifacts.voltage.method", "simple")  # simple | window_ptp
+    set_default(cfg, "artifacts.voltage.threshold_uv", 150.0)
+    set_default(cfg, "artifacts.voltage.win_ms", 200.0)
+    set_default(cfg, "artifacts.voltage.step_ms", 10.0)
     set_default(cfg, "artifacts.voltage.pos_uv", 150.0)
     set_default(cfg, "artifacts.voltage.neg_uv", -150.0)
+    set_default(cfg, "artifacts.voltage.step_uv_per_ms", None)
+    set_default(cfg, "artifacts.voltage.auto_percentile", None)
 
     set_default(cfg, "ica.mode", "off")  # off | auto | on
     set_default(cfg, "ica.auto_blink_rate_per_min", 15.0)
@@ -133,9 +142,14 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     set_default(cfg, "labels.token_map", None)
 
+    set_default(cfg, "compute.use_gpu", False)
+    set_default(cfg, "compute.gpu_device", None)
+
     set_default(cfg, "metrics.erp.enabled", True)
     set_default(cfg, "metrics.erp.windows", [])
     set_default(cfg, "metrics.erp.timeseries", False)
+    set_default(cfg, "metrics.erp.difference_label", None)
+    set_default(cfg, "metrics.erp.conditions", None)
 
     set_default(cfg, "metrics.tfr.enabled", False)
     set_default(cfg, "metrics.tfr.method", "multitaper")
@@ -181,6 +195,33 @@ def _validate_config(cfg: Dict[str, Any]) -> None:
     if ica_mode not in {"off", "auto", "on"}:
         errors.append("ica.mode must be one of: off | auto | on.")
 
+    # Re-reference mode
+    reref_mode = str(config_get(cfg, "preprocess.reref", "average")).lower()
+    if reref_mode not in {"average", "avg", "none", "no", "p9_p10", "tp9_tp10", "mastoids", "mastoid", "linked_mastoids", "linked"}:
+        errors.append("preprocess.reref must be one of: average | none | p9_p10/tp9_tp10 (mastoids).")
+
+    volt_method = str(config_get(cfg, "artifacts.voltage.method", "simple")).lower()
+    if volt_method not in {"simple", "window_ptp", "combined"}:
+        errors.append("artifacts.voltage.method must be one of: simple | window_ptp | combined.")
+
+    blink_auto = config_get(cfg, "artifacts.blink.auto_percentile", None)
+    if blink_auto not in (None, "null", "None"):
+        try:
+            blink_auto = float(blink_auto)
+            if not (0 < blink_auto <= 100):
+                errors.append("artifacts.blink.auto_percentile must be in (0, 100].")
+        except Exception:
+            errors.append("artifacts.blink.auto_percentile must be a number in (0, 100].")
+
+    volt_auto = config_get(cfg, "artifacts.voltage.auto_percentile", None)
+    if volt_auto not in (None, "null", "None"):
+        try:
+            volt_auto = float(volt_auto)
+            if not (0 < volt_auto <= 100):
+                errors.append("artifacts.voltage.auto_percentile must be in (0, 100].")
+        except Exception:
+            errors.append("artifacts.voltage.auto_percentile must be a number in (0, 100].")
+
     # Disjoint standard/deviant
     try:
         std_set = set(int(x) for x in std)
@@ -190,6 +231,28 @@ def _validate_config(cfg: Dict[str, Any]) -> None:
             errors.append(f"Standard/deviant code overlap not allowed: {overlap}")
     except Exception:
         errors.append("events.standard_codes / deviant_codes must be integers.")
+
+    # Condition map (optional)
+    cond_map = config_get(cfg, "events.condition_map", None)
+    if cond_map is not None:
+        if not isinstance(cond_map, dict):
+            errors.append("events.condition_map must be a mapping of name -> code(s).")
+        else:
+            seen = set()
+            try:
+                for name, codes in cond_map.items():
+                    codes_list = codes if isinstance(codes, (list, tuple, set)) else [codes]
+                    if len(codes_list) != 1:
+                        errors.append(
+                            f"events.condition_map['{name}'] must map to a single code."
+                        )
+                        continue
+                    c = int(list(codes_list)[0])
+                    if c in seen:
+                        errors.append(f"events.condition_map has duplicate code: {c}")
+                    seen.add(c)
+            except Exception:
+                errors.append("events.condition_map values must be integers (or lists of integers).")
 
     # ERP windows sanity
     erp_windows = config_get(cfg, "metrics.erp.windows", [])
@@ -241,6 +304,7 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     cfg["events"]["behavioral_keep_codes"] = _as_int_list(cfg["events"].get("behavioral_keep_codes", []))
     cfg["events"]["standard_codes"] = _as_int_list(cfg["events"].get("standard_codes", []))
     cfg["events"]["deviant_codes"] = _as_int_list(cfg["events"].get("deviant_codes", []))
+    cfg["events"]["condition_map"] = _normalize_condition_map(cfg["events"].get("condition_map", None))
 
     # Floats
     cfg["preprocess"]["l_freq"] = float(cfg["preprocess"]["l_freq"])
@@ -260,6 +324,25 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         float(cfg["artifacts"]["test_window"][0]),
         float(cfg["artifacts"]["test_window"][1]),
     ]
+    cfg["artifacts"]["max_reject_rate"] = (
+        None if cfg["artifacts"]["max_reject_rate"] in (None, "null", "None") else float(cfg["artifacts"]["max_reject_rate"])
+    )
+    cfg["artifacts"]["voltage"]["method"] = str(cfg["artifacts"]["voltage"].get("method", "simple")).lower()
+    cfg["artifacts"]["voltage"]["threshold_uv"] = float(cfg["artifacts"]["voltage"].get("threshold_uv", 150.0))
+    cfg["artifacts"]["voltage"]["win_ms"] = float(cfg["artifacts"]["voltage"].get("win_ms", 200.0))
+    cfg["artifacts"]["voltage"]["step_ms"] = float(cfg["artifacts"]["voltage"].get("step_ms", 10.0))
+    step_uv = cfg["artifacts"]["voltage"].get("step_uv_per_ms", None)
+    cfg["artifacts"]["voltage"]["step_uv_per_ms"] = (
+        None if step_uv in (None, "null", "None") else float(step_uv)
+    )
+    blink_auto = cfg["artifacts"]["blink"].get("auto_percentile", None)
+    cfg["artifacts"]["blink"]["auto_percentile"] = (
+        None if blink_auto in (None, "null", "None") else float(blink_auto)
+    )
+    volt_auto = cfg["artifacts"]["voltage"].get("auto_percentile", None)
+    cfg["artifacts"]["voltage"]["auto_percentile"] = (
+        None if volt_auto in (None, "null", "None") else float(volt_auto)
+    )
 
     # ICA
     cfg["ica"]["mode"] = str(cfg["ica"]["mode"]).lower()
@@ -276,6 +359,20 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     # Token map convenience normalization -> {"token1": "...", "token2": "..."} or None
     cfg["labels"]["token_map"] = _normalize_token_map(cfg["labels"].get("token_map"))
+
+    # Metrics conditions (optional)
+    conds = cfg["metrics"]["erp"].get("conditions", None)
+    if conds is not None:
+        if isinstance(conds, (list, tuple)):
+            cfg["metrics"]["erp"]["conditions"] = [str(c) for c in conds]
+        else:
+            cfg["metrics"]["erp"]["conditions"] = [str(conds)]
+
+    # Compute (optional GPU acceleration)
+    compute_cfg = cfg.get("compute", {})
+    cfg["compute"]["use_gpu"] = bool(compute_cfg.get("use_gpu", False))
+    gd = compute_cfg.get("gpu_device", None)
+    cfg["compute"]["gpu_device"] = None if gd in (None, "null", "None", "") else int(gd)
 
     return cfg
 
@@ -357,3 +454,19 @@ def _normalize_token_map(token_map: Any) -> Optional[Dict[str, str]]:
         a, b = s.split(None, 1)
         return {"token1": a, "token2": b}
     return None
+
+
+def _normalize_condition_map(condition_map: Any) -> Optional[Dict[str, list[int]]]:
+    if condition_map is None:
+        return None
+    if not isinstance(condition_map, dict):
+        raise ValueError("events.condition_map must be a mapping of name -> code(s).")
+    out: Dict[str, list[int]] = {}
+    for k, v in condition_map.items():
+        name = str(k)
+        if isinstance(v, (list, tuple, set)):
+            codes = [int(x) for x in v]
+        else:
+            codes = [int(v)]
+        out[name] = codes
+    return out

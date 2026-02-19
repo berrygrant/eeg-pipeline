@@ -1,9 +1,11 @@
 # Core dependencies
 mne
 numpy
+scipy
 pandas
 pyarrow
 PyYAML
+cupy #for GPU support. Adjust for your CUDA version
 
 # Visualization dependencies
 matplotlib
