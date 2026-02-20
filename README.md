@@ -12,6 +12,9 @@ This project is designed for **research-grade EEG workflows** with an emphasis o
 - Scalable batch processing
 
 Current Release: [![DOI](https://zenodo.org/badge/1139314445.svg)](https://doi.org/10.5281/zenodo.18704504)
+
+Questions? Try the [ChatGPT eeg-pipeline Assistant](https://chatgpt.com/g/g-69985fa61c3881918c1621403999cf9d-eeg-pipeline-assistant)
+
 ---
 
 ## Key Features
