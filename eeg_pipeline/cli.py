@@ -208,7 +208,13 @@ def summarize_one_file(args, raw_path: Path):
     modality = _modality_mode(getattr(args, "modality", "eeg"))
     subj = raw_path.stem
     subj_num = subject_number_from_stem(subj)
-    subject_csv = Path(args.subject_csv_dir) / f"subject-{subj_num}.csv"
+    subject_csv_dir = getattr(args, "subject_csv_dir", None)
+    if not subject_csv_dir:
+        raise ValueError(
+            "subject_csv_dir is not set for summarize_one_file. "
+            "Provide --subject_csv_dir or set paths.subject_csv_dir in config."
+        )
+    subject_csv = Path(subject_csv_dir) / f"subject-{subj_num}.csv"
     is_bv = raw_path.suffix.lower() == ".vhdr"
     vmrk_path = raw_path.with_suffix(".vmrk") if is_bv else None
 
@@ -2066,6 +2072,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.summarize_one_file:
+        apply_erp_core_preset(args, defaults)
+        apply_config(args, defaults)
         summarize_one_file(args, Path(args.summarize_one_file))
         return
 
