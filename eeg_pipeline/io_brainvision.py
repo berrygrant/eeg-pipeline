@@ -23,7 +23,9 @@ def read_raw_preprocess(
         raise ValueError(f"Unsupported modality: {modality!r} (use 'eeg' or 'meg').")
 
     suffix = raw_path.suffix.lower()
-    if suffix == ".vhdr":
+    if suffix == ".ds" and raw_path.is_dir():
+        raw = mne.io.read_raw_ctf(raw_path, preload=True)
+    elif suffix == ".vhdr":
         raw = mne.io.read_raw_brainvision(raw_path, preload=True)
     elif suffix == ".set":
         raw = mne.io.read_raw_eeglab(raw_path, preload=True)

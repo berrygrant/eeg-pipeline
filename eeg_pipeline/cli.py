@@ -174,10 +174,15 @@ def _default_metrics_channels(info: mne.Info, modality: str) -> list[str]:
 def _find_raw_files(raw_dir: Path, modality: str) -> list[Path]:
     mode = _modality_mode(modality)
     if mode == "meg":
-        return sorted(
+        fif_files = [
             p for p in raw_dir.rglob("*.fif")
             if p.is_file() and ".git" not in p.parts
-        )
+        ]
+        ctf_dirs = [
+            p for p in raw_dir.rglob("*.ds")
+            if p.is_dir() and ".git" not in p.parts
+        ]
+        return sorted([*fif_files, *ctf_dirs])
 
     raw_files = sorted(
         p for p in raw_dir.rglob("*.vhdr")
@@ -215,7 +220,9 @@ def summarize_one_file(args, raw_path: Path):
 
     # Show annotation descriptions without any preprocessing (debug)
     suffix = raw_path.suffix.lower()
-    if suffix == ".vhdr":
+    if suffix == ".ds" and raw_path.is_dir():
+        raw0 = mne.io.read_raw_ctf(raw_path, preload=True)
+    elif suffix == ".vhdr":
         raw0 = mne.io.read_raw_brainvision(raw_path, preload=True)
     elif suffix == ".set":
         raw0 = mne.io.read_raw_eeglab(raw_path, preload=True)
@@ -722,7 +729,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
     raw_files = _find_raw_files(raw_dir, modality)
     if not raw_files:
         if modality == "meg":
-            raise RuntimeError(f"No .fif files found in {raw_dir} for modality=meg.")
+            raise RuntimeError(f"No .fif or .ds MEG files found in {raw_dir} for modality=meg.")
         raise RuntimeError(f"No .vhdr, .set, or .fif files found in {raw_dir} for modality=eeg.")
 
     if args.subjects:
@@ -1759,10 +1766,10 @@ def build_arg_parser():
     ap.add_argument("--process_data", action="store_true", help="Process raw data into epochs/evokeds/QC")
     ap.add_argument("--get_metrics", action="store_true", help="Compute ERP/TFR metrics")
     ap.add_argument("--plot_figures", action="store_true", help="Generate paper-ready figures")
-    ap.add_argument("--raw_dir",  help="Folder containing raw files (EEG: .vhdr/.set, MEG: .fif; recurses)")
+    ap.add_argument("--raw_dir",  help="Folder containing raw files (EEG: .vhdr/.set/.fif, MEG: .fif/.ds; recurses)")
     ap.add_argument("--subject_csv_dir",  help="Folder containing subject-###.csv files")
     ap.add_argument("--out_dir", help="Output root folder")
-    ap.add_argument("--summarize_one_file", default=None, help="If provided, summarize this raw file (.vhdr, .set, or .fif) and exit.")
+    ap.add_argument("--summarize_one_file", default=None, help="If provided, summarize this raw file (.vhdr/.set/.fif/.ds) and exit.")
 
     ap.add_argument("--use_gpu", action="store_true", help="Enable GPU acceleration where available (MNE/CuPy).")
     ap.add_argument("--gpu_device", type=int, default=None, help="Optional GPU device index (default: first visible).")
