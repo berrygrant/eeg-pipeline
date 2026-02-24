@@ -53,6 +53,8 @@ def _rows_for_evoked(
     windows: Sequence[ERPWindow],
     status: str = "OK",
     source_conditions: str | None = None,
+    scale: float = 1e6,
+    amplitude_unit: str = "uV",
 ) -> list[dict]:
     # Work on requested channels only (keeps output consistent and predictable)
     pick_chs = _safe_pick_channels(evoked, channels)
@@ -61,7 +63,7 @@ def _rows_for_evoked(
     rows: list[dict] = []
     for w in windows:
         ev_crop = ev.copy().crop(tmin=w.tmin, tmax=w.tmax)
-        data_uv = ev_crop.data * 1e6  # V → µV
+        data_scaled = ev_crop.data * float(scale)
         crop_times = ev_crop.times
 
         # epoch count: for derived conditions (difference waves), epochs[condition] won't exist
@@ -71,9 +73,9 @@ def _rows_for_evoked(
             n_epochs = int(len(epochs))
 
         for ch_idx, ch_name in enumerate(ev_crop.ch_names):
-            mean_uv = float(np.mean(data_uv[ch_idx]))
-            peak_uv, peak_latency = _compute_peak(
-                data_uv[ch_idx],
+            mean_amp = float(np.mean(data_scaled[ch_idx]))
+            peak_amp, peak_latency = _compute_peak(
+                data_scaled[ch_idx],
                 crop_times,
                 w.polarity,
             )
@@ -87,9 +89,10 @@ def _rows_for_evoked(
                     window_tmin=float(w.tmin),
                     window_tmax=float(w.tmax),
                     polarity=w.polarity,
-                    mean_uV=mean_uv,
-                    peak_uV=peak_uv,
+                    mean_uV=mean_amp,
+                    peak_uV=peak_amp,
                     peak_latency_s=peak_latency,
+                    amplitude_unit=str(amplitude_unit),
                     n_epochs=n_epochs,
                     status=status,
                     source_conditions=source_conditions,
@@ -110,6 +113,8 @@ def compute_erp_metrics(
     mmn_name: str = "DEV_MINUS_STD",
     mmn_deviant: str = "Deviant",
     mmn_standard: str = "Standard",
+    scale: float = 1e6,
+    amplitude_unit: str = "uV",
 ) -> pd.DataFrame:
     """
     Compute ERP window metrics (mean + peak) per subject × condition × channel × window.
@@ -135,6 +140,8 @@ def compute_erp_metrics(
                 windows=windows,
                 status="OK",
                 source_conditions=None,
+                scale=scale,
+                amplitude_unit=amplitude_unit,
             )
         )
 
@@ -154,6 +161,8 @@ def compute_erp_metrics(
                     windows=windows,
                     status="OK",
                     source_conditions=f"{mmn_deviant}-{mmn_standard}",
+                    scale=scale,
+                    amplitude_unit=amplitude_unit,
                 )
             )
 

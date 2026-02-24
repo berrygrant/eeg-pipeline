@@ -44,6 +44,15 @@ def _save_fig(fig, out_path: Path, dpi: int) -> None:
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
 
 
+def _infer_amplitude_unit(df: pd.DataFrame) -> str:
+    if "amplitude_unit" not in df.columns:
+        return "uV"
+    units = sorted({str(u) for u in df["amplitude_unit"].dropna().tolist() if str(u).strip()})
+    if len(units) == 1:
+        return units[0]
+    return "a.u."
+
+
 def _erp_grand_average(
     df: pd.DataFrame,
     *,
@@ -68,6 +77,7 @@ def _erp_grand_average(
         subj_avg.groupby(["condition", "time_s"], as_index=False)["amplitude_uv"]
         .mean()
     )
+    amp_unit = _infer_amplitude_unit(df)
 
     fig, ax = plt.subplots(figsize=(7, 4))
     for cond, color in [(standard, "black"), (deviant, "red")]:
@@ -76,7 +86,7 @@ def _erp_grand_average(
 
     ax.axvspan(tmin, tmax, color="gray", alpha=0.2, zorder=0)
     ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Amplitude (uV)")
+    ax.set_ylabel(f"Amplitude ({amp_unit})")
     ax.set_title("ERP grand average (all electrodes)")
     ax.legend(frameon=False)
 
@@ -108,6 +118,7 @@ def _erp_by_channel(
         df.groupby(["channel", "condition", "time_s"], as_index=False)["amplitude_uv"]
         .mean()
     )
+    amp_unit = _infer_amplitude_unit(df)
 
     chs = sorted(ga["channel"].unique())
     if not chs:
@@ -131,7 +142,7 @@ def _erp_by_channel(
         axes[j].axis("off")
 
     fig.supxlabel("Time (s)")
-    fig.supylabel("Amplitude (uV)")
+    fig.supylabel(f"Amplitude ({amp_unit})")
     fig.suptitle("ERP grand average by electrode")
 
     _save_fig(fig, out_dir / "erp_by_channel.png", dpi)

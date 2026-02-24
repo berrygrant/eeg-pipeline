@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import List
 
 import pandas as pd
+import mne
 
 from eeg_pipeline.metrics import load_epochs, compute_erp_metrics, compute_tfr_metrics
 from eeg_pipeline.metrics.tfr import TFRParams
@@ -44,6 +45,31 @@ def _subject_from_filename(p: Path) -> str:
     return stem
 
 
+def _modality_mode(x: str | None) -> str:
+    mode = str(x or "eeg").strip().lower()
+    if mode not in {"eeg", "meg"}:
+        raise ValueError(f"Unsupported modality: {x!r} (use 'eeg' or 'meg').")
+    return mode
+
+
+def _default_channels(info: mne.Info, modality: str) -> list[str]:
+    mode = _modality_mode(modality)
+    if mode == "meg":
+        picks = mne.pick_types(info, meg="mag", eeg=False, eog=False, exclude=[])
+        if len(picks) == 0:
+            picks = mne.pick_types(info, meg=True, eeg=False, eog=False, exclude=[])
+        if len(picks) == 0:
+            raise RuntimeError("No MEG channels found for default channel selection.")
+        return [info["ch_names"][i] for i in picks[:3]]
+    return ["Fp1", "Fz", "Cz"]
+
+
+def _amp_scale_and_unit(modality: str) -> tuple[float, str]:
+    if _modality_mode(modality) == "meg":
+        return 1e15, "fT"
+    return 1e6, "uV"
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description="Run ERP and/or TFR metrics on previously epoched EEG data."
@@ -56,6 +82,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     ap.add_argument("--use_gpu", action="store_true", help="Enable GPU acceleration where available (MNE/CuPy).")
     ap.add_argument("--gpu_device", type=int, default=None, help="Optional GPU device index (default: first visible).")
+    ap.add_argument(
+        "--modality",
+        choices=["eeg", "meg"],
+        default="eeg",
+        help="Processing modality for defaults/scaling (default: eeg).",
+    )
+    ap.add_argument("--methodology", dest="modality", choices=["eeg", "meg"], help=argparse.SUPPRESS)
 
     # Which analyses
     ap.add_argument("--do_erp", action="store_true", help="Run ERP metrics")
@@ -83,8 +116,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--channels",
         nargs="+",
-        default=["Fp1", "Fz", "Cz"],
-        help="Channels to analyze",
+        default=None,
+        help="Channels to analyze (default: EEG Fp1/Fz/Cz or first 3 MEG channels).",
     )
     ap.add_argument(
         "--conditions",
@@ -397,6 +430,10 @@ def main(argv=None):
     if not files:
         raise RuntimeError(f"No files matched {args.pattern} in {epochs_dir}")
 
+    if args.channels is None:
+        first_loaded = load_epochs(files[0])
+        args.channels = _default_channels(first_loaded.epochs.info, args.modality)
+
     windows = _resolve_erp_windows(args) if args.do_erp else None
 
     tfr_params = None
@@ -414,6 +451,7 @@ def main(argv=None):
 
     erp_rows = []
     tfr_rows = []
+    amp_scale, amp_unit = _amp_scale_and_unit(args.modality)
 
     for p in files:
         subj = _subject_from_filename(p)
@@ -428,6 +466,8 @@ def main(argv=None):
                 conditions=args.conditions,
                 compute_mmn=bool(args.compute_mmn),
                 mmn_name=args.difference_label or "DEV_MINUS_STD",
+                scale=amp_scale,
+                amplitude_unit=amp_unit,
             )
             erp_rows.append(df_erp)
 

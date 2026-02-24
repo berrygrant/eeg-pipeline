@@ -20,7 +20,8 @@ Questions? Try the [ChatGPT eeg-pipeline Assistant](https://chatgpt.com/g/g-6998
 ## Key Features
 
 ### Core preprocessing
-- BrainVision (.vhdr / .vmrk) and EEGLAB (.set) input
+- BrainVision (.vhdr / .vmrk), EEGLAB (.set), and FIF (.fif) input
+- `--modality eeg|meg` mode switch (default: EEG)
 - Standard montages (e.g., `standard_1020`)
 - Configurable re-reference (`average` or `none`)
 - Band-pass and notch filtering
@@ -124,6 +125,8 @@ CLI flags are intentionally minimal.
 ### Example `config.yaml`
 
 ```yaml
+modality: eeg   # eeg | meg
+
 paths:
   raw_dir: /data/EEG/raw
   subject_csv_dir: /data/EEG/behavior
@@ -141,6 +144,8 @@ preprocess:
   notch_hz: [60]
 
 events:
+  source: annotations   # annotations | stim | auto
+  stim_channel: null
   behavioral_keep_codes: [110, 111, 210, 211]
   standard_codes: [110, 210]
   deviant_codes: [111, 211]
@@ -187,6 +192,12 @@ python -m eeg_pipeline.cli --config config.yaml --process_data --get_metrics
 ```
 
 If you omit the stage flags, the default is `--process_data --get_metrics`.
+
+Run in MEG mode:
+
+```bash
+python -m eeg_pipeline.cli --config config.yaml --modality meg --process_data --get_metrics
+```
 
 ### ERP CORE preset (optional)
 

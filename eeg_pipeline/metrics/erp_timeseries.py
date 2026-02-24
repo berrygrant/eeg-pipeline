@@ -31,6 +31,8 @@ def _evoked_to_long_df(
     condition: str,
     n_epochs: int,
     decim: int = 1,
+    scale: float = 1e6,
+    amplitude_unit: str = "uV",
 ) -> pd.DataFrame:
     """Convert an Evoked to tidy long time-series DataFrame."""
     ev2 = ev.copy()
@@ -38,9 +40,9 @@ def _evoked_to_long_df(
         ev2 = ev2.decimate(decim, offset=0)
 
     times = ev2.times  # seconds, shape (n_times,)
-    data_uv = ev2.data * 1e6  # (n_ch, n_times)
+    data_scaled = ev2.data * float(scale)  # (n_ch, n_times)
 
-    n_ch, n_times = data_uv.shape
+    n_ch, n_times = data_scaled.shape
     # Build long form without python loops for speed
     df = pd.DataFrame(
         {
@@ -49,7 +51,8 @@ def _evoked_to_long_df(
             "n_epochs": n_epochs,
             "channel": np.repeat(ev2.ch_names, n_times),
             "time_s": np.tile(times, n_ch),
-            "amplitude_uv": data_uv.reshape(-1, order="C"),
+            "amplitude_uv": data_scaled.reshape(-1, order="C"),
+            "amplitude_unit": str(amplitude_unit),
         }
     )
     return df
@@ -64,6 +67,8 @@ def compute_erp_timeseries(
     conditions: Sequence[str] = ("Standard", "Deviant"),
     include_difference_wave: bool = True,
     difference_label: str = "DEV_MINUS_STD",
+    scale: float = 1e6,
+    amplitude_unit: str = "uV",
 ) -> pd.DataFrame:
     """
     Compute time-series ERPs per subject × condition × channel × time.
@@ -105,6 +110,8 @@ def compute_erp_timeseries(
                 condition=cond,
                 n_epochs=n,
                 decim=params.decim,
+                scale=scale,
+                amplitude_unit=amplitude_unit,
             )
         )
 
@@ -121,6 +128,8 @@ def compute_erp_timeseries(
                 condition=difference_label,
                 n_epochs=min(n_by_cond["Deviant"], n_by_cond["Standard"]),
                 decim=params.decim,
+                scale=scale,
+                amplitude_unit=amplitude_unit,
             )
         )
 

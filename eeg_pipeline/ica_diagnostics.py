@@ -15,6 +15,7 @@ def count_clusters(mask: np.ndarray) -> int:
 def compute_ica_diagnostics(
     raw: mne.io.BaseRaw,
     *,
+    modality: str = "eeg",
     blink_proxy_chs: list[str] | None = None,
     blink_threshold_uv: float = 75.0,
     blink_win_ms: float = 200.0,
@@ -26,10 +27,16 @@ def compute_ica_diagnostics(
     """
 
     sfreq = float(raw.info["sfreq"])
+    mode = str(modality).strip().lower()
+    if mode not in {"eeg", "meg"}:
+        raise ValueError(f"Unsupported modality: {modality!r} (use 'eeg' or 'meg').")
 
     # ---- Picks ----
     eog_picks = mne.pick_types(raw.info, eog=True, eeg=False)
-    eeg_picks = mne.pick_types(raw.info, eog=False, eeg=True)
+    if mode == "meg":
+        sig_picks = mne.pick_types(raw.info, eog=False, eeg=False, meg=True)
+    else:
+        sig_picks = mne.pick_types(raw.info, eog=False, eeg=True)
 
     metrics = {
         "eog_corr_max": np.nan,
@@ -39,12 +46,12 @@ def compute_ica_diagnostics(
         "blink_source": "none",
     }
 
-    # ---- EOG–EEG correlation ----
-    if len(eog_picks) > 0 and len(eeg_picks) > 0:
+    # ---- EOG–sensor correlation ----
+    if len(eog_picks) > 0 and len(sig_picks) > 0:
         eog = raw.get_data(picks=eog_picks)
-        eeg = raw.get_data(picks=eeg_picks)
+        sig = raw.get_data(picks=sig_picks)
 
-        corr = np.corrcoef(eog, eeg)
+        corr = np.corrcoef(eog, sig)
         eog_eeg_corr = np.abs(corr[: len(eog_picks), len(eog_picks) :])
 
         metrics["eog_corr_max"] = float(np.nanmax(eog_eeg_corr))

@@ -38,6 +38,8 @@ class ICAParams:
         proxy channels to identify ocular components.
     max_exclude : int
         Maximum number of components to mark for exclusion.
+    picks : str
+        Channel family to use for ICA fitting ("eeg" or "meg").
     """
 
     method: str = "fastica"
@@ -49,6 +51,7 @@ class ICAParams:
     decim: int = 3
     corr_thresh: float = 0.30
     max_exclude: int = 3
+    picks: str = "eeg"
 
 
 def _safe_pick_channels(info: mne.Info, names: list[str]) -> list[int]:
@@ -85,27 +88,38 @@ def fit_ica(raw: mne.io.BaseRaw, params: ICAParams) -> Tuple[Optional[mne.prepro
         "ica_fit_retry": "",
         "ica_fit_n_components_used": None,
         "ica_fit_n_eeg_chs": None,
+        "ica_fit_n_channels": None,
+        "ica_fit_picks": str(params.picks).lower(),
     }
 
     # --- Make the data we fit ICA on (do NOT mutate the main raw) ---
     raw_fit = raw.copy()
 
+    picks_mode = str(params.picks).strip().lower()
+    if picks_mode not in {"eeg", "meg"}:
+        diag["ica_fit_error"] = f"Unsupported ICA picks mode: {params.picks!r}."
+        return None, diag
+
     # ICA is usually fit with a 1 Hz high-pass to stabilize decomposition
     raw_fit.filter(
         l_freq=params.fit_l_freq,
         h_freq=params.fit_h_freq,
-        picks="eeg",
+        picks=picks_mode,
         method="fir",
         phase="zero",
         verbose=False,
     )
 
-    # --- EEG picks ---
-    picks_eeg = mne.pick_types(raw_fit.info, eeg=True, eog=False, meg=False, stim=False, misc=False)
-    diag["ica_fit_n_eeg_chs"] = int(len(picks_eeg))
+    # --- sensor picks ---
+    if picks_mode == "meg":
+        picks_sig = mne.pick_types(raw_fit.info, eeg=False, eog=False, meg=True, stim=False, misc=False)
+    else:
+        picks_sig = mne.pick_types(raw_fit.info, eeg=True, eog=False, meg=False, stim=False, misc=False)
+        diag["ica_fit_n_eeg_chs"] = int(len(picks_sig))
+    diag["ica_fit_n_channels"] = int(len(picks_sig))
 
-    if len(picks_eeg) < 2:
-        diag["ica_fit_error"] = f"Need >=2 EEG channels for ICA, got {len(picks_eeg)}."
+    if len(picks_sig) < 2:
+        diag["ica_fit_error"] = f"Need >=2 {picks_mode.upper()} channels for ICA, got {len(picks_sig)}."
         return None, diag
 
     def _try_fit(n_components: Union[float, int]) -> mne.preprocessing.ICA:
@@ -115,7 +129,7 @@ def fit_ica(raw: mne.io.BaseRaw, params: ICAParams) -> Tuple[Optional[mne.prepro
             random_state=params.random_state,
             max_iter=params.max_iter,
         )
-        ica.fit(raw_fit, picks=picks_eeg, decim=params.decim, verbose=False)
+        ica.fit(raw_fit, picks=picks_sig, decim=params.decim, verbose=False)
         return ica
 
     # --- First attempt (whatever user/config requested) ---
@@ -133,7 +147,7 @@ def fit_ica(raw: mne.io.BaseRaw, params: ICAParams) -> Tuple[Optional[mne.prepro
         if "your threshold results in 1 component" in msg:
             # Retry with an int number of components
             # Use min(max(15, n_ch-1), 40) as a safe default
-            n_ch = len(picks_eeg)
+            n_ch = len(picks_sig)
             fallback_n = int(min(max(15, n_ch - 1), 40))
             diag["ica_fit_retry"] = f"retry_int_n_components={fallback_n}"
 

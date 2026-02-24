@@ -11,7 +11,7 @@ import mne
 
 from .schema import parse_token_map, derive_metadata_v1, derive_metadata_from_condition_map
 from .behavior import read_eventcodes_from_subject_csv, filter_codes
-from .io_brainvision import read_raw_preprocess, events_from_annotations_positions, parse_vmrk_markers
+from .io_brainvision import read_raw_preprocess, events_from_raw, parse_vmrk_markers
 from .align import marker_gap_stats, keep_by_gap_heuristic, align_marker_positions_to_codes
 from .epoching import (
     EpochParams,
@@ -135,7 +135,72 @@ def subject_number_from_stem(stem: str) -> str:
     return digits
 
 
+def _modality_mode(x: str | None) -> str:
+    mode = str(x or "eeg").strip().lower()
+    if mode not in {"eeg", "meg"}:
+        raise ValueError(f"Unsupported modality: {x!r} (use 'eeg' or 'meg').")
+    return mode
+
+
+def _signal_picks(info: mne.Info, modality: str) -> np.ndarray:
+    """Return primary sensor picks for the selected modality."""
+    mode = _modality_mode(modality)
+    if mode == "meg":
+        picks = mne.pick_types(info, meg="mag", eeg=False, eog=False, exclude=[])
+        if len(picks) == 0:
+            picks = mne.pick_types(info, meg=True, eeg=False, eog=False, exclude=[])
+        return picks
+    return mne.pick_types(info, eeg=True, meg=False, eog=False, exclude=[])
+
+
+def _amplitude_scale_and_unit(modality: str) -> tuple[float, str]:
+    mode = _modality_mode(modality)
+    if mode == "meg":
+        return 1e15, "fT"
+    return 1e6, "uV"
+
+
+def _default_metrics_channels(info: mne.Info, modality: str) -> list[str]:
+    mode = _modality_mode(modality)
+    if mode == "meg":
+        picks = _signal_picks(info, mode)
+        if len(picks) == 0:
+            raise ValueError("No MEG channels found for default metrics channel selection.")
+        # Keep defaults concise; user can override with --metrics_channels for larger sets.
+        return [info["ch_names"][i] for i in picks[:3]]
+    return ["Fp1", "Fz", "Cz"]
+
+
+def _find_raw_files(raw_dir: Path, modality: str) -> list[Path]:
+    mode = _modality_mode(modality)
+    if mode == "meg":
+        return sorted(
+            p for p in raw_dir.rglob("*.fif")
+            if p.is_file() and ".git" not in p.parts
+        )
+
+    raw_files = sorted(
+        p for p in raw_dir.rglob("*.vhdr")
+        if p.is_file() and ".git" not in p.parts
+    )
+    if raw_files:
+        return raw_files
+
+    raw_files = sorted(
+        p for p in raw_dir.rglob("*.set")
+        if p.is_file() and ".git" not in p.parts
+    )
+    if raw_files:
+        return raw_files
+
+    return sorted(
+        p for p in raw_dir.rglob("*.fif")
+        if p.is_file() and ".git" not in p.parts
+    )
+
+
 def summarize_one_file(args, raw_path: Path):
+    modality = _modality_mode(getattr(args, "modality", "eeg"))
     subj = raw_path.stem
     subj_num = subject_number_from_stem(subj)
     subject_csv = Path(args.subject_csv_dir) / f"subject-{subj_num}.csv"
@@ -149,10 +214,15 @@ def summarize_one_file(args, raw_path: Path):
         print("VMRK file:", vmrk_path)
 
     # Show annotation descriptions without any preprocessing (debug)
-    if is_bv:
+    suffix = raw_path.suffix.lower()
+    if suffix == ".vhdr":
         raw0 = mne.io.read_raw_brainvision(raw_path, preload=True)
-    else:
+    elif suffix == ".set":
         raw0 = mne.io.read_raw_eeglab(raw_path, preload=True)
+    elif suffix == ".fif":
+        raw0 = mne.io.read_raw_fif(raw_path, preload=True)
+    else:
+        raise ValueError(f"Unsupported raw file extension: {raw_path.suffix}")
     descs = list(dict.fromkeys(raw0.annotations.description))
     print("\nAnnotation descriptions (first 30 unique):")
     print(descs[:30])
@@ -168,11 +238,13 @@ def summarize_one_file(args, raw_path: Path):
         l_freq=args.l_freq,
         h_freq=args.h_freq,
         notch=args.notch,
+        modality=modality,
     )
 
     # ICA diagnostics (non-destructive)
     ica_diag = compute_ica_diagnostics(
         raw,
+        modality=modality,
         blink_proxy_chs=args.blink_proxy_chs,
         blink_threshold_uv=args.blink_threshold_uv,
         blink_win_ms=args.blink_win_ms,
@@ -192,7 +264,10 @@ def summarize_one_file(args, raw_path: Path):
         blink_rate_thresh=args.ica_auto_blink_rate_per_min,
     )
 
-    events_ann = events_from_annotations_positions(raw)
+    event_source = str(getattr(args, "event_source", "annotations")).lower()
+    if modality == "meg" and event_source == "annotations":
+        event_source = "auto"
+    events_ann = events_from_raw(raw, event_source=event_source, stim_channel=args.stim_channel)
     markers_pos = events_ann[:, 0].copy()
 
     # ------------------------------------------------------------
@@ -356,6 +431,9 @@ def apply_config(args, defaults=None):
         defaults = {}
     cfg = load_config(args.config)
 
+    # Top-level controls
+    set_if_default(args, defaults, "modality", cfg.get("modality", args.modality))
+
     # Paths
     set_if_default(args, defaults, "raw_dir", cfg["paths"]["raw_dir"])
     set_if_default(args, defaults, "subject_csv_dir", cfg["paths"]["subject_csv_dir"])
@@ -392,6 +470,8 @@ def apply_config(args, defaults=None):
     cond_map = cfg["events"].get("condition_map", None)
     if cond_map is not None:
         setattr(args, "condition_map", cond_map)
+    set_if_default(args, defaults, "event_source", cfg["events"].get("source", args.event_source))
+    set_if_default(args, defaults, "stim_channel", cfg["events"].get("stim_channel", args.stim_channel))
 
     # Epoching
     set_if_default(args, defaults, "tmin", cfg["epoching"].get("tmin", args.tmin))
@@ -576,6 +656,8 @@ def apply_erp_core_preset(args, defaults):
     """Apply ERP CORE-style defaults (TP9/TP10, 0.1–20 Hz, ICA on, individualized thresholds)."""
     if not getattr(args, "erp_core", False):
         return
+    if _modality_mode(getattr(args, "modality", "eeg")) == "meg":
+        return
     # Store for logging
     args._erp_core_preset_enabled = True
     # Preprocessing: ERP CORE uses TP9/TP10 and 0.1 Hz high-pass.
@@ -607,6 +689,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         defaults = {}
     if cfg is None:
         cfg = apply_config(args, defaults)
+    modality = _modality_mode(getattr(args, "modality", "eeg"))
 
     raw_dir = Path(args.raw_dir)
     subject_csv_dir = Path(args.subject_csv_dir)
@@ -636,13 +719,11 @@ def run_full_pipeline(args, defaults=None, cfg=None):
     tfr_metrics_all: list[pd.DataFrame] = []
     erp_timeseries_all: list[pd.DataFrame] = []
 
-    raw_files = [p for p in raw_dir.rglob("*.vhdr") if p.is_file() and ".git" not in p.parts]
-    raw_files = sorted(raw_files)
+    raw_files = _find_raw_files(raw_dir, modality)
     if not raw_files:
-        raw_files = [p for p in raw_dir.rglob("*.set") if p.is_file() and ".git" not in p.parts]
-        raw_files = sorted(raw_files)
-    if not raw_files:
-        raise RuntimeError(f"No .vhdr or .set files found in {raw_dir}")
+        if modality == "meg":
+            raise RuntimeError(f"No .fif files found in {raw_dir} for modality=meg.")
+        raise RuntimeError(f"No .vhdr, .set, or .fif files found in {raw_dir} for modality=eeg.")
 
     if args.subjects:
         wanted = {s.lower() for s in args.subjects}
@@ -745,10 +826,12 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             l_freq=args.l_freq,
             h_freq=args.h_freq,
             notch=args.notch,
+            modality=modality,
         )
 
         ica_diag = compute_ica_diagnostics(
             raw,
+            modality=modality,
             blink_proxy_chs=args.blink_proxy_chs,
             blink_threshold_uv=args.blink_threshold_uv,
             blink_win_ms=args.blink_win_ms,
@@ -786,6 +869,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                     corr_thresh=args.ica_corr_thresh,
                     max_exclude=args.ica_max_exclude,
                     decim=args.ica_decim,
+                    picks=modality,
                 )
 
                 ica_obj, ica_fit_diag = fit_ica(raw, ica_params)
@@ -809,8 +893,11 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                         ica_path.parent.mkdir(parents=True, exist_ok=True)
                         ica_obj.save(ica_path, overwrite=True)
 
-        # Events from annotations
-        events_ann = events_from_annotations_positions(raw)
+        # Events from selected source (annotations, stim channel, or auto).
+        event_source = str(getattr(args, "event_source", "annotations")).lower()
+        if modality == "meg" and event_source == "annotations":
+            event_source = "auto"
+        events_ann = events_from_raw(raw, event_source=event_source, stim_channel=args.stim_channel)
         markers_pos = events_ann[:, 0].copy()
         
         # Trigger burst QC (flag only; do not modify markers_pos)
@@ -966,7 +1053,13 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         epochs_test = epochs.copy().crop(tmin=args.art_test_tmin, tmax=args.art_test_tmax)
 
         eog_picks = mne.pick_types(epochs_test.info, eog=True, eeg=False)
-        blink_threshold_uv = float(args.blink_threshold_uv)
+        signal_picks = _signal_picks(epochs_test.info, modality)
+        if len(signal_picks) == 0:
+            raise RuntimeError(f"No signal channels found for modality={modality}.")
+
+        amp_scale, amp_unit = _amplitude_scale_and_unit(modality)
+
+        blink_threshold = float(args.blink_threshold_uv)
         blink_auto_pct = getattr(args, "blink_auto_percentile", None)
         if blink_auto_pct in ("None", "null"):
             blink_auto_pct = None
@@ -985,9 +1078,10 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                     sfreq=float(epochs_test.info["sfreq"]),
                     win_ms=args.blink_win_ms,
                     step_ms=args.blink_step_ms,
+                    scale=amp_scale,
                 )
                 if np.isfinite(ptp_max).any():
-                    blink_threshold_uv = float(np.nanpercentile(ptp_max, blink_auto_pct))
+                    blink_threshold = float(np.nanpercentile(ptp_max, blink_auto_pct))
         blink_bad = np.zeros(len(epochs_test), dtype=bool)
 
         if len(blink_picks) > 0:
@@ -996,85 +1090,100 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                 sfreq=float(epochs_test.info["sfreq"]),
                 win_ms=args.blink_win_ms,
                 step_ms=args.blink_step_ms,
-                threshold_uv=blink_threshold_uv,
+                threshold_uv=blink_threshold,
+                scale=amp_scale,
             )
 
-        eeg_picks = mne.pick_types(epochs_test.info, eeg=True, eog=False)
         volt_method = str(getattr(args, "volt_method", "simple")).lower()
-        volt_pos_uv = float(args.volt_pos_uv)
-        volt_neg_uv = float(args.volt_neg_uv)
-        volt_threshold_uv = float(getattr(args, "volt_threshold_uv", 150.0))
+        volt_pos = float(args.volt_pos_uv)
+        volt_neg = float(args.volt_neg_uv)
+        volt_threshold = float(getattr(args, "volt_threshold_uv", 150.0))
         volt_auto_pct = getattr(args, "volt_auto_percentile", None)
         if volt_auto_pct in ("None", "null"):
             volt_auto_pct = None
         if volt_auto_pct is not None:
             volt_auto_pct = float(volt_auto_pct)
-        if volt_auto_pct is not None and len(eeg_picks) > 0:
-            eeg_data = epochs_test.get_data(picks=eeg_picks)
-            if eeg_data.size:
-                max_abs = np.nanmax(np.abs(eeg_data) * 1e6, axis=(1, 2))
+        if volt_auto_pct is not None and len(signal_picks) > 0:
+            signal_data = epochs_test.get_data(picks=signal_picks)
+            if signal_data.size:
+                max_abs = np.nanmax(np.abs(signal_data) * amp_scale, axis=(1, 2))
                 if np.isfinite(max_abs).any():
                     thr_abs = float(np.nanpercentile(max_abs, volt_auto_pct))
                     if volt_method in {"simple", "combined"}:
-                        volt_pos_uv = thr_abs
-                        volt_neg_uv = -thr_abs
+                        volt_pos = thr_abs
+                        volt_neg = -thr_abs
                 if volt_method in {"window_ptp", "combined"}:
                     ptp_max = moving_window_ptp_max(
-                        eeg_data,
+                        signal_data,
                         sfreq=float(epochs_test.info["sfreq"]),
                         win_ms=float(getattr(args, "volt_win_ms", 200.0)),
                         step_ms=float(getattr(args, "volt_step_ms", 10.0)),
+                        scale=amp_scale,
                     )
                     if np.isfinite(ptp_max).any():
-                        volt_threshold_uv = float(np.nanpercentile(ptp_max, volt_auto_pct))
+                        volt_threshold = float(np.nanpercentile(ptp_max, volt_auto_pct))
         if volt_method == "window_ptp":
             muscle_bad = moving_window_ptp_mask(
-                epochs_test.get_data(picks=eeg_picks),
+                epochs_test.get_data(picks=signal_picks),
                 sfreq=float(epochs_test.info["sfreq"]),
                 win_ms=float(getattr(args, "volt_win_ms", 200.0)),
                 step_ms=float(getattr(args, "volt_step_ms", 10.0)),
-                threshold_uv=volt_threshold_uv,
+                threshold_uv=volt_threshold,
+                scale=amp_scale,
             )
         elif volt_method == "combined":
             simple_bad = simple_voltage_threshold_mask(
-                epochs_test.get_data(picks=eeg_picks),
-                pos_limit_uv=volt_pos_uv,
-                neg_limit_uv=volt_neg_uv,
+                epochs_test.get_data(picks=signal_picks),
+                pos_limit_uv=volt_pos,
+                neg_limit_uv=volt_neg,
+                scale=amp_scale,
             )
             ptp_bad = moving_window_ptp_mask(
-                epochs_test.get_data(picks=eeg_picks),
+                epochs_test.get_data(picks=signal_picks),
                 sfreq=float(epochs_test.info["sfreq"]),
                 win_ms=float(getattr(args, "volt_win_ms", 200.0)),
                 step_ms=float(getattr(args, "volt_step_ms", 10.0)),
-                threshold_uv=volt_threshold_uv,
+                threshold_uv=volt_threshold,
+                scale=amp_scale,
             )
             muscle_bad = simple_bad | ptp_bad
         else:
             muscle_bad = simple_voltage_threshold_mask(
-                epochs_test.get_data(picks=eeg_picks),
-                pos_limit_uv=volt_pos_uv,
-                neg_limit_uv=volt_neg_uv,
+                epochs_test.get_data(picks=signal_picks),
+                pos_limit_uv=volt_pos,
+                neg_limit_uv=volt_neg,
+                scale=amp_scale,
             )
 
         step_thresh = getattr(args, "volt_step_uv_per_ms", None)
         if step_thresh not in (None, "None", "null"):
             step_bad = step_threshold_mask(
-                epochs_test.get_data(picks=eeg_picks),
+                epochs_test.get_data(picks=signal_picks),
                 sfreq=float(epochs_test.info["sfreq"]),
                 threshold_uv_per_ms=float(step_thresh),
+                scale=amp_scale,
             )
             muscle_bad = muscle_bad | step_bad
 
         threshold_info = {
-            "blink_threshold_uv_used": float(blink_threshold_uv),
+            "artifact_modality": modality,
+            "artifact_amplitude_unit": amp_unit,
+            "blink_threshold_used": float(blink_threshold),
             "blink_auto_percentile": "" if blink_auto_pct is None else float(blink_auto_pct),
-            "volt_pos_uv_used": float(volt_pos_uv),
-            "volt_neg_uv_used": float(volt_neg_uv),
-            "volt_ptp_threshold_uv_used": (
-                float(volt_threshold_uv) if volt_method in {"window_ptp", "combined"} else ""
+            "volt_pos_threshold_used": float(volt_pos),
+            "volt_neg_threshold_used": float(volt_neg),
+            "volt_ptp_threshold_used": (
+                float(volt_threshold) if volt_method in {"window_ptp", "combined"} else ""
             ),
             "volt_auto_percentile": "" if volt_auto_pct is None else float(volt_auto_pct),
             "volt_method": volt_method,
+            # Backward-compatible field names retained for downstream CSV consumers.
+            "blink_threshold_uv_used": float(blink_threshold),
+            "volt_pos_uv_used": float(volt_pos),
+            "volt_neg_uv_used": float(volt_neg),
+            "volt_ptp_threshold_uv_used": (
+                float(volt_threshold) if volt_method in {"window_ptp", "combined"} else ""
+            ),
         }
 
         bad = blink_bad | muscle_bad
@@ -1181,8 +1290,11 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                 metrics_dir = out_dir / "05_metrics"
                 metrics_dir.mkdir(parents=True, exist_ok=True)
 
-            channels = getattr(args, "metrics_channels", None) or ["Fp1", "Fz", "Cz"]
+            channels = getattr(args, "metrics_channels", None)
+            if channels is None:
+                channels = _default_metrics_channels(epochs.info, modality)
             conds = metrics_conditions
+            erp_scale, erp_unit = _amplitude_scale_and_unit(modality)
 
             if do_erp:
                 # ERP windows
@@ -1198,6 +1310,8 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                         windows=erp_windows,
                         compute_mmn=bool(getattr(args, "compute_mmn", 1)),
                         mmn_name=diff_label if diff_label else "DEV_MINUS_STD",
+                        scale=erp_scale,
+                        amplitude_unit=erp_unit,
                     )
                     df_erp.to_csv(metrics_dir / f"{subj}_erp_metrics.csv", index=False)
                     erp_metrics_all.append(df_erp)
@@ -1207,8 +1321,8 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                 if bool(getattr(args, "metrics_erp_timeseries", False)):
                     try:
                         if args.metrics_channels is None:
-                            eeg_picks = mne.pick_types(epochs.info, eeg=True, eog=False)
-                            ts_channels = [epochs.ch_names[i] for i in eeg_picks]
+                            signal_picks_ts = _signal_picks(epochs.info, modality)
+                            ts_channels = [epochs.ch_names[i] for i in signal_picks_ts]
                         else:
                             ts_channels = channels
 
@@ -1225,6 +1339,8 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                             params=ts_params,
                             conditions=conds,
                             include_difference_wave=False,
+                            scale=erp_scale,
+                            amplitude_unit=erp_unit,
                         )
                         ts_dir = metrics_dir / "erp_timeseries"
                         ts_dir.mkdir(parents=True, exist_ok=True)
@@ -1396,6 +1512,7 @@ def _subject_from_epochs_path(p: Path) -> str:
 
 def run_metrics_only(args):
     """Compute ERP/TFR metrics from existing epochs in out_dir/02_epochs."""
+    modality = _modality_mode(getattr(args, "modality", "eeg"))
     out_dir = Path(args.out_dir)
     epochs_dir = out_dir / "02_epochs"
     metrics_dir = out_dir / "05_metrics"
@@ -1412,7 +1529,7 @@ def run_metrics_only(args):
         print("[WARN] Metrics requested but both ERP and TFR are disabled in config.")
         return
 
-    channels = getattr(args, "metrics_channels", None) or ["Fp1", "Fz", "Cz"]
+    base_channels = getattr(args, "metrics_channels", None)
     metrics_conditions = getattr(args, "metrics_conditions", None)
     if not metrics_conditions:
         cond_map = getattr(args, "condition_map", None)
@@ -1449,6 +1566,8 @@ def run_metrics_only(args):
         subj = _subject_from_epochs_path(p)
         loaded = load_epochs(p)
         epochs = loaded.epochs
+        channels = base_channels if base_channels is not None else _default_metrics_channels(epochs.info, modality)
+        erp_scale, erp_unit = _amplitude_scale_and_unit(modality)
 
         if do_erp and erp_windows is not None:
             try:
@@ -1461,6 +1580,8 @@ def run_metrics_only(args):
                     windows=erp_windows,
                     compute_mmn=bool(getattr(args, "compute_mmn", 1)),
                     mmn_name=diff_label if diff_label else "DEV_MINUS_STD",
+                    scale=erp_scale,
+                    amplitude_unit=erp_unit,
                 )
                 df_erp.to_csv(metrics_dir / f"{subj}_erp_metrics.csv", index=False)
                 erp_metrics_all.append(df_erp)
@@ -1470,8 +1591,8 @@ def run_metrics_only(args):
         if bool(getattr(args, "metrics_erp_timeseries", False)):
             try:
                 if args.metrics_channels is None:
-                    eeg_picks = mne.pick_types(epochs.info, eeg=True, eog=False)
-                    ts_channels = [epochs.ch_names[i] for i in eeg_picks]
+                    signal_picks_ts = _signal_picks(epochs.info, modality)
+                    ts_channels = [epochs.ch_names[i] for i in signal_picks_ts]
                 else:
                     ts_channels = channels
 
@@ -1488,6 +1609,8 @@ def run_metrics_only(args):
                     params=ts_params,
                     conditions=metrics_conditions,
                     include_difference_wave=False,
+                    scale=erp_scale,
+                    amplitude_unit=erp_unit,
                 )
                 ts_dir = metrics_dir / "erp_timeseries"
                 ts_dir.mkdir(parents=True, exist_ok=True)
@@ -1621,6 +1744,13 @@ def build_arg_parser():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, help="Path to YAML/JSON config file")
     ap.add_argument(
+        "--modality",
+        choices=["eeg", "meg"],
+        default="eeg",
+        help="Processing modality (default: eeg). Use 'meg' to run MEG mode.",
+    )
+    ap.add_argument("--methodology", dest="modality", choices=["eeg", "meg"], help=argparse.SUPPRESS)
+    ap.add_argument(
         "--erp-core",
         dest="erp_core",
         action="store_true",
@@ -1629,10 +1759,10 @@ def build_arg_parser():
     ap.add_argument("--process_data", action="store_true", help="Process raw data into epochs/evokeds/QC")
     ap.add_argument("--get_metrics", action="store_true", help="Compute ERP/TFR metrics")
     ap.add_argument("--plot_figures", action="store_true", help="Generate paper-ready figures")
-    ap.add_argument("--raw_dir",  help="Folder containing BrainVision .vhdr or EEGLAB .set files (recurses)")
+    ap.add_argument("--raw_dir",  help="Folder containing raw files (EEG: .vhdr/.set, MEG: .fif; recurses)")
     ap.add_argument("--subject_csv_dir",  help="Folder containing subject-###.csv files")
     ap.add_argument("--out_dir", help="Output root folder")
-    ap.add_argument("--summarize_one_file", default=None, help="If provided, summarize this raw file (.vhdr or .set) and exit.")
+    ap.add_argument("--summarize_one_file", default=None, help="If provided, summarize this raw file (.vhdr, .set, or .fif) and exit.")
 
     ap.add_argument("--use_gpu", action="store_true", help="Enable GPU acceleration where available (MNE/CuPy).")
     ap.add_argument("--gpu_device", type=int, default=None, help="Optional GPU device index (default: first visible).")
@@ -1641,7 +1771,7 @@ def build_arg_parser():
         "--subjects",
         nargs="*",
         default=None,
-        help="Optional list of subject stems to run (e.g., S203 s204). If omitted, runs all .vhdr/.set files in raw_dir.",
+        help="Optional list of subject stems to run (e.g., S203 s204). If omitted, runs all raw files for the selected modality.",
     )
 
     ap.add_argument(
@@ -1702,6 +1832,17 @@ def build_arg_parser():
         default=1,
         help="If EEG markers > behavioral codes used, auto-drop extra markers to match count (1=yes,0=no).",
     )
+    ap.add_argument(
+        "--event_source",
+        choices=["annotations", "stim", "auto"],
+        default="annotations",
+        help="Event extraction source: annotations, stim channel, or auto fallback.",
+    )
+    ap.add_argument(
+        "--stim_channel",
+        default=None,
+        help="Optional stim channel name used when --event_source is stim/auto.",
+    )
 
     ap.add_argument("--standard_codes", nargs="*", type=int, default=[110, 210], help="Codes considered Standard")
     ap.add_argument("--deviant_codes", nargs="*", type=int, default=[111, 211], help="Codes considered Deviant")
@@ -1716,7 +1857,12 @@ def build_arg_parser():
     # Artifact settings
     ap.add_argument("--art_test_tmin", type=float, default=-0.2)
     ap.add_argument("--art_test_tmax", type=float, default=0.3)
-    ap.add_argument("--blink_threshold_uv", type=float, default=75.0)
+    ap.add_argument(
+        "--blink_threshold_uv",
+        type=float,
+        default=75.0,
+        help="Blink peak-to-peak threshold (EEG: uV, MEG mode: fT).",
+    )
     ap.add_argument("--blink_win_ms", type=float, default=200.0)
     ap.add_argument("--blink_step_ms", type=float, default=10.0)
     ap.add_argument(
@@ -1725,22 +1871,37 @@ def build_arg_parser():
         default=None,
         help="Optional per-subject percentile for blink peak-to-peak threshold (e.g., 99).",
     )
-    ap.add_argument("--volt_pos_uv", type=float, default=150.0)
-    ap.add_argument("--volt_neg_uv", type=float, default=-150.0)
+    ap.add_argument(
+        "--volt_pos_uv",
+        type=float,
+        default=150.0,
+        help="Positive artifact threshold (EEG: uV, MEG mode: fT).",
+    )
+    ap.add_argument(
+        "--volt_neg_uv",
+        type=float,
+        default=-150.0,
+        help="Negative artifact threshold (EEG: uV, MEG mode: fT).",
+    )
     ap.add_argument(
         "--volt_method",
         default="simple",
         choices=["simple", "window_ptp", "combined"],
         help="EEG artifact rejection method (simple threshold, windowed peak-to-peak, or combined).",
     )
-    ap.add_argument("--volt_threshold_uv", type=float, default=150.0)
+    ap.add_argument(
+        "--volt_threshold_uv",
+        type=float,
+        default=150.0,
+        help="Windowed peak-to-peak threshold (EEG: uV, MEG mode: fT).",
+    )
     ap.add_argument("--volt_win_ms", type=float, default=200.0)
     ap.add_argument("--volt_step_ms", type=float, default=10.0)
     ap.add_argument(
         "--volt_step_uv_per_ms",
         type=float,
         default=None,
-        help="Optional voltage step threshold (uV/ms). If set, epochs exceeding this step are rejected.",
+        help="Optional voltage step threshold (EEG: uV/ms, MEG mode: fT/ms).",
     )
     ap.add_argument(
         "--volt_auto_percentile",

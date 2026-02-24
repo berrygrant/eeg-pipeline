@@ -6,9 +6,9 @@ import numpy as np
 from .gpu import get_xp, to_numpy, backend as gpu_backend
 
 
-def _to_uV(x: np.ndarray) -> np.ndarray:
-    """MNE returns EEG/EOG in Volts; convert to microvolts."""
-    return x * 1e6
+def _scale_data(x: np.ndarray, scale: float) -> np.ndarray:
+    """Scale sensor data from SI units (V/T) to user units (e.g., µV or fT)."""
+    return x * float(scale)
 
 
 def _maybe_to_numpy(x):
@@ -23,6 +23,7 @@ def moving_window_ptp_mask(
     win_ms: float,
     step_ms: float,
     threshold_uv: float,
+    scale: float = 1e6,
 ) -> np.ndarray:
     """
     Returns boolean mask (n_epochs,) where True indicates epoch is bad.
@@ -32,7 +33,7 @@ def moving_window_ptp_mask(
       - (n_epochs, n_times)  [single-channel already selected]
     """
     xp = get_xp()
-    x = _to_uV(xp.asarray(data_v))
+    x = _scale_data(xp.asarray(data_v), scale=scale)
 
     if x.ndim == 2:
         x = x[:, None, :]  # (n_epochs, 1, n_times)
@@ -61,6 +62,7 @@ def moving_window_ptp_max(
     sfreq: float,
     win_ms: float,
     step_ms: float,
+    scale: float = 1e6,
 ) -> np.ndarray:
     """
     Returns max peak-to-peak per epoch (n_epochs,).
@@ -70,7 +72,7 @@ def moving_window_ptp_max(
       - (n_epochs, n_times)  [single-channel already selected]
     """
     xp = get_xp()
-    x = _to_uV(xp.asarray(data_v))
+    x = _scale_data(xp.asarray(data_v), scale=scale)
 
     if x.ndim == 2:
         x = x[:, None, :]  # (n_epochs, 1, n_times)
@@ -97,6 +99,7 @@ def simple_voltage_threshold_mask(
     data_v: np.ndarray,
     pos_limit_uv: float,
     neg_limit_uv: float,
+    scale: float = 1e6,
 ) -> np.ndarray:
     """
     Returns boolean mask (n_epochs,) where True indicates epoch is bad.
@@ -106,7 +109,7 @@ def simple_voltage_threshold_mask(
       - (n_epochs, n_times)
     """
     xp = get_xp()
-    x = _to_uV(xp.asarray(data_v))
+    x = _scale_data(xp.asarray(data_v), scale=scale)
 
     if x.ndim == 2:
         x = x[:, None, :]
@@ -123,6 +126,7 @@ def step_threshold_mask(
     data_v: np.ndarray,
     sfreq: float,
     threshold_uv_per_ms: float,
+    scale: float = 1e6,
 ) -> np.ndarray:
     """
     Returns boolean mask (n_epochs,) where True indicates epoch is bad.
@@ -130,7 +134,7 @@ def step_threshold_mask(
     Rejects epochs if the absolute voltage step exceeds threshold_uv_per_ms.
     """
     xp = get_xp()
-    x = _to_uV(xp.asarray(data_v))
+    x = _scale_data(xp.asarray(data_v), scale=scale)
 
     if x.ndim == 2:
         x = x[:, None, :]

@@ -84,7 +84,12 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
             cur = cur[p]
         cur.setdefault(parts[-1], value)
 
+    # Backward-compatibility: legacy key `methodology` -> `modality`.
+    if "modality" not in cfg and "methodology" in cfg:
+        cfg["modality"] = cfg["methodology"]
+
     set_default(cfg, "task", "unknown")
+    set_default(cfg, "modality", "eeg")  # eeg | meg
 
     set_default(cfg, "paths.raw_dir", None)
     set_default(cfg, "paths.subject_csv_dir", None)
@@ -105,6 +110,8 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
     set_default(cfg, "events.standard_codes", [])
     set_default(cfg, "events.deviant_codes", [])
     set_default(cfg, "events.condition_map", None)
+    set_default(cfg, "events.source", "annotations")  # annotations | stim | auto
+    set_default(cfg, "events.stim_channel", None)
     set_default(cfg, "events.drop_eeg_markers_by_gap_s", None)
     set_default(cfg, "events.auto_drop_to_count", True)
 
@@ -174,6 +181,10 @@ def _validate_config(cfg: Dict[str, Any]) -> None:
         if val is None or (isinstance(val, str) and not val.strip()):
             errors.append(f"Missing required field: '{path}'")
 
+    modality = str(config_get(cfg, "modality", "eeg")).lower()
+    if modality not in {"eeg", "meg"}:
+        errors.append("modality must be one of: eeg | meg.")
+
     # Paths required for the pipeline proper (you can relax for “metrics-only” runs later)
     require("paths.raw_dir")
     require("paths.subject_csv_dir")
@@ -199,6 +210,10 @@ def _validate_config(cfg: Dict[str, Any]) -> None:
     reref_mode = str(config_get(cfg, "preprocess.reref", "average")).lower()
     if reref_mode not in {"average", "avg", "none", "no", "p9_p10", "tp9_tp10", "mastoids", "mastoid", "linked_mastoids", "linked"}:
         errors.append("preprocess.reref must be one of: average | none | p9_p10/tp9_tp10 (mastoids).")
+
+    event_source = str(config_get(cfg, "events.source", "annotations")).lower()
+    if event_source not in {"annotations", "stim", "auto"}:
+        errors.append("events.source must be one of: annotations | stim | auto.")
 
     volt_method = str(config_get(cfg, "artifacts.voltage.method", "simple")).lower()
     if volt_method not in {"simple", "window_ptp", "combined"}:
@@ -294,6 +309,9 @@ def _validate_config(cfg: Dict[str, Any]) -> None:
 def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     cfg = dict(cfg)  # shallow copy; mutate nested dicts
 
+    # Top-level controls
+    cfg["modality"] = str(cfg.get("modality", "eeg")).lower()
+
     # Paths -> Path objects (IMPORTANT: do NOT convert back to str)
     for k in ("raw_dir", "subject_csv_dir", "out_dir"):
         v = cfg["paths"].get(k)
@@ -305,6 +323,9 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     cfg["events"]["standard_codes"] = _as_int_list(cfg["events"].get("standard_codes", []))
     cfg["events"]["deviant_codes"] = _as_int_list(cfg["events"].get("deviant_codes", []))
     cfg["events"]["condition_map"] = _normalize_condition_map(cfg["events"].get("condition_map", None))
+    cfg["events"]["source"] = str(cfg["events"].get("source", "annotations")).lower()
+    stim_ch = cfg["events"].get("stim_channel", None)
+    cfg["events"]["stim_channel"] = None if stim_ch in (None, "", "None", "null") else str(stim_ch)
 
     # Floats
     cfg["preprocess"]["l_freq"] = float(cfg["preprocess"]["l_freq"])
