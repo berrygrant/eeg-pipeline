@@ -137,9 +137,10 @@ def step_threshold_mask(
     if x.ndim != 3:
         raise ValueError(f"Expected 2D or 3D array, got shape={x.shape}")
 
-    dt_ms = 1000.0 / float(sfreq)
-    if dt_ms <= 0:
+    sfreq = float(sfreq)
+    if sfreq <= 0:
         raise ValueError("sfreq must be positive.")
+    dt_ms = 1000.0 / sfreq
 
     # diff over time -> uV per ms
     diff = xp.diff(x, axis=-1)
