@@ -117,6 +117,29 @@ def test_figure_helpers_build_windows_and_choose_defaults():
     assert [w.name for w in defaults] == ["MMN", "P300"]
 
 
+def test_figure_helpers_cover_explicit_and_fallback_paths():
+    args = Namespace(
+        figure_time_window=("0.0", "0.3"),
+        erp_window=None,
+        tmin=-0.2,
+        tmax=0.6,
+        figure_freq_band=(4.0, 8.0),
+        tfr_fmin=2.0,
+        tfr_fmax=8.0,
+        compute_mmn=0,
+        compute_p300=0,
+    )
+
+    assert cli._resolve_figure_time_window(args) == (0.0, 0.3)
+    assert cli._resolve_figure_freq_band(args) == (4.0, 8.0)
+    assert cli._build_erp_windows(args) == []
+
+    args.figure_time_window = None
+    args.figure_freq_band = None
+    assert cli._resolve_figure_time_window(args) == (-0.2, 0.6)
+    assert cli._resolve_figure_freq_band(args) == (2.0, 8.0)
+
+
 def test_prompt_yes_no_respects_tty_and_input(monkeypatch):
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
     assert cli._prompt_yes_no("ignored") is False
@@ -184,3 +207,59 @@ def test_main_defaults_to_processing_and_metrics(monkeypatch):
         "metrics": 1,
         "cfg": {"cfg": "ok"},
     }
+
+
+def test_main_get_metrics_only_uses_metrics_runner(monkeypatch):
+    called = {}
+
+    monkeypatch.setattr(cli, "apply_erp_core_preset", lambda args, defaults: None)
+    monkeypatch.setattr(cli, "apply_config", lambda args, defaults: {"cfg": "ok"})
+    monkeypatch.setattr(
+        cli,
+        "configure_gpu",
+        lambda use_gpu, device=None: {
+            "enabled": False,
+            "backend": "numpy",
+            "mne_cuda": "disabled",
+            "cupy": "disabled",
+        },
+    )
+    monkeypatch.setattr(cli, "run_metrics_only", lambda args: called.setdefault("metrics_only", True))
+    monkeypatch.setattr(cli, "run_full_pipeline", lambda *args, **kwargs: called.setdefault("process", True))
+    monkeypatch.setattr(cli, "run_plot_figures", lambda args: called.setdefault("plot", True))
+
+    cli.main(["--config", "config.yaml", "--get_metrics"])
+
+    assert called == {"metrics_only": True}
+
+
+def test_main_process_only_sets_metrics_zero_and_warns_when_gpu_falls_back(monkeypatch, capsys):
+    called = {}
+
+    monkeypatch.setattr(cli, "apply_erp_core_preset", lambda args, defaults: None)
+    monkeypatch.setattr(cli, "apply_config", lambda args, defaults: {"cfg": "ok"})
+    monkeypatch.setattr(
+        cli,
+        "configure_gpu",
+        lambda use_gpu, device=None: {
+            "enabled": False,
+            "backend": "numpy",
+            "mne_cuda": "missing",
+            "cupy": "missing",
+        },
+    )
+    monkeypatch.setattr(cli, "capability_report", lambda: {})
+    monkeypatch.setattr(cli, "format_capability_report", lambda rep: "")
+
+    def fake_run_full_pipeline(args, defaults=None, cfg=None):
+        called["metrics"] = args.metrics
+        called["cfg"] = cfg
+
+    monkeypatch.setattr(cli, "run_full_pipeline", fake_run_full_pipeline)
+    monkeypatch.setattr(cli, "run_metrics_only", lambda args: called.setdefault("metrics_only", True))
+
+    cli.main(["--config", "config.yaml", "--process_data", "--use_gpu"])
+
+    out = capsys.readouterr().out
+    assert "[WARN] GPU requested but not available; falling back to CPU" in out
+    assert called == {"metrics": 0, "cfg": {"cfg": "ok"}}

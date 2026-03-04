@@ -96,6 +96,48 @@ def test_fit_ica_returns_none_on_nonretryable_runtime_error(monkeypatch):
     assert diag["ica_fit_error"] == "unexpected failure"
 
 
+def test_fit_ica_succeeds_without_retry(monkeypatch):
+    raw = DummyRaw(["Fz", "Cz"])
+    monkeypatch.setattr(ica_mod.mne, "pick_types", lambda *args, **kwargs: np.array([0, 1]))
+
+    class FakeICA:
+        def __init__(self, method, n_components, random_state, max_iter):
+            self.n_components = n_components
+
+        def fit(self, raw_fit, picks, decim, verbose=False):
+            return self
+
+    monkeypatch.setattr(ica_mod.mne.preprocessing, "ICA", FakeICA)
+
+    fitted, diag = ica_mod.fit_ica(raw, ica_mod.ICAParams(n_components=2))
+
+    assert isinstance(fitted, FakeICA)
+    assert diag["ica_fit_ok"] is True
+    assert diag["ica_fit_n_components_used"] == 2
+
+
+def test_fit_ica_returns_none_when_retry_also_fails(monkeypatch):
+    raw = DummyRaw(["Fz", "Cz", "Pz", "Oz", "P3"])
+    monkeypatch.setattr(ica_mod.mne, "pick_types", lambda *args, **kwargs: np.array([0, 1, 2, 3, 4]))
+
+    class FakeICA:
+        def __init__(self, method, n_components, random_state, max_iter):
+            self.n_components = n_components
+
+        def fit(self, raw_fit, picks, decim, verbose=False):
+            if isinstance(self.n_components, float):
+                raise RuntimeError("your threshold results in 1 component")
+            raise RuntimeError("retry failed hard")
+
+    monkeypatch.setattr(ica_mod.mne.preprocessing, "ICA", FakeICA)
+
+    fitted, diag = ica_mod.fit_ica(raw, ica_mod.ICAParams(n_components=0.99))
+
+    assert fitted is None
+    assert diag["ica_fit_ok"] is False
+    assert "retry failed" in diag["ica_fit_error"]
+
+
 def test_find_ica_excludes_uses_eog_candidates_sorted_by_absolute_score():
     raw = DummyRaw(["EOG", "Fz"])
 

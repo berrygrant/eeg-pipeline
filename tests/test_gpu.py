@@ -168,6 +168,10 @@ def test_try_init_cupy_covers_available_and_import_failure(monkeypatch):
     assert status == "available"
     assert xp is fake_cp
 
+    status, xp = gpu._try_init_cupy(None)
+    assert status == "available"
+    assert xp is fake_cp
+
     original_import = builtins.__import__
 
     def missing_cupy(name, globals=None, locals=None, fromlist=(), level=0):
@@ -257,3 +261,37 @@ def test_capability_report_covers_device_property_errors_and_import_failures(mon
     assert rep["mne_version"].startswith("unavailable:")
     assert rep["cupy_error"].startswith("missing cupy")
     assert "cupy_error=missing cupy" in msg
+
+
+def test_capability_report_covers_non_byte_device_name_and_partial_properties(monkeypatch):
+    class Runtime:
+        @staticmethod
+        def getDeviceCount():
+            return 1
+
+        @staticmethod
+        def getDevice():
+            return 0
+
+        @staticmethod
+        def getDeviceProperties(device):
+            return {
+                "name": "Mock GPU",
+                "major": 8,
+                "minor": None,
+            }
+
+    fake_cp = SimpleNamespace(
+        __version__="3.0.0",
+        cuda=SimpleNamespace(runtime=Runtime()),
+    )
+    monkeypatch.setitem(sys.modules, "cupy", fake_cp)
+    monkeypatch.setitem(sys.modules, "mne", SimpleNamespace(__version__="1.0.0"))
+
+    gpu._DEVICE = None
+    rep = gpu.capability_report()
+
+    assert rep["device"] == 0
+    assert rep["device_name"] == "Mock GPU"
+    assert "compute_capability" not in rep
+    assert "total_mem_gb" not in rep

@@ -103,6 +103,42 @@ def test_compute_erp_timeseries_applies_baseline_and_validates_channels(syntheti
         )
 
 
+def test_compute_erp_timeseries_skips_conditions_with_zero_epochs():
+    class EmptyConditionEpochs:
+        ch_names = ["Fz"]
+        event_id = {"Empty": 1}
+
+        def __len__(self):
+            return 1
+
+        def copy(self):
+            return self
+
+        def pick(self, chs):
+            assert chs == ["Fz"]
+            return self
+
+        def crop(self, tmin, tmax):
+            return self
+
+        def apply_baseline(self, baseline):
+            return self
+
+        def __getitem__(self, key):
+            assert key == "Empty"
+            return []
+
+    df = erp_ts_mod.compute_erp_timeseries(
+        EmptyConditionEpochs(),
+        subject="001",
+        channels=["Fz"],
+        conditions=["Empty"],
+        params=erp_ts_mod.ERPTimeSeriesParams(tmin=-0.1, tmax=0.2, baseline=(-0.1, 0.0)),
+    )
+
+    assert df.iloc[0]["status"] == "NO_CONDITIONS"
+
+
 def test_tfr_safe_pick_and_compute_helpers(monkeypatch, synthetic_epochs):
     assert tfr_mod._safe_pick_channels(synthetic_epochs, ["Fz", "Missing"]) == ["Fz"]
 
@@ -146,6 +182,49 @@ def test_compute_tfr_metrics_handles_empty_and_missing_conditions(synthetic_epoc
         conditions=["Missing"],
     )
     assert missing_df.iloc[0]["status"] == "MISSING_CONDITION"
+
+
+def test_compute_tfr_metrics_handles_empty_present_conditions_and_bad_channels():
+    class EmptyConditionEpochs:
+        ch_names = ["Fz"]
+        event_id = {"Empty": 1}
+
+        def __len__(self):
+            return 1
+
+        def copy(self):
+            return self
+
+        def crop(self, tmin, tmax):
+            return self
+
+        def pick(self, chs):
+            self.ch_names = list(chs)
+            return self
+
+        def __getitem__(self, key):
+            assert key == "Empty"
+            return []
+
+    empty_df = tfr_mod.compute_tfr_metrics(
+        EmptyConditionEpochs(),
+        subject="001",
+        channels=["Fz"],
+        tmin=-0.1,
+        tmax=0.1,
+        conditions=["Empty"],
+    )
+    assert empty_df.iloc[0]["status"] == "EMPTY"
+
+    with pytest.raises(ValueError, match="None of the requested channels"):
+        tfr_mod.compute_tfr_metrics(
+            EmptyConditionEpochs(),
+            subject="001",
+            channels=["Missing"],
+            tmin=-0.1,
+            tmax=0.1,
+            conditions=["Empty"],
+        )
 
 
 def test_compute_tfr_metrics_returns_flattened_rows(monkeypatch, synthetic_epochs):

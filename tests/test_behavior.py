@@ -16,6 +16,16 @@ def test_read_eventcodes_from_subject_csv_casts_numeric_values(tmp_path: Path):
     assert np.array_equal(codes, np.array([101, 102], dtype=int))
 
 
+def test_read_eventcodes_from_subject_csv_preserves_integer_dtype(tmp_path: Path):
+    csv_path = tmp_path / "subject.csv"
+    csv_path.write_text("EventCode\n101\n102\n", encoding="utf-8")
+
+    codes = read_eventcodes_from_subject_csv(csv_path)
+
+    assert np.issubdtype(codes.dtype, np.integer)
+    assert np.array_equal(codes, np.array([101, 102], dtype=int))
+
+
 def test_read_eventcodes_from_subject_csv_requires_eventcode_column(tmp_path: Path):
     csv_path = tmp_path / "subject.csv"
     csv_path.write_text("TrialCode\n101\n", encoding="utf-8")

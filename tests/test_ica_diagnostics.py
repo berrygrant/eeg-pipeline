@@ -84,3 +84,18 @@ def test_compute_ica_diagnostics_handles_eog_and_proxy_detector_failures(monkeyp
 
     none_metrics = ica_diagnostics.compute_ica_diagnostics(raw, blink_proxy_chs=["Missing"])
     assert none_metrics["blink_source"] == "none"
+
+
+def test_compute_ica_diagnostics_handles_zero_duration_without_trying_blink_detection(monkeypatch):
+    class RawStub:
+        info = {"sfreq": 100.0}
+        n_times = 0
+        ch_names = []
+
+    monkeypatch.setattr(ica_diagnostics.mne, "pick_types", lambda info, eog=False, eeg=False: [])
+
+    metrics = ica_diagnostics.compute_ica_diagnostics(RawStub())
+
+    assert metrics["blink_source"] == "none"
+    assert np.isnan(metrics["blink_rate_per_min"])
+    assert np.isnan(metrics["blink_proxy_rate_per_min"])

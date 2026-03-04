@@ -150,6 +150,23 @@ def test_read_config_file_supports_yaml_and_rejects_unknown_extensions(monkeypat
         _read_config_file(bad_path)
 
 
+def test_read_config_file_reports_missing_pyyaml_for_yaml(monkeypatch, tmp_path: Path):
+    yaml_path = tmp_path / "config.yaml"
+    yaml_path.write_text("task: test", encoding="utf-8")
+
+    real_import = __import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "yaml":
+            raise ImportError("no yaml")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+
+    with pytest.raises(ImportError, match="YAML config requires PyYAML"):
+        _read_config_file(yaml_path)
+
+
 def test_apply_defaults_and_normalize_config_convert_optional_values():
     cfg = _apply_defaults(_valid_min_cfg())
     cfg["events"]["condition_map"] = {"Oddball": "7", "Rare": [8]}
