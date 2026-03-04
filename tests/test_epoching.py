@@ -77,6 +77,9 @@ def test_select_and_filter_conditions_validates_and_filters_condition_map():
     with pytest.raises(ValueError, match="Duplicate code"):
         select_and_filter_conditions(events, {"A": 110, "B": 110})
 
+    with pytest.raises(ValueError, match="non-empty dict"):
+        select_and_filter_conditions(events, {})
+
 
 def test_make_epochs_builds_epochs_from_raw_and_events(synthetic_raw):
     events = np.array(

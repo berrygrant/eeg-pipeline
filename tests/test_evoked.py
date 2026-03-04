@@ -8,6 +8,17 @@ def test_compute_evokeds_skips_missing_conditions(synthetic_epochs):
     assert evokeds["Standard"].comment == "Standard"
 
 
+def test_compute_evokeds_skips_present_conditions_with_zero_epochs():
+    class EmptyEpochs:
+        event_id = {"Empty": 1}
+
+        def __getitem__(self, key):
+            assert key == "Empty"
+            return []
+
+    assert compute_evokeds(EmptyEpochs(), ["Empty"]) == {}
+
+
 def test_grand_averages_skips_empty_condition_lists(synthetic_epochs):
     standard = synthetic_epochs["Standard"].average()
     deviant = synthetic_epochs["Deviant"].average()

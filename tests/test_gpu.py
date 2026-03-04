@@ -1,3 +1,4 @@
+import builtins
 import sys
 from types import SimpleNamespace
 
@@ -108,3 +109,151 @@ def test_capability_report_and_to_numpy_use_mocked_modules(monkeypatch):
 
     gpu._set_backend(np, "numpy", False)
     assert np.array_equal(gpu.to_numpy([1, 2]), np.array([1, 2]))
+
+
+def test_try_init_mne_cuda_covers_import_and_capability_paths(monkeypatch):
+    original_import = builtins.__import__
+
+    def missing_mne(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "mne":
+            raise ImportError("no mne")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", missing_mne)
+    assert gpu._try_init_mne_cuda(None).startswith("mne_unavailable:")
+
+    monkeypatch.setattr(builtins, "__import__", original_import)
+    monkeypatch.setitem(sys.modules, "mne", SimpleNamespace())
+    assert gpu._try_init_mne_cuda(None) == "mne_cuda_not_available"
+
+    calls = {}
+    cuda_mod = SimpleNamespace(
+        set_cuda_device=lambda device: calls.setdefault("device", device),
+    )
+    monkeypatch.setitem(sys.modules, "mne", SimpleNamespace(cuda=cuda_mod))
+    assert gpu._try_init_mne_cuda(2) == "available"
+    assert calls["device"] == 2
+
+
+def test_try_init_mne_cuda_covers_initialized_and_error_paths(monkeypatch):
+    calls = {}
+    cuda_ok = SimpleNamespace(
+        set_cuda_device=lambda device: calls.setdefault("device", device),
+        init_cuda=lambda: calls.setdefault("init", True),
+    )
+    monkeypatch.setitem(sys.modules, "mne", SimpleNamespace(cuda=cuda_ok))
+    assert gpu._try_init_mne_cuda(1) == "initialized"
+    assert calls == {"device": 1, "init": True}
+
+    def boom():
+        raise RuntimeError("cuda boom")
+
+    cuda_bad = SimpleNamespace(init_cuda=boom)
+    monkeypatch.setitem(sys.modules, "mne", SimpleNamespace(cuda=cuda_bad))
+    assert gpu._try_init_mne_cuda(None) == "error: cuda boom"
+
+
+def test_try_init_cupy_covers_available_and_import_failure(monkeypatch):
+    class FakeDevice:
+        def __init__(self, device):
+            self.device = device
+
+        def use(self):
+            return None
+
+    fake_cp = SimpleNamespace(cuda=SimpleNamespace(Device=FakeDevice))
+    monkeypatch.setitem(sys.modules, "cupy", fake_cp)
+
+    status, xp = gpu._try_init_cupy(3)
+    assert status == "available"
+    assert xp is fake_cp
+
+    original_import = builtins.__import__
+
+    def missing_cupy(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "cupy":
+            raise ImportError("no cupy")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", missing_cupy)
+    status, xp = gpu._try_init_cupy(None)
+    assert status.startswith("unavailable:")
+    assert xp is None
+
+
+def test_capability_report_covers_runtime_error_paths_and_empty_format(monkeypatch):
+    class Runtime:
+        @staticmethod
+        def getDeviceCount():
+            raise RuntimeError("count boom")
+
+        @staticmethod
+        def getDevice():
+            raise RuntimeError("device boom")
+
+        @staticmethod
+        def getDeviceProperties(device):
+            raise RuntimeError("props boom")
+
+    fake_cp = SimpleNamespace(
+        __version__="2.0.0",
+        cuda=SimpleNamespace(runtime=Runtime()),
+    )
+    fake_mne = SimpleNamespace(__version__="1.0.0")
+
+    monkeypatch.setitem(sys.modules, "cupy", fake_cp)
+    monkeypatch.setitem(sys.modules, "mne", fake_mne)
+
+    gpu._DEVICE = None
+    rep = gpu.capability_report()
+
+    assert rep["mne_version"] == "1.0.0"
+    assert rep["cupy_version"] == "2.0.0"
+    assert rep["gpu_count"] is None
+    assert rep["device"] is None
+    assert "device_info_error" not in rep
+    assert gpu.format_capability_report({}) == ""
+
+
+def test_capability_report_covers_device_property_errors_and_import_failures(monkeypatch):
+    class Runtime:
+        @staticmethod
+        def getDeviceCount():
+            return 1
+
+        @staticmethod
+        def getDevice():
+            return 0
+
+        @staticmethod
+        def getDeviceProperties(device):
+            raise RuntimeError("props boom")
+
+    fake_cp = SimpleNamespace(
+        __version__="2.0.0",
+        cuda=SimpleNamespace(runtime=Runtime()),
+    )
+    monkeypatch.setitem(sys.modules, "cupy", fake_cp)
+    monkeypatch.setitem(sys.modules, "mne", SimpleNamespace(__version__="1.0.0"))
+
+    gpu._DEVICE = 0
+    rep = gpu.capability_report()
+    msg = gpu.format_capability_report(rep)
+
+    assert rep["device_info_error"] == "props boom"
+    assert "device_info_error=props boom" in msg
+
+    original_import = builtins.__import__
+
+    def missing_modules(name, globals=None, locals=None, fromlist=(), level=0):
+        if name in {"mne", "cupy"}:
+            raise ImportError(f"missing {name}")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", missing_modules)
+    rep = gpu.capability_report()
+    msg = gpu.format_capability_report(rep)
+
+    assert rep["mne_version"].startswith("unavailable:")
+    assert rep["cupy_error"].startswith("missing cupy")
+    assert "cupy_error=missing cupy" in msg

@@ -31,6 +31,28 @@ def test_get_evoked_and_compute_peak_handle_expected_cases(synthetic_epochs):
     assert _compute_peak(data, times, "absolute") == (-3.0, 0.2)
 
 
+def test_get_evoked_and_compute_erp_metrics_handle_empty_conditions(synthetic_epochs):
+    class EmptyConditionEpochs:
+        event_id = {"Empty": 1}
+
+        def __getitem__(self, key):
+            assert key == "Empty"
+            return []
+
+    assert _get_evoked(EmptyConditionEpochs(), "Empty") is None
+
+    df = compute_erp_metrics(
+        synthetic_epochs["Standard"],
+        subject="001",
+        channels=["Fz"],
+        windows=[ERPWindow(name="Test", tmin=-0.05, tmax=0.05, polarity="positive")],
+        conditions=["Missing"],
+        compute_mmn=True,
+    )
+
+    assert df.empty
+
+
 def test_compute_erp_metrics_returns_condition_and_difference_rows(synthetic_epochs):
     window = ERPWindow(name="Test", tmin=-0.05, tmax=0.05, polarity="absolute")
 

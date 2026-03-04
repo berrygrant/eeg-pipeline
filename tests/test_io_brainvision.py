@@ -140,6 +140,26 @@ def test_read_raw_preprocess_rejects_unknown_reference_mode(monkeypatch, tmp_pat
         )
 
 
+def test_read_raw_preprocess_supports_no_reference_and_missing_eog_mappings(monkeypatch, tmp_path: Path):
+    raw = DummyRaw(["Cz", "Pz"])
+    monkeypatch.setattr(io_mod.mne.io, "read_raw_brainvision", lambda path, preload=True: raw)
+
+    result = io_mod.read_raw_preprocess(
+        tmp_path / "sample.vhdr",
+        montage="standard_1020",
+        eog_chs=["Missing"],
+        aux_chs=[],
+        reref="none",
+        l_freq=0.1,
+        h_freq=30.0,
+        notch=None,
+    )
+
+    assert result is raw
+    assert raw.channel_type_calls == []
+    assert raw.reference_calls == []
+
+
 def test_events_from_annotations_positions_returns_only_event_array(monkeypatch):
     events = np.array([[1, 0, 2], [3, 0, 4]], dtype=int)
     monkeypatch.setattr(io_mod.mne, "events_from_annotations", lambda raw: (events, {"A": 2}))
