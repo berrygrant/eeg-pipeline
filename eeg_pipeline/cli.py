@@ -941,7 +941,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             rows.append(
                 {
                     "subject": subj,
-                    "raw_file": str(vhdr.name),
+                    "raw_file": str(raw_path.name),
                     "subject_csv": subject_csv_name,
                     "subject_csv_path": subject_csv_path,
                     "subject_csv_exists": subject_csv_exists,
@@ -1150,7 +1150,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             rows.append(
                 {
                     "subject": subj,
-                    "raw_file": str(vhdr.name),
+                    "raw_file": str(raw_path.name),
                     "subject_csv": subject_csv_name,
                     "subject_csv_path": subject_csv_path,
                     "subject_csv_exists": subject_csv_exists,
