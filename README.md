@@ -87,6 +87,7 @@ Questions? Try the [ChatGPT eeg-pipeline Assistant](https://chatgpt.com/g/g-6998
 eeg_pipeline/
 ├── cli.py                # Main pipeline entry point
 ├── config.py             # YAML/JSON config loader + validation
+├── manual_review.py      # Manual artifact review helpers + sidecar I/O
 ├── io_brainvision.py     # BrainVision I/O helpers
 ├── behavior.py           # Behavioral CSV parsing
 ├── align.py              # EEG ↔ behavioral alignment logic
@@ -108,7 +109,9 @@ eeg_pipeline/
 scripts/
 ├── process_eeg_data.py    # Process raw data → epochs/evokeds/QC
 ├── compute_eeg_metrics.py # Metrics from existing epochs
-└── plot_eeg_figures.py    # Paper-ready figures from metrics outputs
+├── plot_eeg_figures.py    # Paper-ready figures from metrics outputs
+├── manual_review.py       # CLI launcher for manual review
+└── manual_review_gui.py   # Simple desktop GUI for manual review
 
 run_analysis.py           # Post-hoc ERP/TFR metrics on epochs
 run_metrics.py            # Legacy metrics runner (kept for compatibility)
@@ -234,6 +237,31 @@ python scripts/process_eeg_data.py --config config.yaml
 python scripts/compute_eeg_metrics.py --config config.yaml
 python scripts/plot_eeg_figures.py --config config.yaml
 ```
+
+### Manual artifact review (prototype)
+
+Use MNE's interactive browser for manual channel/segment/epoch rejection and save a
+sidecar JSON that can be tracked/audited.
+
+Desktop GUI (recommended for non-coders):
+
+```bash
+python scripts/manual_review_gui.py
+```
+
+CLI launcher:
+
+```bash
+python scripts/manual_review.py \
+  --input /path/to/sub-001-epo.fif \
+  --mode epochs \
+  --save_cleaned /path/to/sub-001-manual-epo.fif
+```
+
+Notes:
+- Sidecar default: `<input>.<ext>.manual_reject.json`
+- Raw mode stores bad channels + annotations.
+- Epoch mode stores bad channels + dropped epoch indices.
 
 ## GPU Acceleration (Optional)
 
