@@ -94,6 +94,26 @@ def test_load_behavioral_events_uses_explicit_csv_fallback_when_events_missing(t
     assert loaded.samples is None
 
 
+def test_load_behavioral_events_falls_back_to_directory_when_csv_path_is_missing(tmp_path: Path):
+    fallback_dir = tmp_path / "fallback"
+    fallback_dir.mkdir()
+    (fallback_dir / "subject-01.csv").write_text("EventCode\n1\n2\n", encoding="utf-8")
+
+    loaded = load_behavioral_events(
+        events_tsv=tmp_path / "missing_events.tsv",
+        events_json=tmp_path / "missing_events.json",
+        subject_id="01",
+        keep_codes=None,
+        token_map={"token1": "A", "token2": "B"},
+        condition_map=None,
+        csv_path=tmp_path / "missing_subject.csv",
+        csv_fallback_dir=fallback_dir,
+    )
+
+    assert loaded.source == "csv_fallback"
+    assert loaded.source_path == fallback_dir / "subject-01.csv"
+
+
 def test_load_behavioral_events_requires_bids_events_or_explicit_fallback(tmp_path: Path):
     with pytest.raises(FileNotFoundError, match="Missing BIDS events file"):
         load_behavioral_events(

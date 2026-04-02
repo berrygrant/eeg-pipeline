@@ -123,17 +123,23 @@ CLI flags are intentionally minimal.
 
 Current contract:
 
-- Input must already be a **BIDS EEG dataset**.
+- Default input is an existing **BIDS EEG dataset**.
+- Legacy lab-layout input is still supported via `--legacy`.
+- Optional legacy-to-BIDS conversion is available via `--convert_to_bids`.
 - Output is written as a **BIDS derivatives dataset** under `derivatives/eeg-pipeline/`.
-- Raw-data-to-BIDS conversion is intentionally out of scope for this pass.
 
 ### Example `config.yaml`
 
 ```yaml
+input:
+  mode: bids
+
 paths:
   bids_root: /data/bids_eeg
   derivatives_root: /data/bids_eeg/derivatives
   sourcedata_root: /data/bids_eeg/sourcedata
+  raw_dir: null
+  subject_csv_dir: null
 
 bids:
   tasks: [oddball]
@@ -150,12 +156,17 @@ preprocess:
   notch_hz: [60]
 
 events:
-  # Primary contract: read BIDS *_events.tsv and sidecars.
+  # Primary contract: read source *_events.tsv and sidecars.
   # Optional fallback only for legacy imports when an events.tsv is missing.
   csv_fallback_dir: null
   behavioral_keep_codes: [110, 111, 210, 211]
   standard_codes: [110, 210]
   deviant_codes: [111, 211]
+
+conversion:
+  enabled: false
+  bids_output_root: null
+  overwrite: true
 
 epoching:
   tmin: -0.2
@@ -199,6 +210,29 @@ python -m eeg_pipeline.cli --config config.yaml --process_data --get_metrics
 ```
 
 If you omit the stage flags, the default is `--process_data --get_metrics`.
+
+Legacy layout input is opt-in:
+
+```bash
+python -m eeg_pipeline.cli \
+  --config config.yaml \
+  --legacy \
+  --raw_dir /data/legacy_raw \
+  --subject_csv_dir /data/legacy_behavior \
+  --process_data --get_metrics
+```
+
+To convert a legacy dataset to BIDS without running the rest of the pipeline:
+
+```bash
+python -m eeg_pipeline.cli \
+  --config config.yaml \
+  --legacy \
+  --raw_dir /data/legacy_raw \
+  --subject_csv_dir /data/legacy_behavior \
+  --convert_to_bids \
+  --conversion_bids_root /data/legacy_bids
+```
 
 ### ERP CORE preset (optional)
 

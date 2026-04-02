@@ -86,6 +86,10 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     set_default(cfg, "task", "unknown")
 
+    set_default(cfg, "input.mode", "bids")
+
+    set_default(cfg, "paths.raw_dir", None)
+    set_default(cfg, "paths.subject_csv_dir", None)
     set_default(cfg, "paths.bids_root", None)
     set_default(cfg, "paths.derivatives_root", None)
     set_default(cfg, "paths.sourcedata_root", None)
@@ -166,6 +170,10 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
     set_default(cfg, "metrics.tfr.baseline", [-0.2, 0.0])
     set_default(cfg, "metrics.tfr.baseline_mode", "logratio")
 
+    set_default(cfg, "conversion.enabled", False)
+    set_default(cfg, "conversion.bids_output_root", None)
+    set_default(cfg, "conversion.overwrite", True)
+
     return cfg
 
 
@@ -180,9 +188,18 @@ def _validate_config(cfg: Dict[str, Any]) -> None:
         if val is None or (isinstance(val, str) and not val.strip()):
             errors.append(f"Missing required field: '{path}'")
 
-    # Paths required for the pipeline proper (you can relax for “metrics-only” runs later)
-    require("paths.bids_root")
-    require("paths.derivatives_root")
+    input_mode = str(config_get(cfg, "input.mode", "bids")).lower()
+    if input_mode not in {"bids", "legacy"}:
+        errors.append("input.mode must be one of: bids | legacy.")
+
+    bids_root = config_get(cfg, "paths.bids_root", None)
+    raw_dir = config_get(cfg, "paths.raw_dir", None)
+    if not bids_root and not raw_dir:
+        errors.append("Provide at least one input path: paths.bids_root or paths.raw_dir.")
+    if input_mode == "bids" and not bids_root:
+        errors.append("input.mode='bids' requires paths.bids_root.")
+    if input_mode == "legacy" and not raw_dir:
+        errors.append("input.mode='legacy' requires paths.raw_dir.")
 
     # Events required if doing ERP contrasts
     std = config_get(cfg, "events.standard_codes", [])
@@ -301,12 +318,16 @@ def _validate_config(cfg: Dict[str, Any]) -> None:
 # ----------------------------
 def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     cfg = dict(cfg)  # shallow copy; mutate nested dicts
+    cfg["input"]["mode"] = str(cfg["input"].get("mode", "bids")).lower()
 
     # Paths -> Path objects (IMPORTANT: do NOT convert back to str)
-    for k in ("bids_root", "derivatives_root", "sourcedata_root"):
+    for k in ("raw_dir", "subject_csv_dir", "bids_root", "derivatives_root", "sourcedata_root"):
         v = cfg["paths"].get(k)
         if v is not None:
             cfg["paths"][k] = Path(v)
+    conversion_root = cfg["conversion"].get("bids_output_root")
+    if conversion_root is not None:
+        cfg["conversion"]["bids_output_root"] = Path(conversion_root)
     csv_fallback = cfg["events"].get("csv_fallback_dir")
     if csv_fallback is not None:
         cfg["events"]["csv_fallback_dir"] = Path(csv_fallback)
@@ -393,6 +414,10 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     cfg["compute"]["use_gpu"] = bool(compute_cfg.get("use_gpu", False))
     gd = compute_cfg.get("gpu_device", None)
     cfg["compute"]["gpu_device"] = None if gd in (None, "null", "None", "") else int(gd)
+
+    conv_cfg = cfg.get("conversion", {})
+    cfg["conversion"]["enabled"] = bool(conv_cfg.get("enabled", False))
+    cfg["conversion"]["overwrite"] = bool(conv_cfg.get("overwrite", True))
 
     return cfg
 

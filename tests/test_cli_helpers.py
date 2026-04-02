@@ -111,3 +111,38 @@ def test_main_defaults_to_processing_and_metrics(monkeypatch):
         "metrics": 1,
         "cfg": {"cfg": "ok"},
     }
+
+
+def test_main_convert_only_runs_conversion_stage(monkeypatch):
+    called = {}
+
+    monkeypatch.setattr(cli, "apply_erp_core_preset", lambda args, defaults: None)
+
+    def fake_apply_config(args, defaults):
+        args.input_mode = "legacy"
+        return {"input": {"mode": "legacy"}}
+
+    monkeypatch.setattr(cli, "apply_config", fake_apply_config)
+    monkeypatch.setattr(cli, "_finalize_runtime_paths", lambda args, cfg=None: None)
+    monkeypatch.setattr(
+        cli,
+        "configure_gpu",
+        lambda use_gpu, device=None: {
+            "enabled": False,
+            "backend": "numpy",
+            "mne_cuda": "disabled",
+            "cupy": "disabled",
+        },
+    )
+    monkeypatch.setattr(cli, "format_capability_report", lambda rep: "")
+    monkeypatch.setattr(cli, "capability_report", lambda: {})
+    monkeypatch.setattr(
+        cli,
+        "run_legacy_to_bids_conversion",
+        lambda args, defaults=None, cfg=None: called.setdefault("converted", True),
+    )
+    monkeypatch.setattr(cli, "run_full_pipeline", lambda *args, **kwargs: called.setdefault("processed", True))
+
+    cli.main(["--config", "config.yaml", "--legacy", "--convert_to_bids"])
+
+    assert called == {"converted": True}

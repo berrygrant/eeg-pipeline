@@ -1,9 +1,17 @@
 task: mmn
 
+input:
+  mode: "bids"
+
 paths:
+  # Default mode: consume an existing BIDS EEG dataset.
   bids_root: "/data/bids_eeg"
   derivatives_root: "/data/bids_eeg/derivatives"
   sourcedata_root: "/data/bids_eeg/sourcedata"
+
+  # Legacy mode (--legacy): discover raw EEG files plus optional subject CSVs.
+  raw_dir: null
+  subject_csv_dir: null
 
 bids:
   subjects: null
@@ -65,6 +73,15 @@ ica:
 
 labels:
   token_map: ["EH", "IH"]
+
+compute:
+  use_gpu: false
+  gpu_device: null
+
+conversion:
+  enabled: false
+  bids_output_root: null
+  overwrite: true
 
 metrics:
   erp:

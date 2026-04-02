@@ -14,7 +14,13 @@ def _parser_and_args():
 
 def _rich_config():
     return {
+        "input": {
+            "mode": "bids",
+        },
+        "task": "oddball",
         "paths": {
+            "raw_dir": Path("/tmp/raw"),
+            "subject_csv_dir": Path("/tmp/subjects"),
             "bids_root": Path("/tmp/bids"),
             "derivatives_root": Path("/tmp/derivatives"),
             "sourcedata_root": Path("/tmp/sourcedata"),
@@ -116,6 +122,11 @@ def _rich_config():
             "use_gpu": True,
             "gpu_device": 2,
         },
+        "conversion": {
+            "enabled": False,
+            "bids_output_root": Path("/tmp/converted_bids"),
+            "overwrite": False,
+        },
         "labels": {
             "token_map": {"token1": "EH", "token2": "IH"},
         },
@@ -129,14 +140,21 @@ def test_apply_config_maps_rich_config_onto_args(monkeypatch):
     cfg = cli.apply_config(args, defaults)
 
     assert cfg["paths"]["bids_root"] == Path("/tmp/bids")
+    assert args.input_mode == "bids"
+    assert args.raw_dir == Path("/tmp/raw")
+    assert args.subject_csv_dir == Path("/tmp/subjects")
     assert args.bids_root == Path("/tmp/bids")
     assert args.derivatives_root == Path("/tmp/derivatives")
     assert args.sourcedata_root == Path("/tmp/sourcedata")
+    assert args.task_label == "oddball"
     assert args.subjects == ["01"]
     assert args.sessions == ["01"]
     assert args.tasks == ["oddball"]
     assert args.runs == ["01"]
     assert args.behavior_csv_fallback_dir == Path("/tmp/fallback")
+    assert args.convert_to_bids is False
+    assert args.conversion_bids_root == Path("/tmp/converted_bids")
+    assert args.conversion_overwrite == 0
     assert args.reref == "tp9_tp10"
     assert args.standard_codes == [1]
     assert args.deviant_codes == [2]
@@ -149,6 +167,16 @@ def test_apply_config_maps_rich_config_onto_args(monkeypatch):
     assert args.metrics_conditions == ["Oddball", "Rare"]
     assert args.erp_window == [["W1", 0.1, 0.2]]
     assert args.token_map == ["token1=EH", "token2=IH"]
+
+
+def test_apply_config_legacy_flag_overrides_config_mode(monkeypatch):
+    _, args, defaults = _parser_and_args()
+    args.legacy = True
+    monkeypatch.setattr(cli, "load_config", lambda path: _rich_config())
+
+    cli.apply_config(args, defaults)
+
+    assert args.input_mode == "legacy"
 
 
 def test_run_full_pipeline_raises_when_no_bids_recordings(tmp_path: Path):

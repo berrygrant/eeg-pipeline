@@ -35,16 +35,19 @@ from .ica import ICAParams, fit_ica, find_ica_excludes, apply_ica
 from .gpu import configure as configure_gpu, capability_report, format_capability_report
 from .bids import (
     PIPELINE_NAME,
-    BIDSRecording,
     dataset_derivative_path,
     derivative_sidecar_path,
-    discover_bids_eeg_recordings,
     ensure_derivatives_dataset,
-    parse_bids_entities,
     parse_bids_entities_like_name,
     source_basename_from_derivative_path,
     subject_derivative_path,
     write_json,
+)
+from .inputs import (
+    PipelineRecording,
+    convert_legacy_recordings_to_bids,
+    discover_pipeline_recordings,
+    subject_number_from_stem,
 )
 
 # Helper for config integration.  When merging configuration values
@@ -123,10 +126,162 @@ def _pipeline_dataset_root(args) -> Path:
     return Path(args.derivatives_root) / PIPELINE_NAME
 
 
-def _prepare_derivatives_root(args) -> Path:
+def _normalize_entity_filter_value(value: str | None, prefix: str) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.startswith(f"{prefix}-"):
+        return text[len(prefix) + 1 :]
+    return text
+
+
+def _input_mode(args, cfg: dict[str, Any] | None = None) -> str:
+    if getattr(args, "legacy", False):
+        return "legacy"
+    mode = getattr(args, "input_mode", None)
+    if mode not in (None, ""):
+        return str(mode).lower()
+    if cfg is not None:
+        return str(cfg.get("input", {}).get("mode", "bids")).lower()
+    return "bids"
+
+
+def _coerce_path_arg(args, field: str) -> Path | None:
+    value = getattr(args, field, None)
+    if value in (None, ""):
+        setattr(args, field, None)
+        return None
+    if isinstance(value, Path):
+        return value
+    path = Path(value)
+    setattr(args, field, path)
+    return path
+
+
+def _legacy_task_label(args, cfg: dict[str, Any] | None = None) -> str | None:
+    explicit = getattr(args, "task_label", None)
+    if explicit not in (None, ""):
+        return _normalize_entity_filter_value(str(explicit), "task")
+    tasks = getattr(args, "tasks", None)
+    if isinstance(tasks, (list, tuple)) and len(tasks) == 1:
+        return _normalize_entity_filter_value(str(tasks[0]), "task")
+    if cfg is not None:
+        task_value = cfg.get("task", None)
+        if task_value not in (None, ""):
+            return str(task_value)
+    return None
+
+
+def _finalize_runtime_paths(args, cfg: dict[str, Any] | None = None) -> None:
+    args.input_mode = _input_mode(args, cfg)
+
+    for field in (
+        "bids_root",
+        "raw_dir",
+        "subject_csv_dir",
+        "derivatives_root",
+        "sourcedata_root",
+        "behavior_csv_fallback_dir",
+        "conversion_bids_root",
+    ):
+        _coerce_path_arg(args, field)
+
+    if bool(getattr(args, "convert_to_bids", False)) and getattr(args, "conversion_bids_root", None) is None:
+        raw_dir = getattr(args, "raw_dir", None)
+        if raw_dir is not None:
+            args.conversion_bids_root = raw_dir.parent / f"{raw_dir.name}_bids"
+
+    if getattr(args, "derivatives_root", None) is None:
+        if args.input_mode == "bids" and getattr(args, "bids_root", None) is not None:
+            args.derivatives_root = Path(args.bids_root) / "derivatives"
+        elif (
+            args.input_mode == "legacy"
+            and bool(getattr(args, "convert_to_bids", False))
+            and getattr(args, "conversion_bids_root", None) is not None
+        ):
+            args.derivatives_root = Path(args.conversion_bids_root) / "derivatives"
+        elif args.input_mode == "legacy" and getattr(args, "raw_dir", None) is not None:
+            args.derivatives_root = Path(args.raw_dir).parent / "derivatives"
+
+
+def _expected_behavior_events_path(recording: PipelineRecording) -> Path:
+    if recording.behavior_kind == "bids_events" and recording.behavior_path is not None:
+        return recording.behavior_path
+    return recording.raw_path.with_name(f"{recording.raw_path.stem}_events.tsv")
+
+
+def _behavior_inputs_for_recording(
+    recording: PipelineRecording,
+) -> tuple[Path, Path, Path | None, Path]:
+    if recording.behavior_kind == "bids_events" and recording.behavior_path is not None:
+        events_tsv = recording.behavior_path
+        events_json = recording.behavior_json_path or recording.behavior_path.with_suffix(".json")
+        return events_tsv, events_json, None, recording.behavior_path
+
+    csv_path = None
+    if recording.behavior_kind == "csv" and recording.behavior_path is not None and recording.behavior_path.exists():
+        csv_path = recording.behavior_path
+    events_tsv = _expected_behavior_events_path(recording)
+    return events_tsv, events_tsv.with_suffix(".json"), csv_path, (recording.behavior_path or events_tsv)
+
+
+def _recording_from_raw_path(
+    args,
+    raw_path: Path,
+    cfg: dict[str, Any] | None = None,
+) -> PipelineRecording:
+    mode = _input_mode(args, cfg)
+    task_label = _legacy_task_label(args, cfg)
+    source_root = raw_path.parent if mode == "legacy" else _infer_bids_root(raw_path)
+    recordings = discover_pipeline_recordings(
+        mode=mode,
+        bids_root=source_root if mode == "bids" else None,
+        raw_dir=source_root if mode == "legacy" else None,
+        subject_csv_dir=getattr(args, "subject_csv_dir", None),
+        subjects=None,
+        sessions=None,
+        tasks=None,
+        runs=None,
+        task_label=task_label,
+    )
+    for recording in recordings:
+        if recording.raw_path == raw_path:
+            return recording
+
+    try:
+        entities = parse_bids_entities_like_name(raw_path.stem)
+    except ValueError:
+        entities = {}
+    entities.setdefault("sub", subject_number_from_stem(raw_path.stem))
+    if task_label and "task" not in entities:
+        entities["task"] = task_label
+    behavior_path = None
+    behavior_kind = "none"
+    if mode == "bids":
+        behavior_path = raw_path.with_name(f"{raw_path.stem.replace('_eeg', '')}_events.tsv")
+        behavior_kind = "bids_events"
+    return PipelineRecording(
+        source_type=mode,
+        source_root=source_root,
+        raw_path=raw_path,
+        entities=entities,
+        behavior_path=behavior_path,
+        behavior_json_path=None if behavior_path is None else behavior_path.with_suffix(".json"),
+        behavior_kind=behavior_kind,
+    )
+
+
+def _prepare_derivatives_root(args, *, source_dataset: Path | None = None) -> Path:
+    if source_dataset is None:
+        if getattr(args, "bids_root", None) not in (None, ""):
+            source_dataset = Path(args.bids_root)
+        elif getattr(args, "raw_dir", None) not in (None, ""):
+            source_dataset = Path(args.raw_dir)
     return ensure_derivatives_dataset(
         Path(args.derivatives_root),
-        source_dataset=Path(args.bids_root),
+        source_dataset=source_dataset,
         pipeline_version=__version__,
     )
 
@@ -137,7 +292,7 @@ def _dataset_metrics_dir(dataset_root: Path) -> Path:
     return metrics_dir
 
 
-def _subject_metrics_dir(dataset_root: Path, recording: BIDSRecording) -> Path:
+def _subject_metrics_dir(dataset_root: Path, recording: PipelineRecording) -> Path:
     return subject_derivative_path(
         dataset_root,
         recording.entities,
@@ -164,17 +319,17 @@ def _normalize_json_value(value: Any) -> Any:
 
 def _processing_metadata(
     args,
-    recording: BIDSRecording,
+    recording: PipelineRecording,
     *,
     behavior_source: Path,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
-        behavior_ref = str(behavior_source.relative_to(recording.bids_root))
+        behavior_ref = str(behavior_source.relative_to(recording.source_root))
     except ValueError:
         behavior_ref = str(behavior_source)
     metadata: dict[str, Any] = {
-        "Description": "Generated by eeg-pipeline from a BIDS EEG recording.",
+        "Description": "Generated by eeg-pipeline from an EEG recording.",
         "Sources": [
             recording.relative_raw_path,
             behavior_ref,
@@ -233,7 +388,7 @@ def _processing_metadata(
 def _write_output_sidecar(
     data_path: Path,
     args,
-    recording: BIDSRecording,
+    recording: PipelineRecording,
     *,
     behavior_source: Path,
     extra: dict[str, Any] | None = None,
@@ -248,7 +403,7 @@ def _save_dataframe_with_sidecar(
     df: pd.DataFrame,
     data_path: Path,
     args,
-    recording: BIDSRecording | None,
+    recording: PipelineRecording | None,
     *,
     behavior_source: Path | None,
     description: str,
@@ -291,7 +446,7 @@ def _events_json_sidecar(events_df: pd.DataFrame, trial_type_levels: dict[str, s
             "Description": "Numeric event code used by eeg-pipeline for filtering and alignment.",
         },
         "source_event_index": {
-            "Description": "Row index from the source BIDS events.tsv file before alignment or filtering.",
+            "Description": "Row index from the source events table before alignment or filtering.",
         },
     }
     if "trial_type" in events_df.columns:
@@ -325,7 +480,7 @@ def _finalized_events_table(
     return finalized[base_columns + optional_columns + remaining]
 
 
-def _group_key(recording: BIDSRecording, condition: str) -> tuple[str | None, str | None, str]:
+def _group_key(recording: PipelineRecording, condition: str) -> tuple[str | None, str | None, str]:
     return recording.session_id, recording.task_id, condition
 
 
@@ -357,19 +512,20 @@ def _parse_n_components(x):
 
 
 def summarize_one_file(args, raw_path: Path):
-    bids_root = Path(getattr(args, "bids_root", "") or _infer_bids_root(raw_path))
-    recording = BIDSRecording(
-        bids_root=bids_root,
-        raw_path=raw_path,
-        entities=parse_bids_entities(raw_path),
-    )
+    _finalize_runtime_paths(args)
+    recording = _recording_from_raw_path(args, raw_path)
     subj = recording.subject_label
     is_bv = raw_path.suffix.lower() == ".vhdr"
     vmrk_path = raw_path.with_suffix(".vmrk") if is_bv else None
 
     print(f"\n=== SUMMARY: {subj} ===")
     print("Raw file:", raw_path)
-    print("BIDS events:", recording.events_path)
+    if recording.behavior_kind == "bids_events":
+        print("BIDS events:", recording.behavior_path)
+    elif recording.behavior_kind == "csv":
+        print("Legacy behavior CSV:", recording.behavior_path)
+    else:
+        print("Behavior source:", recording.behavior_path)
     if is_bv:
         print("VMRK file:", vmrk_path)
 
@@ -488,19 +644,21 @@ def summarize_one_file(args, raw_path: Path):
         if getattr(args, "behavior_csv_fallback_dir", None) in (None, "")
         else Path(args.behavior_csv_fallback_dir)
     )
+    events_tsv, events_json, csv_path, _ = _behavior_inputs_for_recording(recording)
     try:
         behavior = load_behavioral_events(
-            events_tsv=recording.events_path,
-            events_json=recording.events_json_path,
+            events_tsv=events_tsv,
+            events_json=events_json,
             subject_id=recording.subject_id,
             keep_codes=args.behavioral_keep_codes,
             token_map=token_map,
             condition_map=getattr(args, "condition_map", None),
+            csv_path=csv_path,
             csv_fallback_dir=csv_fallback_dir,
         )
     except FileNotFoundError as exc:
         print("\n[WARN]", str(exc))
-        print("Cannot summarize behavioral events without BIDS events or an explicit CSV fallback. Exiting summary.")
+        print("Cannot summarize behavioral events without source events or an explicit CSV fallback. Exiting summary.")
         return
 
     codes_all = behavior.codes_all
@@ -603,9 +761,29 @@ def apply_config(args, defaults=None):
     cfg = load_config(args.config)
 
     # Paths
+    set_if_default(args, defaults, "raw_dir", cfg["paths"].get("raw_dir"))
+    set_if_default(args, defaults, "subject_csv_dir", cfg["paths"].get("subject_csv_dir"))
     set_if_default(args, defaults, "bids_root", cfg["paths"]["bids_root"])
     set_if_default(args, defaults, "derivatives_root", cfg["paths"]["derivatives_root"])
     set_if_default(args, defaults, "sourcedata_root", cfg["paths"].get("sourcedata_root"))
+    set_if_default(args, defaults, "conversion_bids_root", cfg.get("conversion", {}).get("bids_output_root"))
+    set_if_default(
+        args,
+        defaults,
+        "conversion_overwrite",
+        int(bool(cfg.get("conversion", {}).get("overwrite", getattr(args, "conversion_overwrite", 1)))),
+    )
+    set_if_default(
+        args,
+        defaults,
+        "convert_to_bids",
+        bool(cfg.get("conversion", {}).get("enabled", getattr(args, "convert_to_bids", False))),
+    )
+    set_if_default(args, defaults, "task_label", cfg.get("task", getattr(args, "task_label", None)))
+    if getattr(args, "legacy", False):
+        args.input_mode = "legacy"
+    else:
+        args.input_mode = str(cfg.get("input", {}).get("mode", "bids")).lower()
 
     # BIDS discovery filters
     bids_cfg = cfg.get("bids", {})
@@ -830,6 +1008,7 @@ def apply_config(args, defaults=None):
         else:
             args.token_map = None
 
+    _finalize_runtime_paths(args, cfg)
     return cfg
 
 
@@ -852,6 +1031,54 @@ def apply_erp_core_preset(args, defaults):
     set_if_default(args, defaults, "ica", "on")
 
 
+def run_legacy_to_bids_conversion(args, defaults=None, cfg=None) -> list[PipelineRecording]:
+    if defaults is None:
+        defaults = {}
+    if cfg is None:
+        cfg = apply_config(args, defaults)
+
+    _finalize_runtime_paths(args, cfg)
+    if _input_mode(args, cfg) != "legacy":
+        raise ValueError("Legacy-to-BIDS conversion requires --legacy input mode.")
+
+    raw_dir = getattr(args, "raw_dir", None)
+    if raw_dir is None:
+        raise ValueError("Legacy-to-BIDS conversion requires --raw_dir or paths.raw_dir.")
+    bids_root = getattr(args, "conversion_bids_root", None)
+    if bids_root is None:
+        raise ValueError("Legacy-to-BIDS conversion requires --conversion_bids_root or conversion.bids_output_root.")
+
+    task_label = _legacy_task_label(args, cfg)
+    recordings = discover_pipeline_recordings(
+        mode="legacy",
+        bids_root=None,
+        raw_dir=raw_dir,
+        subject_csv_dir=getattr(args, "subject_csv_dir", None),
+        subjects=getattr(args, "subjects", None),
+        sessions=getattr(args, "sessions", None),
+        tasks=getattr(args, "tasks", None),
+        runs=getattr(args, "runs", None),
+        task_label=task_label,
+    )
+    if not recordings:
+        raise RuntimeError(f"No legacy EEG recordings found in {raw_dir}")
+
+    converted = convert_legacy_recordings_to_bids(
+        recordings,
+        bids_root=bids_root,
+        task_label=task_label,
+        keep_codes=getattr(args, "behavioral_keep_codes", None),
+        standard_codes=getattr(args, "standard_codes", None),
+        deviant_codes=getattr(args, "deviant_codes", None),
+        drop_eeg_markers_by_gap_s=getattr(args, "drop_eeg_markers_by_gap_s", None),
+        auto_drop_to_count=bool(getattr(args, "auto_drop_to_count", 1)),
+        overwrite=bool(getattr(args, "conversion_overwrite", 1)),
+    )
+    args.bids_root = Path(bids_root)
+    print(f"Converted legacy dataset -> {args.bids_root}")
+    return converted
+
+
 def run_full_pipeline(args, defaults=None, cfg=None):
     """Run the full EEG processing pipeline.
 
@@ -868,10 +1095,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         defaults = {}
     if cfg is None:
         cfg = apply_config(args, defaults)
-
-    bids_root = Path(args.bids_root)
-    dataset_root = _prepare_derivatives_root(args)
-    _dataset_metrics_dir(dataset_root)
+    _finalize_runtime_paths(args, cfg)
     csv_fallback_dir = (
         None
         if getattr(args, "behavior_csv_fallback_dir", None) in (None, "")
@@ -894,15 +1118,30 @@ def run_full_pipeline(args, defaults=None, cfg=None):
     tfr_metrics_all: list[pd.DataFrame] = []
     erp_timeseries_all: list[pd.DataFrame] = []
 
-    recordings = discover_bids_eeg_recordings(
-        bids_root,
-        subjects=args.subjects,
-        sessions=getattr(args, "sessions", None),
-        tasks=getattr(args, "tasks", None),
-        runs=getattr(args, "runs", None),
-    )
+    input_mode = _input_mode(args, cfg)
+    task_label = _legacy_task_label(args, cfg)
+    source_dataset = getattr(args, "bids_root", None) if input_mode == "bids" else getattr(args, "raw_dir", None)
+    if input_mode == "legacy" and bool(getattr(args, "convert_to_bids", False)):
+        recordings = run_legacy_to_bids_conversion(args, defaults=defaults, cfg=cfg)
+        source_dataset = getattr(args, "bids_root", None)
+    else:
+        recordings = discover_pipeline_recordings(
+            mode=input_mode,
+            bids_root=getattr(args, "bids_root", None),
+            raw_dir=getattr(args, "raw_dir", None),
+            subject_csv_dir=getattr(args, "subject_csv_dir", None),
+            subjects=args.subjects,
+            sessions=getattr(args, "sessions", None),
+            tasks=getattr(args, "tasks", None),
+            runs=getattr(args, "runs", None),
+            task_label=task_label,
+        )
+    dataset_root = _prepare_derivatives_root(args, source_dataset=source_dataset)
+    _dataset_metrics_dir(dataset_root)
     if not recordings:
-        raise RuntimeError(f"No BIDS EEG recordings found in {bids_root}")
+        source_root = getattr(args, "bids_root", None) if input_mode == "bids" else getattr(args, "raw_dir", None)
+        mode_label = "BIDS" if input_mode == "bids" else "legacy"
+        raise RuntimeError(f"No {mode_label} EEG recordings found in {source_root}")
 
     std_codes = np.asarray(getattr(args, "standard_codes", []) or [], dtype=int)
     dev_codes = np.asarray(getattr(args, "deviant_codes", []) or [], dtype=int)
@@ -922,14 +1161,14 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         subj = recording.subject_label
         is_bv = raw_path.suffix.lower() == ".vhdr"
         vmrk = raw_path.with_suffix(".vmrk") if is_bv else None
-        raw_relpath = raw_path.relative_to(bids_root).as_posix()
         subject_base = {
             "subject": subj,
             "session": recording.session_label or "",
             "task": recording.task_id or "",
             "run": recording.run_id or "",
-            "raw_file": raw_relpath,
+            "raw_file": recording.relative_raw_path,
         }
+        _, _, _, behavior_hint = _behavior_inputs_for_recording(recording)
 
         preproc_path = subject_derivative_path(
             dataset_root,
@@ -1079,7 +1318,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                         ica_path,
                         args,
                         recording,
-                        behavior_source=recording.events_path,
+                        behavior_source=behavior_hint,
                         extra={
                             "Description": "ICA solution fit by eeg-pipeline before epoching.",
                             "ICAExclude": list(ica_exclude),
@@ -1115,14 +1354,16 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                 f"max_in_window={burst_qc['trigger_burst_max_in_window']}"
             )
 
+        events_tsv, events_json, csv_path, behavior_hint = _behavior_inputs_for_recording(recording)
         try:
             behavior = load_behavioral_events(
-                events_tsv=recording.events_path,
-                events_json=recording.events_json_path,
+                events_tsv=events_tsv,
+                events_json=events_json,
                 subject_id=recording.subject_id,
                 keep_codes=args.behavioral_keep_codes,
                 token_map=token_map,
                 condition_map=condition_map,
+                csv_path=csv_path,
                 csv_fallback_dir=csv_fallback_dir,
             )
         except FileNotFoundError as e:
@@ -1133,7 +1374,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                     **subject_base,
                     **burst_qc,
                     "behavior_source": "missing",
-                    "behavior_source_path": str(recording.events_path),
+                    "behavior_source_path": str(behavior_hint),
                     "status": "SKIP_MISSING_EVENTS",
                     "error": msg,
                 }
@@ -1872,6 +2113,7 @@ def _subject_from_epochs_path(p: Path) -> str:
 
 def run_metrics_only(args):
     """Compute ERP/TFR metrics from existing derivative epochs."""
+    _finalize_runtime_paths(args)
     dataset_root = _prepare_derivatives_root(args)
     files = sorted(dataset_root.rglob("*_epo.fif"))
     if not files:
@@ -2098,6 +2340,7 @@ def _prompt_yes_no(msg: str) -> bool:
 def run_plot_figures(args):
     from eeg_pipeline.viz import paper_figures
 
+    _finalize_runtime_paths(args)
     dataset_root = _pipeline_dataset_root(args)
     _dataset_metrics_dir(dataset_root)
     fig_dir = Path(args.figures_out_dir) if args.figures_out_dir else dataset_root / "figures"
@@ -2147,21 +2390,49 @@ def build_arg_parser():
         action="store_true",
         help="Use ERP CORE-style defaults (TP9/TP10, 0.1–20 Hz, ICA on, individualized thresholds).",
     )
-    ap.add_argument("--process_data", action="store_true", help="Process BIDS EEG inputs into derivative epochs/evokeds/QC")
+    ap.add_argument("--process_data", action="store_true", help="Process EEG inputs into BIDS-derivative epochs/evokeds/QC")
     ap.add_argument("--get_metrics", action="store_true", help="Compute ERP/TFR metrics from derivative epochs")
     ap.add_argument("--plot_figures", action="store_true", help="Generate figures from aggregated derivative metrics")
+    ap.add_argument(
+        "--legacy",
+        action="store_true",
+        help="Use the original lab layout instead of BIDS input discovery. BIDS is the default.",
+    )
     ap.add_argument("--bids_root", help="Root of an input BIDS EEG dataset")
+    ap.add_argument("--raw_dir", help="Legacy raw EEG directory used with --legacy")
+    ap.add_argument("--subject_csv_dir", help="Optional legacy subject CSV directory used with --legacy")
     ap.add_argument("--derivatives_root", help="Root derivatives folder that will contain derivatives/eeg-pipeline")
     ap.add_argument("--sourcedata_root", default=None, help="Optional sourcedata root associated with the BIDS dataset")
     ap.add_argument(
+        "--task_label",
+        default=None,
+        help="Legacy task label used when raw filenames do not already include task-<label>.",
+    )
+    ap.add_argument(
         "--behavior_csv_fallback_dir",
         default=None,
-        help="Optional explicit fallback directory containing subject CSV files when BIDS events.tsv is unavailable.",
+        help="Optional fallback directory containing subject CSV files when source events.tsv is unavailable.",
+    )
+    ap.add_argument(
+        "--convert_to_bids",
+        action="store_true",
+        help="In legacy mode, convert the discovered dataset into BIDS before processing. If no other stage flags are set, conversion runs and exits.",
+    )
+    ap.add_argument(
+        "--conversion_bids_root",
+        default=None,
+        help="Output root for legacy-to-BIDS conversion.",
+    )
+    ap.add_argument(
+        "--conversion_overwrite",
+        type=int,
+        default=1,
+        help="Overwrite converted BIDS files when --convert_to_bids is enabled (1=yes,0=no).",
     )
     ap.add_argument(
         "--summarize_one_file",
         default=None,
-        help="If provided, summarize this BIDS raw EEG file (.vhdr or .set) and exit.",
+        help="If provided, summarize this raw EEG file (.vhdr or .set) and exit.",
     )
 
     ap.add_argument("--use_gpu", action="store_true", help="Enable GPU acceleration where available (MNE/CuPy).")
@@ -2171,11 +2442,11 @@ def build_arg_parser():
         "--subjects",
         nargs="*",
         default=None,
-        help="Optional BIDS subject filters (01 or sub-01). If omitted, runs all subjects in bids_root.",
+        help="Optional subject filters (01 or sub-01). If omitted, runs all discovered subjects.",
     )
-    ap.add_argument("--sessions", nargs="*", default=None, help="Optional BIDS session filters (e.g., 01 or ses-01).")
-    ap.add_argument("--tasks", nargs="*", default=None, help="Optional BIDS task filters.")
-    ap.add_argument("--runs", nargs="*", default=None, help="Optional BIDS run filters.")
+    ap.add_argument("--sessions", nargs="*", default=None, help="Optional session filters (e.g., 01 or ses-01).")
+    ap.add_argument("--tasks", nargs="*", default=None, help="Optional task filters.")
+    ap.add_argument("--runs", nargs="*", default=None, help="Optional run filters.")
 
     ap.add_argument(
         "--on_missing_vmrk",
@@ -2214,7 +2485,7 @@ def build_arg_parser():
         nargs="*",
         type=int,
         default=[110, 111, 210, 211],
-        help="Keep only these numeric codes from BIDS events.tsv (or an explicit CSV fallback) when aligning to EEG markers.",
+        help="Keep only these numeric codes from source events.tsv (or an explicit CSV fallback) when aligning to EEG markers.",
     )
     ap.add_argument(
         "--drop_eeg_markers_by_gap_s",
@@ -2422,24 +2693,36 @@ def main(argv=None):
     # distinguish CLI‑provided arguments from those left unspecified.
     defaults = build_defaults(ap)
     args = ap.parse_args(argv)
+    stages_requested = bool(args.process_data or args.get_metrics or args.plot_figures)
 
     if args.summarize_one_file:
         apply_erp_core_preset(args, defaults)
-        apply_config(args, defaults)
+        cfg = apply_config(args, defaults)
+        _finalize_runtime_paths(args, cfg)
         summarize_one_file(args, Path(args.summarize_one_file))
         return
 
-    if not (args.process_data or args.get_metrics or args.plot_figures):
-        # Default behavior: process data + metrics
-        args.process_data = True
-        args.get_metrics = True
-        args.plot_figures = False
+    if not stages_requested:
+        if bool(getattr(args, "convert_to_bids", False)):
+            args.process_data = False
+            args.get_metrics = False
+            args.plot_figures = False
+        else:
+            # Default behavior: process data + metrics
+            args.process_data = True
+            args.get_metrics = True
+            args.plot_figures = False
 
     # Apply ERP CORE preset before config so it can override config defaults.
     apply_erp_core_preset(args, defaults)
 
     # Apply config once for all stages
     cfg = apply_config(args, defaults)
+    _finalize_runtime_paths(args, cfg)
+    if not stages_requested and bool(getattr(args, "convert_to_bids", False)):
+        args.process_data = False
+        args.get_metrics = False
+        args.plot_figures = False
 
     if getattr(args, "_erp_core_preset_enabled", False):
         print("[ERP-CORE] preset enabled")
@@ -2477,6 +2760,12 @@ def main(argv=None):
     if args.plot_figures:
         # Ensure ERP time-series is available for plotting
         args.metrics_erp_timeseries = True
+
+    if bool(getattr(args, "convert_to_bids", False)) and not (
+        args.process_data or args.get_metrics or args.plot_figures
+    ):
+        run_legacy_to_bids_conversion(args, defaults=defaults, cfg=cfg)
+        return
 
     if args.process_data:
         if not args.get_metrics:

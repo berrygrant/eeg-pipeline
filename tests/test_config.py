@@ -143,6 +143,9 @@ def test_read_config_file_supports_yaml_and_rejects_unknown_extensions(monkeypat
 
 def test_apply_defaults_and_normalize_config_convert_optional_values():
     cfg = _apply_defaults(_valid_min_cfg())
+    cfg["input"]["mode"] = "LEGACY"
+    cfg["paths"]["raw_dir"] = "/tmp/raw"
+    cfg["paths"]["subject_csv_dir"] = "/tmp/subjects"
     cfg["paths"]["sourcedata_root"] = "/tmp/sourcedata"
     cfg["bids"]["subjects"] = "01"
     cfg["bids"]["sessions"] = ["01", "02"]
@@ -171,10 +174,16 @@ def test_apply_defaults_and_normalize_config_convert_optional_values():
     cfg["metrics"]["erp"]["conditions"] = "Oddball"
     cfg["compute"]["use_gpu"] = 1
     cfg["compute"]["gpu_device"] = ""
+    cfg["conversion"]["enabled"] = 1
+    cfg["conversion"]["bids_output_root"] = "/tmp/converted_bids"
+    cfg["conversion"]["overwrite"] = 0
 
     normalized = _normalize_config(cfg)
 
+    assert normalized["input"]["mode"] == "legacy"
     assert normalized["paths"]["bids_root"] == Path("/tmp/bids")
+    assert normalized["paths"]["raw_dir"] == Path("/tmp/raw")
+    assert normalized["paths"]["subject_csv_dir"] == Path("/tmp/subjects")
     assert normalized["paths"]["sourcedata_root"] == Path("/tmp/sourcedata")
     assert normalized["events"]["csv_fallback_dir"] == Path("/tmp/fallback")
     assert normalized["bids"]["subjects"] == ["01"]
@@ -194,6 +203,9 @@ def test_apply_defaults_and_normalize_config_convert_optional_values():
     assert normalized["metrics"]["erp"]["conditions"] == ["Oddball"]
     assert normalized["compute"]["use_gpu"] is True
     assert normalized["compute"]["gpu_device"] is None
+    assert normalized["conversion"]["enabled"] is True
+    assert normalized["conversion"]["bids_output_root"] == Path("/tmp/converted_bids")
+    assert normalized["conversion"]["overwrite"] is False
 
 
 def test_scalar_list_helpers_and_condition_map_normalization_cover_edge_cases():
@@ -226,8 +238,8 @@ def test_validate_config_collects_multiple_readable_errors():
         _validate_config(cfg)
 
     msg = str(exc_info.value)
-    assert "Missing required field: 'paths.bids_root'" in msg
-    assert "Missing required field: 'paths.derivatives_root'" in msg
+    assert "Provide at least one input path" in msg
+    assert "input.mode='bids' requires paths.bids_root" in msg
     assert "epoching.baseline must be a 2-item list" in msg
     assert "ica.mode must be one of" in msg
     assert "preprocess.reref must be one of" in msg

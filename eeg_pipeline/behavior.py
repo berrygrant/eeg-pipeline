@@ -158,6 +158,7 @@ def load_behavioral_events(
     keep_codes: list[int] | None,
     token_map: dict[str, str] | None = None,
     condition_map: dict[str, list[int]] | None = None,
+    csv_path: Path | None = None,
     csv_fallback_dir: Path | None = None,
 ) -> BehavioralEvents:
     if events_tsv.exists():
@@ -185,10 +186,16 @@ def load_behavioral_events(
             samples=samples,
         )
 
-    if csv_fallback_dir is None:
+    if csv_path is None and csv_fallback_dir is None:
         raise FileNotFoundError(f"Missing BIDS events file: {events_tsv}")
 
-    subject_csv = _resolve_subject_csv_path(subject_id, csv_fallback_dir)
+    subject_csv = None
+    if csv_path is not None and csv_path.exists():
+        subject_csv = csv_path
+    elif csv_fallback_dir is not None:
+        subject_csv = _resolve_subject_csv_path(subject_id, csv_fallback_dir)
+    elif csv_path is not None:
+        subject_csv = csv_path
     if not subject_csv.exists():
         raise FileNotFoundError(
             f"Missing BIDS events file {events_tsv} and CSV fallback file {subject_csv}"
