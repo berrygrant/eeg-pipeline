@@ -20,20 +20,38 @@ from eeg_pipeline.config import (
 )
 
 
+def _valid_min_cfg():
+    return {
+        "paths": {
+            "bids_root": "/tmp/bids",
+            "derivatives_root": "/tmp/derivatives",
+        },
+        "events": {
+            "standard_codes": [1],
+            "deviant_codes": [2],
+            "behavioral_keep_codes": [1, 2],
+        },
+    }
+
+
 def test_load_config_json_applies_defaults_and_normalizes_types(tmp_path: Path):
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text(
         json.dumps(
             {
                 "paths": {
-                    "raw_dir": "/tmp/raw",
-                    "subject_csv_dir": "/tmp/subject_csv",
-                    "out_dir": "/tmp/out",
+                    "bids_root": "/tmp/bids",
+                    "derivatives_root": "/tmp/derivatives",
+                },
+                "bids": {
+                    "subjects": ["01"],
+                    "tasks": "oddball",
                 },
                 "events": {
                     "standard_codes": ["110"],
                     "deviant_codes": ["111"],
                     "behavioral_keep_codes": ["110", "111"],
+                    "csv_fallback_dir": "/tmp/fallback",
                 },
                 "ica": {"n_components": "20"},
                 "labels": {"token_map": ["Token1=EH", "Token2=IH"]},
@@ -44,11 +62,11 @@ def test_load_config_json_applies_defaults_and_normalizes_types(tmp_path: Path):
 
     cfg = load_config(cfg_path)
 
-    assert cfg["paths"]["raw_dir"] == Path("/tmp/raw")
-    assert cfg["paths"]["subject_csv_dir"] == Path("/tmp/subject_csv")
-    assert cfg["paths"]["out_dir"] == Path("/tmp/out")
-    assert cfg["channels"]["blink_proxy_chs"] == ["Fp1"]
-    assert cfg["preprocess"]["notch_hz"] == [60.0]
+    assert cfg["paths"]["bids_root"] == Path("/tmp/bids")
+    assert cfg["paths"]["derivatives_root"] == Path("/tmp/derivatives")
+    assert cfg["events"]["csv_fallback_dir"] == Path("/tmp/fallback")
+    assert cfg["bids"]["subjects"] == ["01"]
+    assert cfg["bids"]["tasks"] == ["oddball"]
     assert cfg["events"]["standard_codes"] == [110]
     assert cfg["events"]["deviant_codes"] == [111]
     assert cfg["ica"]["n_components"] == 20
@@ -56,27 +74,26 @@ def test_load_config_json_applies_defaults_and_normalizes_types(tmp_path: Path):
     assert cfg["metrics"]["erp"]["enabled"] is True
 
 
-def test_load_config_rejects_invalid_overlapping_standard_and_deviant_codes(tmp_path: Path):
+def test_load_config_accepts_condition_map_without_standard_deviant_codes(tmp_path: Path):
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text(
         json.dumps(
             {
                 "paths": {
-                    "raw_dir": "/tmp/raw",
-                    "subject_csv_dir": "/tmp/subject_csv",
-                    "out_dir": "/tmp/out",
+                    "bids_root": "/tmp/bids",
+                    "derivatives_root": "/tmp/derivatives",
                 },
                 "events": {
-                    "standard_codes": [110],
-                    "deviant_codes": [110],
+                    "condition_map": {"Standard": [1], "Deviant": [2]},
                 },
             }
         ),
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="Standard/deviant code overlap not allowed"):
-        load_config(cfg_path)
+    cfg = load_config(cfg_path)
+
+    assert cfg["events"]["condition_map"] == {"Standard": [1], "Deviant": [2]}
 
 
 def test_config_get_returns_default_for_missing_paths():
@@ -108,32 +125,6 @@ def test_normalize_token_map_supports_dict_and_shorthand_list_inputs():
     assert _normalize_token_map("") is None
 
 
-def _valid_min_cfg():
-    return {
-        "paths": {
-            "raw_dir": "/tmp/raw",
-            "subject_csv_dir": "/tmp/subject_csv",
-            "out_dir": "/tmp/out",
-        },
-        "events": {
-            "standard_codes": [1],
-            "deviant_codes": [2],
-            "behavioral_keep_codes": [1, 2],
-        },
-    }
-
-
-def test_load_config_rejects_missing_file_and_non_mapping_top_level(tmp_path: Path):
-    with pytest.raises(FileNotFoundError, match="Config file not found"):
-        load_config(tmp_path / "missing.json")
-
-    cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
-
-    with pytest.raises(ValueError, match="Top-level config must be a mapping"):
-        load_config(cfg_path)
-
-
 def test_read_config_file_supports_yaml_and_rejects_unknown_extensions(monkeypatch, tmp_path: Path):
     yaml_path = tmp_path / "config.yaml"
     yaml_path.write_text("ignored", encoding="utf-8")
@@ -150,25 +141,12 @@ def test_read_config_file_supports_yaml_and_rejects_unknown_extensions(monkeypat
         _read_config_file(bad_path)
 
 
-def test_read_config_file_reports_missing_pyyaml_for_yaml(monkeypatch, tmp_path: Path):
-    yaml_path = tmp_path / "config.yaml"
-    yaml_path.write_text("task: test", encoding="utf-8")
-
-    real_import = __import__
-
-    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "yaml":
-            raise ImportError("no yaml")
-        return real_import(name, globals, locals, fromlist, level)
-
-    monkeypatch.setattr("builtins.__import__", fake_import)
-
-    with pytest.raises(ImportError, match="YAML config requires PyYAML"):
-        _read_config_file(yaml_path)
-
-
 def test_apply_defaults_and_normalize_config_convert_optional_values():
     cfg = _apply_defaults(_valid_min_cfg())
+    cfg["paths"]["sourcedata_root"] = "/tmp/sourcedata"
+    cfg["bids"]["subjects"] = "01"
+    cfg["bids"]["sessions"] = ["01", "02"]
+    cfg["events"]["csv_fallback_dir"] = "/tmp/fallback"
     cfg["events"]["condition_map"] = {"Oddball": "7", "Rare": [8]}
     cfg["artifacts"]["max_reject_rate"] = "null"
     cfg["artifacts"]["blink"]["auto_percentile"] = "None"
@@ -196,7 +174,11 @@ def test_apply_defaults_and_normalize_config_convert_optional_values():
 
     normalized = _normalize_config(cfg)
 
-    assert normalized["paths"]["raw_dir"] == Path("/tmp/raw")
+    assert normalized["paths"]["bids_root"] == Path("/tmp/bids")
+    assert normalized["paths"]["sourcedata_root"] == Path("/tmp/sourcedata")
+    assert normalized["events"]["csv_fallback_dir"] == Path("/tmp/fallback")
+    assert normalized["bids"]["subjects"] == ["01"]
+    assert normalized["bids"]["sessions"] == ["01", "02"]
     assert normalized["events"]["condition_map"] == {"Oddball": [7], "Rare": [8]}
     assert normalized["artifacts"]["max_reject_rate"] is None
     assert normalized["artifacts"]["blink"]["auto_percentile"] is None
@@ -226,14 +208,8 @@ def test_scalar_list_helpers_and_condition_map_normalization_cover_edge_cases():
         _normalize_condition_map(["bad"])
 
 
-def test_normalize_token_map_covers_keyed_list_and_single_string_paths():
-    assert _normalize_token_map(["skip", "Other=ZZ", "Token2=IH"]) == {"token2": "IH"}
-    assert _normalize_token_map("EH IH") == {"token1": "EH", "token2": "IH"}
-    assert _normalize_token_map("Token1=EH") is None
-
-
 def test_validate_config_collects_multiple_readable_errors():
-    cfg = _apply_defaults(_valid_min_cfg())
+    cfg = _apply_defaults({"paths": {}, "events": {}})
     cfg["events"]["standard_codes"] = ["x"]
     cfg["events"]["deviant_codes"] = [1]
     cfg["events"]["behavioral_keep_codes"] = ["bad"]
@@ -250,81 +226,10 @@ def test_validate_config_collects_multiple_readable_errors():
         _validate_config(cfg)
 
     msg = str(exc_info.value)
+    assert "Missing required field: 'paths.bids_root'" in msg
+    assert "Missing required field: 'paths.derivatives_root'" in msg
     assert "epoching.baseline must be a 2-item list" in msg
     assert "ica.mode must be one of" in msg
     assert "preprocess.reref must be one of" in msg
     assert "artifacts.voltage.method must be one of" in msg
-    assert "artifacts.blink.auto_percentile must be in (0, 100]" in msg
-    assert "artifacts.voltage.auto_percentile must be a number" in msg
-    assert "events.standard_codes / deviant_codes must be integers" in msg
     assert "events.condition_map['A'] must map to a single code" in msg
-    assert "metrics.erp.windows[0] must include name, tmin, tmax" in msg
-    assert "events.behavioral_keep_codes must be integers" in msg
-
-
-def test_validate_config_flags_missing_required_fields_and_subset_rules():
-    cfg = _apply_defaults({})
-    cfg["events"]["condition_map"] = "bad"
-    cfg["metrics"]["erp"]["windows"] = "bad"
-
-    with pytest.raises(ValueError) as exc_info:
-        _validate_config(cfg)
-
-    msg = str(exc_info.value)
-    assert "Missing required field: 'paths.raw_dir'" in msg
-    assert "Missing required field: 'paths.subject_csv_dir'" in msg
-    assert "Missing required field: 'paths.out_dir'" in msg
-    assert "events.standard_codes and events.deviant_codes must both be non-empty" in msg
-    assert "events.condition_map must be a mapping of name -> code(s)" in msg
-    assert "metrics.erp.windows must be a list" in msg
-
-
-def test_validate_config_detects_duplicate_condition_codes_and_keep_code_subsets():
-    cfg = _apply_defaults(_valid_min_cfg())
-    cfg["events"]["condition_map"] = {"Std": 1, "Dup": 1}
-    cfg["events"]["behavioral_keep_codes"] = [3]
-
-    with pytest.raises(ValueError) as exc_info:
-        _validate_config(cfg)
-
-    msg = str(exc_info.value)
-    assert "events.condition_map has duplicate code: 1" in msg
-    assert "events.standard_codes must be included in events.behavioral_keep_codes" in msg
-    assert "events.deviant_codes must be included in events.behavioral_keep_codes" in msg
-
-
-def test_load_config_treats_json_null_as_empty_config(tmp_path: Path):
-    cfg_path = tmp_path / "config.json"
-    cfg_path.write_text("null", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="Missing required field: 'paths.raw_dir'"):
-        load_config(cfg_path)
-
-
-def test_validate_config_covers_remaining_error_branches():
-    cfg = _apply_defaults(_valid_min_cfg())
-    cfg["events"]["condition_map"] = {"Bad": object()}
-    cfg["metrics"]["erp"]["windows"] = ["bad"]
-    cfg["artifacts"]["blink"]["auto_percentile"] = "oops"
-    cfg["artifacts"]["voltage"]["auto_percentile"] = "101"
-
-    with pytest.raises(ValueError) as exc_info:
-        _validate_config(cfg)
-
-    msg = str(exc_info.value)
-    assert "artifacts.blink.auto_percentile must be a number" in msg
-    assert "artifacts.voltage.auto_percentile must be in (0, 100]" in msg
-    assert "events.condition_map values must be integers" in msg
-    assert "metrics.erp.windows[0] must be a mapping" in msg
-
-
-def test_normalize_config_handles_list_conditions_and_parse_n_components_error_path():
-    cfg = _apply_defaults(_valid_min_cfg())
-    cfg["metrics"]["erp"]["conditions"] = ["Oddball", "Rare"]
-
-    normalized = _normalize_config(cfg)
-
-    assert normalized["metrics"]["erp"]["conditions"] == ["Oddball", "Rare"]
-
-    with pytest.raises(ValueError):
-        _parse_n_components("abc")

@@ -6,5 +6,6 @@ import pandas as pd
 
 def write_qc_summary(rows: list[dict], out_csv):
     df = pd.DataFrame(rows)
-    df.to_csv(out_csv, index=False)
+    sep = "\t" if str(out_csv).endswith(".tsv") else ","
+    df.to_csv(out_csv, sep=sep, index=False)
     return df
