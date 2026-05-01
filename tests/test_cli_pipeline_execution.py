@@ -111,7 +111,11 @@ def _make_bids_fixture(tmp_path: Path, *, subject: str = "01", with_events: bool
     eeg_dir = bids_root / f"sub-{subject}" / "eeg"
     eeg_dir.mkdir(parents=True)
     raw_path = eeg_dir / f"sub-{subject}_task-oddball_run-01_eeg{ext}"
-    raw_path.write_text("MarkerFile=sub.vmrk\nDataFile=sub.eeg\n", encoding="utf-8")
+    raw_path.write_text(
+        f"MarkerFile={raw_path.with_suffix('.vmrk').name}\n"
+        f"DataFile={raw_path.with_suffix('.eeg').name}\n",
+        encoding="utf-8",
+    )
     if ext == ".vhdr":
         raw_path.with_suffix(".vmrk").write_text("dummy", encoding="utf-8")
         raw_path.with_suffix(".eeg").write_text("dummy", encoding="utf-8")
