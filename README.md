@@ -209,6 +209,29 @@ From the repository root (module invocation):
 python -m eeg_pipeline.cli --config config.yaml --process_data --get_metrics
 ```
 
+### OneClick Electron GUI prototype
+
+This branch includes an early Electron + Python-backend GUI shell. It keeps the
+existing CLI as the execution engine and adds a local backend for validation,
+recording discovery, run launch, and log polling.
+
+Install the Electron development dependency, then launch the app:
+
+```bash
+npm install
+npm run oneclick
+```
+
+The backend can also be started directly for API testing:
+
+```bash
+python3 -m eeg_pipeline.oneclick.backend
+```
+
+The GUI reads the selected config file, validates it with the same config loader
+used by the CLI, discovers BIDS/legacy recordings, and starts the existing
+pipeline in a subprocess.
+
 If you omit the stage flags, the default is `--process_data --get_metrics`.
 
 Legacy layout input is opt-in:
