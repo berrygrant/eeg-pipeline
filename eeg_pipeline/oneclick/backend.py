@@ -108,7 +108,15 @@ def _config_path_from_payload(payload: dict[str, Any]) -> Path:
     value = payload.get("configPath")
     if not value:
         raise ValueError("configPath is required.")
-    return Path(str(value)).expanduser().resolve()
+    filename = str(value).strip().replace("\\", "/").rsplit("/", 1)[-1]
+    allowed_configs = {
+        "config.yaml": REPO_ROOT / "config.yaml",
+        "config.yml": REPO_ROOT / "config.yml",
+        "config.json": REPO_ROOT / "config.json",
+    }
+    if filename not in allowed_configs:
+        raise ValueError("configPath must be config.yaml, config.yml, or config.json in this repository.")
+    return allowed_configs[filename]
 
 
 def _summarize_config(cfg: dict[str, Any]) -> dict[str, Any]:

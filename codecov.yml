@@ -1,0 +1,5 @@
+ignore:
+  - "oneclick/electron/**"
+  - "package.json"
+  - "package-lock.json"
+  - "tests/test_oneclick_backend.py"

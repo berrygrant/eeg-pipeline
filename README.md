@@ -230,7 +230,8 @@ python3 -m eeg_pipeline.oneclick.backend
 
 The GUI reads the selected config file, validates it with the same config loader
 used by the CLI, discovers BIDS/legacy recordings, and starts the existing
-pipeline in a subprocess.
+pipeline in a subprocess. For this prototype, the config file must be named
+`config.yaml`, `config.yml`, or `config.json` and live at the repository root.
 
 If you omit the stage flags, the default is `--process_data --get_metrics`.
 
