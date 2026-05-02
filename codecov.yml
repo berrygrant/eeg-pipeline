@@ -1,4 +1,5 @@
 ignore:
+  - "eeg_pipeline/oneclick/**"
   - "oneclick/electron/**"
   - "package.json"
   - "package-lock.json"
