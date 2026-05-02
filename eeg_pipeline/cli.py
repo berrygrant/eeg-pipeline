@@ -4,13 +4,15 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import mne
 
-from .schema import parse_token_map, derive_metadata_v1, derive_metadata_from_condition_map
-from .behavior import read_eventcodes_from_subject_csv, filter_codes
+from . import __version__
+from .schema import parse_token_map
+from .behavior import load_behavioral_events
 from .io_brainvision import read_raw_preprocess, events_from_annotations_positions, parse_vmrk_markers
 from .align import marker_gap_stats, keep_by_gap_heuristic, align_marker_positions_to_codes
 from .epoching import (
@@ -31,6 +33,22 @@ from .qc import write_qc_summary
 from .ica_diagnostics import compute_ica_diagnostics, recommend_ica
 from .ica import ICAParams, fit_ica, find_ica_excludes, apply_ica
 from .gpu import configure as configure_gpu, capability_report, format_capability_report
+from .bids import (
+    PIPELINE_NAME,
+    dataset_derivative_path,
+    derivative_sidecar_path,
+    ensure_derivatives_dataset,
+    parse_bids_entities_like_name,
+    source_basename_from_derivative_path,
+    subject_derivative_path,
+    write_json,
+)
+from .inputs import (
+    PipelineRecording,
+    convert_legacy_recordings_to_bids,
+    discover_pipeline_recordings,
+    subject_number_from_stem,
+)
 
 # Helper for config integration.  When merging configuration values
 # into command‑line arguments we want to honour user‑supplied flags.
@@ -74,8 +92,6 @@ from eeg_pipeline.metrics.erp_timeseries import ERPTimeSeriesParams, compute_erp
 from eeg_pipeline.metrics.tfr import TFRParams
 
 import re
-import tempfile
-
 _BV_KEY_RE = re.compile(r"^(?P<key>\w+)\s*=\s*(?P<val>.+?)\s*$", re.MULTILINE)
 
 def _bv_get(txt: str, key: str) -> str | None:
@@ -105,6 +121,378 @@ def brainvision_links_ok(vhdr_path: Path) -> tuple[bool, str]:
         return False, "Missing referenced file(s): " + ", ".join(missing)
     return True, ""
 
+
+def _pipeline_dataset_root(args) -> Path:
+    return Path(args.derivatives_root) / PIPELINE_NAME
+
+
+def _normalize_entity_filter_value(value: str | None, prefix: str) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.startswith(f"{prefix}-"):
+        return text[len(prefix) + 1 :]
+    return text
+
+
+def _input_mode(args, cfg: dict[str, Any] | None = None) -> str:
+    if getattr(args, "legacy", False):
+        return "legacy"
+    mode = getattr(args, "input_mode", None)
+    if mode not in (None, ""):
+        return str(mode).lower()
+    if cfg is not None:
+        return str(cfg.get("input", {}).get("mode", "bids")).lower()
+    return "bids"
+
+
+def _coerce_path_arg(args, field: str) -> Path | None:
+    value = getattr(args, field, None)
+    if value in (None, ""):
+        setattr(args, field, None)
+        return None
+    if isinstance(value, Path):
+        return value
+    path = Path(value)
+    setattr(args, field, path)
+    return path
+
+
+def _legacy_task_label(args, cfg: dict[str, Any] | None = None) -> str | None:
+    explicit = getattr(args, "task_label", None)
+    if explicit not in (None, ""):
+        return _normalize_entity_filter_value(str(explicit), "task")
+    tasks = getattr(args, "tasks", None)
+    if isinstance(tasks, (list, tuple)) and len(tasks) == 1:
+        return _normalize_entity_filter_value(str(tasks[0]), "task")
+    if cfg is not None:
+        task_value = cfg.get("task", None)
+        if task_value not in (None, ""):
+            return str(task_value)
+    return None
+
+
+def _finalize_runtime_paths(args, cfg: dict[str, Any] | None = None) -> None:
+    args.input_mode = _input_mode(args, cfg)
+
+    for field in (
+        "bids_root",
+        "raw_dir",
+        "subject_csv_dir",
+        "derivatives_root",
+        "sourcedata_root",
+        "behavior_csv_fallback_dir",
+        "conversion_bids_root",
+    ):
+        _coerce_path_arg(args, field)
+
+    if bool(getattr(args, "convert_to_bids", False)) and getattr(args, "conversion_bids_root", None) is None:
+        raw_dir = getattr(args, "raw_dir", None)
+        if raw_dir is not None:
+            args.conversion_bids_root = raw_dir.parent / f"{raw_dir.name}_bids"
+
+    if getattr(args, "derivatives_root", None) is None:
+        if args.input_mode == "bids" and getattr(args, "bids_root", None) is not None:
+            args.derivatives_root = Path(args.bids_root) / "derivatives"
+        elif (
+            args.input_mode == "legacy"
+            and bool(getattr(args, "convert_to_bids", False))
+            and getattr(args, "conversion_bids_root", None) is not None
+        ):
+            args.derivatives_root = Path(args.conversion_bids_root) / "derivatives"
+        elif args.input_mode == "legacy" and getattr(args, "raw_dir", None) is not None:
+            args.derivatives_root = Path(args.raw_dir).parent / "derivatives"
+
+
+def _expected_behavior_events_path(recording: PipelineRecording) -> Path:
+    if recording.behavior_kind == "bids_events" and recording.behavior_path is not None:
+        return recording.behavior_path
+    return recording.raw_path.with_name(f"{recording.raw_path.stem}_events.tsv")
+
+
+def _behavior_inputs_for_recording(
+    recording: PipelineRecording,
+) -> tuple[Path, Path, Path | None, Path]:
+    if recording.behavior_kind == "bids_events" and recording.behavior_path is not None:
+        events_tsv = recording.behavior_path
+        events_json = recording.behavior_json_path or recording.behavior_path.with_suffix(".json")
+        return events_tsv, events_json, None, recording.behavior_path
+
+    csv_path = None
+    if recording.behavior_kind == "csv" and recording.behavior_path is not None and recording.behavior_path.exists():
+        csv_path = recording.behavior_path
+    events_tsv = _expected_behavior_events_path(recording)
+    return events_tsv, events_tsv.with_suffix(".json"), csv_path, (recording.behavior_path or events_tsv)
+
+
+def _recording_from_raw_path(
+    args,
+    raw_path: Path,
+    cfg: dict[str, Any] | None = None,
+) -> PipelineRecording:
+    mode = _input_mode(args, cfg)
+    task_label = _legacy_task_label(args, cfg)
+    source_root = raw_path.parent if mode == "legacy" else _infer_bids_root(raw_path)
+    recordings = discover_pipeline_recordings(
+        mode=mode,
+        bids_root=source_root if mode == "bids" else None,
+        raw_dir=source_root if mode == "legacy" else None,
+        subject_csv_dir=getattr(args, "subject_csv_dir", None),
+        subjects=None,
+        sessions=None,
+        tasks=None,
+        runs=None,
+        task_label=task_label,
+    )
+    for recording in recordings:
+        if recording.raw_path == raw_path:
+            return recording
+
+    try:
+        entities = parse_bids_entities_like_name(raw_path.stem)
+    except ValueError:
+        entities = {}
+    entities.setdefault("sub", subject_number_from_stem(raw_path.stem))
+    if task_label and "task" not in entities:
+        entities["task"] = task_label
+    behavior_path = None
+    behavior_kind = "none"
+    if mode == "bids":
+        behavior_path = raw_path.with_name(f"{raw_path.stem.replace('_eeg', '')}_events.tsv")
+        behavior_kind = "bids_events"
+    return PipelineRecording(
+        source_type=mode,
+        source_root=source_root,
+        raw_path=raw_path,
+        entities=entities,
+        behavior_path=behavior_path,
+        behavior_json_path=None if behavior_path is None else behavior_path.with_suffix(".json"),
+        behavior_kind=behavior_kind,
+    )
+
+
+def _prepare_derivatives_root(args, *, source_dataset: Path | None = None) -> Path:
+    if source_dataset is None:
+        if getattr(args, "bids_root", None) not in (None, ""):
+            source_dataset = Path(args.bids_root)
+        elif getattr(args, "raw_dir", None) not in (None, ""):
+            source_dataset = Path(args.raw_dir)
+    return ensure_derivatives_dataset(
+        Path(args.derivatives_root),
+        source_dataset=source_dataset,
+        pipeline_version=__version__,
+    )
+
+
+def _dataset_metrics_dir(dataset_root: Path) -> Path:
+    metrics_dir = dataset_root / "eeg"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    return metrics_dir
+
+
+def _subject_metrics_dir(dataset_root: Path, recording: PipelineRecording) -> Path:
+    return subject_derivative_path(
+        dataset_root,
+        recording.entities,
+        suffix="epo",
+        extension=".fif",
+    ).parent
+
+
+def _normalize_json_value(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, dict):
+        return {str(k): _normalize_json_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_json_value(v) for v in value]
+    return value
+
+
+def _processing_metadata(
+    args,
+    recording: PipelineRecording,
+    *,
+    behavior_source: Path,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    try:
+        behavior_ref = str(behavior_source.relative_to(recording.source_root))
+    except ValueError:
+        behavior_ref = str(behavior_source)
+    metadata: dict[str, Any] = {
+        "Description": "Generated by eeg-pipeline from an EEG recording.",
+        "Sources": [
+            recording.relative_raw_path,
+            behavior_ref,
+        ],
+        "GeneratedBy": [{"Name": PIPELINE_NAME, "Version": __version__}],
+        "Preprocessing": {
+            "Montage": args.montage,
+            "Rereference": args.reref,
+            "HighPassHz": float(args.l_freq),
+            "LowPassHz": float(args.h_freq),
+            "NotchHz": list(args.notch) if args.notch else [],
+        },
+        "Epoching": {
+            "Tmin": float(args.tmin),
+            "Tmax": float(args.tmax),
+            "Baseline": [float(args.baseline[0]), float(args.baseline[1])],
+        },
+        "ArtifactRejection": {
+            "TestWindow": [float(args.art_test_tmin), float(args.art_test_tmax)],
+            "Blink": {
+                "ThresholdUV": float(args.blink_threshold_uv),
+                "WindowMs": float(args.blink_win_ms),
+                "StepMs": float(args.blink_step_ms),
+                "AutoPercentile": getattr(args, "blink_auto_percentile", None),
+            },
+            "Voltage": {
+                "Method": getattr(args, "volt_method", "simple"),
+                "PositiveThresholdUV": float(args.volt_pos_uv),
+                "NegativeThresholdUV": float(args.volt_neg_uv),
+                "PTPThresholdUV": float(getattr(args, "volt_threshold_uv", 150.0)),
+                "WindowMs": float(getattr(args, "volt_win_ms", 200.0)),
+                "StepMs": float(getattr(args, "volt_step_ms", 10.0)),
+                "StepThresholdUVPerMs": getattr(args, "volt_step_uv_per_ms", None),
+                "AutoPercentile": getattr(args, "volt_auto_percentile", None),
+                "MaxRejectRate": getattr(args, "max_reject_rate", None),
+            },
+        },
+        "ICA": {
+            "Mode": args.ica,
+            "Method": getattr(args, "ica_method", None),
+            "NComponents": _parse_n_components(getattr(args, "ica_n_components", None)),
+            "RandomState": getattr(args, "ica_random_state", None),
+            "MaxIter": getattr(args, "ica_max_iter", None),
+            "FitHighPassHz": getattr(args, "ica_fit_l_freq", None),
+            "FitLowPassHz": getattr(args, "ica_fit_h_freq", None),
+            "Decim": getattr(args, "ica_decim", None),
+            "CorrThreshold": getattr(args, "ica_corr_thresh", None),
+            "MaxExclude": getattr(args, "ica_max_exclude", None),
+        },
+    }
+    if extra:
+        metadata.update(extra)
+    return _normalize_json_value(metadata)
+
+
+def _write_output_sidecar(
+    data_path: Path,
+    args,
+    recording: PipelineRecording,
+    *,
+    behavior_source: Path,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    write_json(
+        derivative_sidecar_path(data_path),
+        _processing_metadata(args, recording, behavior_source=behavior_source, extra=extra),
+    )
+
+
+def _save_dataframe_with_sidecar(
+    df: pd.DataFrame,
+    data_path: Path,
+    args,
+    recording: PipelineRecording | None,
+    *,
+    behavior_source: Path | None,
+    description: str,
+    column_descriptions: dict[str, Any] | None = None,
+) -> None:
+    data_path.parent.mkdir(parents=True, exist_ok=True)
+    if data_path.suffix == ".parquet":
+        df.to_parquet(data_path, index=False)
+    else:
+        sep = "\t" if data_path.suffix == ".tsv" else ","
+        df.to_csv(data_path, sep=sep, index=False)
+
+    metadata: dict[str, Any] = {"Description": description}
+    if column_descriptions:
+        metadata.update(column_descriptions)
+    if recording is not None and behavior_source is not None:
+        _write_output_sidecar(
+            data_path,
+            args,
+            recording,
+            behavior_source=behavior_source,
+            extra=metadata,
+        )
+    else:
+        write_json(derivative_sidecar_path(data_path), _normalize_json_value(metadata))
+
+
+def _events_json_sidecar(events_df: pd.DataFrame, trial_type_levels: dict[str, str] | None = None) -> dict[str, Any]:
+    sidecar: dict[str, Any] = {
+        "onset": {
+            "Description": "Event onset in seconds relative to the start of the recording.",
+        },
+        "duration": {
+            "Description": "Event duration in seconds.",
+        },
+        "sample": {
+            "Description": "Integer sample index used for epoching and derivative event export.",
+        },
+        "value": {
+            "Description": "Numeric event code used by eeg-pipeline for filtering and alignment.",
+        },
+        "source_event_index": {
+            "Description": "Row index from the source events table before alignment or filtering.",
+        },
+    }
+    if "trial_type" in events_df.columns:
+        trial_type = {
+            "Description": "Condition label carried forward into the derivative events export.",
+        }
+        if trial_type_levels:
+            trial_type["Levels"] = trial_type_levels
+        sidecar["trial_type"] = trial_type
+    return sidecar
+
+
+def _finalized_events_table(
+    metadata: pd.DataFrame,
+    *,
+    sfreq: float,
+    samples: np.ndarray,
+    codes: np.ndarray,
+) -> pd.DataFrame:
+    finalized = metadata.copy().reset_index(drop=True)
+    finalized["source_event_index"] = np.arange(len(finalized), dtype=int)
+    finalized["sample"] = np.asarray(samples, dtype=int)
+    finalized["onset"] = finalized["sample"] / float(sfreq)
+    if "duration" not in finalized.columns:
+        finalized["duration"] = 0.0
+    finalized["value"] = np.asarray(codes, dtype=int)
+
+    base_columns = ["onset", "duration", "sample"]
+    optional_columns = [c for c in ("trial_type", "value", "code", "condition") if c in finalized.columns]
+    remaining = [c for c in finalized.columns if c not in set(base_columns + optional_columns)]
+    return finalized[base_columns + optional_columns + remaining]
+
+
+def _group_key(recording: PipelineRecording, condition: str) -> tuple[str | None, str | None, str]:
+    return recording.session_id, recording.task_id, condition
+
+
+def _infer_bids_root(raw_path: Path) -> Path:
+    for candidate in [raw_path.parent, *raw_path.parents]:
+        if (candidate / "dataset_description.json").exists():
+            return candidate
+    for parent in raw_path.parents:
+        if parent.name.startswith("sub-"):
+            return parent.parent
+    raise ValueError(f"Could not infer BIDS root for {raw_path}")
+
 def _parse_n_components(x):
     """
     MNE ICA n_components can be float (variance fraction) or int (#components).
@@ -123,28 +511,21 @@ def _parse_n_components(x):
         return float(s)
 
 
-def subject_number_from_stem(stem: str) -> str:
-    s = stem.strip()
-    if s.lower().startswith("s") and s[1:].isdigit():
-        return s[1:]
-    if s.isdigit():
-        return s
-    digits = "".join([c for c in s if c.isdigit()])
-    if not digits:
-        raise ValueError(f"Cannot parse subject number from '{stem}'")
-    return digits
-
-
 def summarize_one_file(args, raw_path: Path):
-    subj = raw_path.stem
-    subj_num = subject_number_from_stem(subj)
-    subject_csv = Path(args.subject_csv_dir) / f"subject-{subj_num}.csv"
+    _finalize_runtime_paths(args)
+    recording = _recording_from_raw_path(args, raw_path)
+    subj = recording.subject_label
     is_bv = raw_path.suffix.lower() == ".vhdr"
     vmrk_path = raw_path.with_suffix(".vmrk") if is_bv else None
 
     print(f"\n=== SUMMARY: {subj} ===")
     print("Raw file:", raw_path)
-    print("Subject CSV:", subject_csv)
+    if recording.behavior_kind == "bids_events":
+        print("BIDS events:", recording.behavior_path)
+    elif recording.behavior_kind == "csv":
+        print("Legacy behavior CSV:", recording.behavior_path)
+    else:
+        print("Behavior source:", recording.behavior_path)
     if is_bv:
         print("VMRK file:", vmrk_path)
 
@@ -257,19 +638,35 @@ def summarize_one_file(args, raw_path: Path):
     elif is_bv:
         print("\n[WARN] .vmrk file not found next to .vhdr; cannot parse markers directly.")
 
-    # Subject CSV required to complete behavioral summary
-    if not subject_csv.exists():
-        msg = f"Missing subject file for {subj}: {subject_csv}"
-        print("\n[WARN]", msg)
-        print("Cannot summarize behavioral codes without subject CSV. Exiting summary.")
+    token_map = parse_token_map(args.token_map)
+    csv_fallback_dir = (
+        None
+        if getattr(args, "behavior_csv_fallback_dir", None) in (None, "")
+        else Path(args.behavior_csv_fallback_dir)
+    )
+    events_tsv, events_json, csv_path, _ = _behavior_inputs_for_recording(recording)
+    try:
+        behavior = load_behavioral_events(
+            events_tsv=events_tsv,
+            events_json=events_json,
+            subject_id=recording.subject_id,
+            keep_codes=args.behavioral_keep_codes,
+            token_map=token_map,
+            condition_map=getattr(args, "condition_map", None),
+            csv_path=csv_path,
+            csv_fallback_dir=csv_fallback_dir,
+        )
+    except FileNotFoundError as exc:
+        print("\n[WARN]", str(exc))
+        print("Cannot summarize behavioral events without source events or an explicit CSV fallback. Exiting summary.")
         return
 
-    codes_all = read_eventcodes_from_subject_csv(subject_csv)
+    codes_all = behavior.codes_all
     print("\nBehavioral codes (EventCode) count:", len(codes_all))
     print("Behavioral code distribution:")
     print(pd.Series(codes_all).value_counts().sort_index().to_string())
 
-    codes = filter_codes(codes_all, args.behavioral_keep_codes)
+    codes = behavior.codes
     if args.behavioral_keep_codes:
         print("\nBehavioral keep-codes filter applied:")
         print("  keep codes:", list(map(int, args.behavioral_keep_codes)))
@@ -279,24 +676,31 @@ def summarize_one_file(args, raw_path: Path):
     print("  EEG markers available:", len(markers_pos))
     print("  behavioral codes to assign:", len(codes))
 
-    aligned, diag = align_marker_positions_to_codes(
-        markers_pos=markers_pos,
-        sfreq=float(raw.info["sfreq"]),
-        codes=codes,
-        gap_s=args.drop_eeg_markers_by_gap_s,
-        auto_drop_to_count=bool(args.auto_drop_to_count),
-    )
+    if behavior.samples is not None:
+        aligned = behavior.samples
+        diag = {
+            "markers_original": int(len(markers_pos)),
+            "markers_dropped_by_gap": 0,
+            "markers_dropped_by_auto": 0,
+        }
+        print("  Using BIDS events.tsv sample column directly; EEG marker alignment skipped.")
+    else:
+        aligned, diag = align_marker_positions_to_codes(
+            markers_pos=markers_pos,
+            sfreq=float(raw.info["sfreq"]),
+            codes=codes,
+            gap_s=args.drop_eeg_markers_by_gap_s,
+            auto_drop_to_count=bool(args.auto_drop_to_count),
+        )
     print("  [OK] alignment achievable.")
     print(
         f"  Alignment: markers {diag['markers_original']} -> {len(aligned)} "
         f"(gap_drop={diag['markers_dropped_by_gap']}, auto_drop={diag['markers_dropped_by_auto']})"
     )
 
-    token_map = parse_token_map(args.token_map)
-    md = derive_metadata_v1(codes.tolist(), token_map=token_map)
     print("\nToken map:", token_map)
     print("Metadata preview (first 5 rows):")
-    print(md.head(5).to_string(index=False))
+    print(behavior.metadata.head(5).to_string(index=False))
 
 def detect_trigger_bursts(markers_pos: np.ndarray, sfreq: float,
                           min_iti_s: float = 0.02,
@@ -357,9 +761,40 @@ def apply_config(args, defaults=None):
     cfg = load_config(args.config)
 
     # Paths
-    set_if_default(args, defaults, "raw_dir", cfg["paths"]["raw_dir"])
-    set_if_default(args, defaults, "subject_csv_dir", cfg["paths"]["subject_csv_dir"])
-    set_if_default(args, defaults, "out_dir", cfg["paths"]["out_dir"])
+    set_if_default(args, defaults, "raw_dir", cfg["paths"].get("raw_dir"))
+    set_if_default(args, defaults, "subject_csv_dir", cfg["paths"].get("subject_csv_dir"))
+    set_if_default(args, defaults, "bids_root", cfg["paths"]["bids_root"])
+    set_if_default(args, defaults, "derivatives_root", cfg["paths"]["derivatives_root"])
+    set_if_default(args, defaults, "sourcedata_root", cfg["paths"].get("sourcedata_root"))
+    set_if_default(args, defaults, "conversion_bids_root", cfg.get("conversion", {}).get("bids_output_root"))
+    set_if_default(
+        args,
+        defaults,
+        "conversion_overwrite",
+        int(bool(cfg.get("conversion", {}).get("overwrite", getattr(args, "conversion_overwrite", 1)))),
+    )
+    set_if_default(
+        args,
+        defaults,
+        "convert_to_bids",
+        bool(cfg.get("conversion", {}).get("enabled", getattr(args, "convert_to_bids", False))),
+    )
+    set_if_default(args, defaults, "task_label", cfg.get("task", getattr(args, "task_label", None)))
+    if getattr(args, "legacy", False):
+        args.input_mode = "legacy"
+    else:
+        args.input_mode = str(cfg.get("input", {}).get("mode", "bids")).lower()
+
+    # BIDS discovery filters
+    bids_cfg = cfg.get("bids", {})
+    if getattr(args, "subjects", None) is None:
+        args.subjects = bids_cfg.get("subjects", None)
+    if getattr(args, "sessions", None) is None:
+        args.sessions = bids_cfg.get("sessions", None)
+    if getattr(args, "tasks", None) is None:
+        args.tasks = bids_cfg.get("tasks", None)
+    if getattr(args, "runs", None) is None:
+        args.runs = bids_cfg.get("runs", None)
 
     # Channels and preprocessing
     set_if_default(args, defaults, "montage", cfg["preprocess"].get("montage", args.montage))
@@ -383,6 +818,10 @@ def apply_config(args, defaults=None):
     set_if_default(
         args, defaults, "drop_eeg_markers_by_gap_s",
         cfg["events"].get("drop_eeg_markers_by_gap_s", args.drop_eeg_markers_by_gap_s)
+    )
+    set_if_default(
+        args, defaults, "behavior_csv_fallback_dir",
+        cfg["events"].get("csv_fallback_dir", getattr(args, "behavior_csv_fallback_dir", None)),
     )
     set_if_default(
         args, defaults, "auto_drop_to_count",
@@ -569,6 +1008,7 @@ def apply_config(args, defaults=None):
         else:
             args.token_map = None
 
+    _finalize_runtime_paths(args, cfg)
     return cfg
 
 
@@ -591,6 +1031,54 @@ def apply_erp_core_preset(args, defaults):
     set_if_default(args, defaults, "ica", "on")
 
 
+def run_legacy_to_bids_conversion(args, defaults=None, cfg=None) -> list[PipelineRecording]:
+    if defaults is None:
+        defaults = {}
+    if cfg is None:
+        cfg = apply_config(args, defaults)
+
+    _finalize_runtime_paths(args, cfg)
+    if _input_mode(args, cfg) != "legacy":
+        raise ValueError("Legacy-to-BIDS conversion requires --legacy input mode.")
+
+    raw_dir = getattr(args, "raw_dir", None)
+    if raw_dir is None:
+        raise ValueError("Legacy-to-BIDS conversion requires --raw_dir or paths.raw_dir.")
+    bids_root = getattr(args, "conversion_bids_root", None)
+    if bids_root is None:
+        raise ValueError("Legacy-to-BIDS conversion requires --conversion_bids_root or conversion.bids_output_root.")
+
+    task_label = _legacy_task_label(args, cfg)
+    recordings = discover_pipeline_recordings(
+        mode="legacy",
+        bids_root=None,
+        raw_dir=raw_dir,
+        subject_csv_dir=getattr(args, "subject_csv_dir", None),
+        subjects=getattr(args, "subjects", None),
+        sessions=getattr(args, "sessions", None),
+        tasks=getattr(args, "tasks", None),
+        runs=getattr(args, "runs", None),
+        task_label=task_label,
+    )
+    if not recordings:
+        raise RuntimeError(f"No legacy EEG recordings found in {raw_dir}")
+
+    converted = convert_legacy_recordings_to_bids(
+        recordings,
+        bids_root=bids_root,
+        task_label=task_label,
+        keep_codes=getattr(args, "behavioral_keep_codes", None),
+        standard_codes=getattr(args, "standard_codes", None),
+        deviant_codes=getattr(args, "deviant_codes", None),
+        drop_eeg_markers_by_gap_s=getattr(args, "drop_eeg_markers_by_gap_s", None),
+        auto_drop_to_count=bool(getattr(args, "auto_drop_to_count", 1)),
+        overwrite=bool(getattr(args, "conversion_overwrite", 1)),
+    )
+    args.bids_root = Path(bids_root)
+    print(f"Converted legacy dataset -> {args.bids_root}")
+    return converted
+
+
 def run_full_pipeline(args, defaults=None, cfg=None):
     """Run the full EEG processing pipeline.
 
@@ -607,18 +1095,12 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         defaults = {}
     if cfg is None:
         cfg = apply_config(args, defaults)
-
-    raw_dir = Path(args.raw_dir)
-    subject_csv_dir = Path(args.subject_csv_dir)
-    out_dir = Path(args.out_dir)
-    prepare_output_dirs(out_dir)
-
-    d_raw = out_dir / "01_clean_raw"
-    d_epo = out_dir / "02_epochs"
-    d_evk = out_dir / "03_evokeds"
-    d_ga = out_dir / "04_grand_averages"
-    for d in (d_raw, d_epo, d_evk, d_ga):
-        d.mkdir(parents=True, exist_ok=True)
+    _finalize_runtime_paths(args, cfg)
+    csv_fallback_dir = (
+        None
+        if getattr(args, "behavior_csv_fallback_dir", None) in (None, "")
+        else Path(args.behavior_csv_fallback_dir)
+    )
 
     ep = EpochParams(
         tmin=args.tmin,
@@ -629,41 +1111,43 @@ def run_full_pipeline(args, defaults=None, cfg=None):
     token_map = parse_token_map(args.token_map)
 
     rows: list[dict] = []
-    evokeds_by_cond: dict[str, list[mne.Evoked]] = {}
+    evokeds_by_group: dict[tuple[str | None, str | None], dict[str, list[mne.Evoked]]] = {}
 
     # Metrics outputs collected across subjects
     erp_metrics_all: list[pd.DataFrame] = []
     tfr_metrics_all: list[pd.DataFrame] = []
     erp_timeseries_all: list[pd.DataFrame] = []
 
-    raw_files = [p for p in raw_dir.rglob("*.vhdr") if p.is_file() and ".git" not in p.parts]
-    raw_files = sorted(raw_files)
-    if not raw_files:
-        raw_files = [p for p in raw_dir.rglob("*.set") if p.is_file() and ".git" not in p.parts]
-        raw_files = sorted(raw_files)
-    if not raw_files:
-        raise RuntimeError(f"No .vhdr or .set files found in {raw_dir}")
+    input_mode = _input_mode(args, cfg)
+    task_label = _legacy_task_label(args, cfg)
+    source_dataset = getattr(args, "bids_root", None) if input_mode == "bids" else getattr(args, "raw_dir", None)
+    if input_mode == "legacy" and bool(getattr(args, "convert_to_bids", False)):
+        recordings = run_legacy_to_bids_conversion(args, defaults=defaults, cfg=cfg)
+        source_dataset = getattr(args, "bids_root", None)
+    else:
+        recordings = discover_pipeline_recordings(
+            mode=input_mode,
+            bids_root=getattr(args, "bids_root", None),
+            raw_dir=getattr(args, "raw_dir", None),
+            subject_csv_dir=getattr(args, "subject_csv_dir", None),
+            subjects=args.subjects,
+            sessions=getattr(args, "sessions", None),
+            tasks=getattr(args, "tasks", None),
+            runs=getattr(args, "runs", None),
+            task_label=task_label,
+        )
+    dataset_root = _prepare_derivatives_root(args, source_dataset=source_dataset)
+    _dataset_metrics_dir(dataset_root)
+    if not recordings:
+        source_root = getattr(args, "bids_root", None) if input_mode == "bids" else getattr(args, "raw_dir", None)
+        mode_label = "BIDS" if input_mode == "bids" else "legacy"
+        raise RuntimeError(f"No {mode_label} EEG recordings found in {source_root}")
 
-    if args.subjects:
-        wanted = {s.lower() for s in args.subjects}
-        raw_files = [p for p in raw_files if p.stem.lower() in wanted]
-        if not raw_files:
-            raise RuntimeError(f"No matching raw files found for --subjects={args.subjects}")
-
-    std_codes = np.asarray(args.standard_codes, dtype=int)
-    dev_codes = np.asarray(args.deviant_codes, dtype=int)
+    std_codes = np.asarray(getattr(args, "standard_codes", []) or [], dtype=int)
+    dev_codes = np.asarray(getattr(args, "deviant_codes", []) or [], dtype=int)
     stddev_set = np.r_[std_codes, dev_codes]
 
     condition_map = getattr(args, "condition_map", None)
-    condition_codes: list[int] | None = None
-    if condition_map:
-        codes_flat: list[int] = []
-        for v in condition_map.values():
-            if isinstance(v, (list, tuple, set)):
-                codes_flat.extend([int(c) for c in v])
-            else:
-                codes_flat.append(int(v))
-        condition_codes = sorted(set(codes_flat))
 
     metrics_conditions = getattr(args, "metrics_conditions", None)
     if not metrics_conditions:
@@ -672,15 +1156,47 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         else:
             metrics_conditions = ["Standard", "Deviant"]
 
-    for raw_path in raw_files:
-        subj = raw_path.stem
-        subj_num = subject_number_from_stem(subj)
-        subject_csv = subject_csv_dir / f"subject-{subj_num}.csv"
-        subject_csv_name = subject_csv.name
-        subject_csv_path = str(subject_csv)
-        subject_csv_exists = bool(subject_csv.exists())
+    for recording in recordings:
+        raw_path = recording.raw_path
+        subj = recording.subject_label
         is_bv = raw_path.suffix.lower() == ".vhdr"
         vmrk = raw_path.with_suffix(".vmrk") if is_bv else None
+        subject_base = {
+            "subject": subj,
+            "session": recording.session_label or "",
+            "task": recording.task_id or "",
+            "run": recording.run_id or "",
+            "raw_file": recording.relative_raw_path,
+        }
+        _, _, _, behavior_hint = _behavior_inputs_for_recording(recording)
+
+        preproc_path = subject_derivative_path(
+            dataset_root,
+            recording.entities,
+            suffix="eeg",
+            extension=".fif",
+            desc="preproc",
+        )
+        epochs_path = subject_derivative_path(
+            dataset_root,
+            recording.entities,
+            suffix="epo",
+            extension=".fif",
+        )
+        aligned_events_path = subject_derivative_path(
+            dataset_root,
+            recording.entities,
+            suffix="events",
+            extension=".tsv",
+            desc="aligned",
+        )
+        ica_path = subject_derivative_path(
+            dataset_root,
+            recording.entities,
+            suffix="ica",
+            extension=".fif",
+            desc="components",
+        )
 
         print(f"\n=== {subj} ===")
 
@@ -703,11 +1219,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                     print("[WARN]", msg, "-> skipping")
                     rows.append(
                         {
-                            "subject": subj,
-                            "raw_file": str(raw_path.name),
-                            "subject_csv": subject_csv_name,
-                            "subject_csv_path": subject_csv_path,
-                            "subject_csv_exists": subject_csv_exists,
+                            **subject_base,
                             **burst_qc,
                             "status": "SKIP_MISSING_VMRK",
                             "error": msg,
@@ -723,16 +1235,12 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                     raise FileNotFoundError(msg)
                 print("[WARN]", msg, "-> skipping")
                 rows.append(
-                        {
-                            "subject": subj,
-                            "raw_file": str(raw_path.name),
-                            "subject_csv": subject_csv_name,
-                            "subject_csv_path": subject_csv_path,
-                            "subject_csv_exists": subject_csv_exists,
-                            **burst_qc,
-                            "status": "SKIP_BV_LINK_MISMATCH",
-                            "error": msg,
-                        }
+                    {
+                        **subject_base,
+                        **burst_qc,
+                        "status": "SKIP_BV_LINK_MISMATCH",
+                        "error": msg,
+                    }
                 )
                 continue
 
@@ -761,10 +1269,10 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         ica_exclude: list[int] = []
         ica_fit_diag: dict = {}
         ica_find_diag: dict = {}
-
-        if args.ica == "auto":
-            do_ica = False
-
+        do_ica = False
+        if args.ica == "on":
+            do_ica = True
+        elif args.ica == "auto":
             rate = float(ica_diag.get("blink_rate_per_min", np.nan))
             proxy_rate = float(ica_diag.get("blink_proxy_rate_per_min", np.nan))
             blink_rate = rate if np.isfinite(rate) and rate > 0 else proxy_rate
@@ -775,44 +1283,54 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             elif np.isfinite(max_corr) and max_corr >= args.ica_corr_thresh:
                 do_ica = True
 
-            if do_ica:
-                ica_params = ICAParams(
-                    method=args.ica_method,
-                    n_components=_parse_n_components(args.ica_n_components),
-                    random_state=args.ica_random_state,
-                    max_iter=args.ica_max_iter,
-                    fit_l_freq=args.ica_fit_l_freq,
-                    fit_h_freq=args.ica_fit_h_freq,
+        if do_ica:
+            ica_params = ICAParams(
+                method=args.ica_method,
+                n_components=_parse_n_components(args.ica_n_components),
+                random_state=args.ica_random_state,
+                max_iter=args.ica_max_iter,
+                fit_l_freq=args.ica_fit_l_freq,
+                fit_h_freq=args.ica_fit_h_freq,
+                corr_thresh=args.ica_corr_thresh,
+                max_exclude=args.ica_max_exclude,
+                decim=args.ica_decim,
+            )
+
+            ica_obj, ica_fit_diag = fit_ica(raw, ica_params)
+            if ica_obj is None:
+                print(f"[WARN] ICA fit failed for {subj}; continuing without ICA.")
+            else:
+                ica_ran = True
+                ica_exclude, ica_find_diag = find_ica_excludes(
+                    ica_obj,
+                    raw,
+                    eog_chs=args.eog_chs,
+                    proxy_chs=args.blink_proxy_chs,
                     corr_thresh=args.ica_corr_thresh,
                     max_exclude=args.ica_max_exclude,
-                    decim=args.ica_decim,
                 )
-
-                ica_obj, ica_fit_diag = fit_ica(raw, ica_params)
-                if ica_obj is None:
-                    print(f"[WARN] ICA fit failed for {subj}; continuing without ICA.")
-                else:
-                    ica_ran = True
-                    ica_exclude, ica_find_diag = find_ica_excludes(
-                        ica_obj,
-                        raw,
-                        eog_chs=args.eog_chs,
-                        proxy_chs=args.blink_proxy_chs,
-                        corr_thresh=args.ica_corr_thresh,
-                        max_exclude=args.ica_max_exclude,
+                if len(ica_exclude) > 0:
+                    raw = apply_ica(raw, ica_obj, ica_exclude)
+                    ica_applied = True
+                if bool(args.save_ica):
+                    ica_obj.save(ica_path, overwrite=True)
+                    _write_output_sidecar(
+                        ica_path,
+                        args,
+                        recording,
+                        behavior_source=behavior_hint,
+                        extra={
+                            "Description": "ICA solution fit by eeg-pipeline before epoching.",
+                            "ICAExclude": list(ica_exclude),
+                            "ICAFitDiagnostics": ica_fit_diag,
+                            "ICAFindDiagnostics": ica_find_diag,
+                        },
                     )
-                    if len(ica_exclude) > 0:
-                        raw = apply_ica(raw, ica_obj, ica_exclude)
-                        ica_applied = True
-                    if bool(args.save_ica):
-                        ica_path = out_dir / "00_ica" / f"{subj}-ica.fif"
-                        ica_path.parent.mkdir(parents=True, exist_ok=True)
-                        ica_obj.save(ica_path, overwrite=True)
 
         # Events from annotations
         events_ann = events_from_annotations_positions(raw)
         markers_pos = events_ann[:, 0].copy()
-        
+
         # Trigger burst QC (flag only; do not modify markers_pos)
         burst_diag = detect_trigger_bursts(
             markers_pos=markers_pos,
@@ -836,52 +1354,66 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                 f"max_in_window={burst_qc['trigger_burst_max_in_window']}"
             )
 
-        if not subject_csv.exists():
-            msg = f"Missing subject file for {subj}: {subject_csv}"
-            if args.on_missing_subject_csv == "fail":
-                raise FileNotFoundError(msg)
+        events_tsv, events_json, csv_path, behavior_hint = _behavior_inputs_for_recording(recording)
+        try:
+            behavior = load_behavioral_events(
+                events_tsv=events_tsv,
+                events_json=events_json,
+                subject_id=recording.subject_id,
+                keep_codes=args.behavioral_keep_codes,
+                token_map=token_map,
+                condition_map=condition_map,
+                csv_path=csv_path,
+                csv_fallback_dir=csv_fallback_dir,
+            )
+        except FileNotFoundError as e:
+            msg = str(e)
             print("[WARN]", msg, "-> skipping")
             rows.append(
-                    {
-                        "subject": subj,
-                        "raw_file": str(raw_path.name),
-                        "subject_csv": subject_csv_name,
-                        "subject_csv_path": subject_csv_path,
-                        "subject_csv_exists": subject_csv_exists,
-                        **burst_qc,
-                        "status": "SKIP_MISSING_SUBJECT_CSV",
-                        "error": msg,
-                    }
+                {
+                    **subject_base,
+                    **burst_qc,
+                    "behavior_source": "missing",
+                    "behavior_source_path": str(behavior_hint),
+                    "status": "SKIP_MISSING_EVENTS",
+                    "error": msg,
+                }
             )
             continue
 
-        codes_all = read_eventcodes_from_subject_csv(subject_csv)
-        codes = filter_codes(codes_all, args.behavioral_keep_codes)
-        expected_trials = len(codes) 
-        try:
-            markers_aligned, diag = align_marker_positions_to_codes(
-                markers_pos=markers_pos,
-                sfreq=float(raw.info["sfreq"]),
-                codes=codes,
-                gap_s=args.drop_eeg_markers_by_gap_s,
-                auto_drop_to_count=bool(args.auto_drop_to_count),
-            )
-        except Exception as e:
-            msg = f"Alignment failed for {subj}: {e}"
-            print("[WARN]", msg, "-> skipping")
-            rows.append(
+        behavior_source = behavior.source_path
+        codes_all = behavior.codes_all
+        codes = behavior.codes
+        if behavior.samples is not None:
+            markers_aligned = np.asarray(behavior.samples, dtype=int)
+            diag = {
+                "markers_original": int(len(markers_pos)),
+                "markers_dropped_by_gap": 0,
+                "markers_dropped_by_auto": 0,
+            }
+        else:
+            try:
+                markers_aligned, diag = align_marker_positions_to_codes(
+                    markers_pos=markers_pos,
+                    sfreq=float(raw.info["sfreq"]),
+                    codes=codes,
+                    gap_s=args.drop_eeg_markers_by_gap_s,
+                    auto_drop_to_count=bool(args.auto_drop_to_count),
+                )
+            except Exception as e:
+                msg = f"Alignment failed for {subj}: {e}"
+                print("[WARN]", msg, "-> skipping")
+                rows.append(
                     {
-                        "subject": subj,
-                        "raw_file": str(raw_path.name),
-                        "subject_csv": subject_csv_name,
-                        "subject_csv_path": subject_csv_path,
-                        "subject_csv_exists": subject_csv_exists,
+                        **subject_base,
                         **burst_qc,
+                        "behavior_source": behavior.source,
+                        "behavior_source_path": str(behavior_source),
                         "status": "SKIP_ALIGNMENT_FAILED",
                         "error": msg,
                     }
-            )
-            continue
+                )
+                continue
 
         review_flag = False
         review_reasons = []
@@ -907,32 +1439,60 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             review_reasons.append("markers<behavior")
 
         events = build_events_from_positions_and_codes(markers_aligned, codes)
-        events_stddev, event_id = select_and_recode_stddev(events, args.standard_codes, args.deviant_codes)
-        if len(events_stddev) == 0:
+        if condition_map is None and (len(std_codes) == 0 or len(dev_codes) == 0):
+            raise ValueError("Standard and deviant codes are required when no condition_map is provided.")
+
+        if condition_map is None:
+            events_stddev, event_id = select_and_recode_stddev(events, args.standard_codes, args.deviant_codes)
+        else:
+            events_stddev = events
+            event_id = {}
+
+        if condition_map is None and len(events_stddev) == 0:
             msg = f"No standard/deviant events after filtering for {subj}"
             print("[WARN]", msg, "-> skipping")
             rows.append(
                 {
-                    "subject": subj,
-                    "raw_file": str(raw_path.name),
-                    "subject_csv": subject_csv_name,
-                    "subject_csv_path": subject_csv_path,
-                    "subject_csv_exists": subject_csv_exists,
+                    **subject_base,
+                    "behavior_source": behavior.source,
+                    "behavior_source_path": str(behavior_source),
                     **burst_qc,
                     "status": "SKIP_NO_STDDEV_EVENTS",
                     "error": msg,
                 }
             )
             continue
-        epochs = make_epochs(raw, events_stddev, event_id, ep)
+
+        events_export = _finalized_events_table(
+            behavior.metadata,
+            sfreq=float(raw.info["sfreq"]),
+            samples=markers_aligned,
+            codes=codes,
+        )
+        trial_levels = None
+        if "trial_type" in events_export.columns:
+            trial_levels = {
+                str(value): str(value)
+                for value in sorted(events_export["trial_type"].dropna().astype(str).unique())
+            }
+        _save_dataframe_with_sidecar(
+            events_export,
+            aligned_events_path,
+            args,
+            recording,
+            behavior_source=behavior_source,
+            description="Aligned event table written by eeg-pipeline in BIDS events format.",
+            column_descriptions=_events_json_sidecar(events_export, trial_type_levels=trial_levels),
+        )
+
         if condition_map:
             events_epo, event_id, cond_codes = select_and_filter_conditions(events, condition_map)
             keep_mask = np.isin(events[:, 2], np.asarray(cond_codes, dtype=int))
-            md_full = derive_metadata_from_condition_map(codes.tolist(), condition_map)
         else:
             events_epo, event_id = select_and_recode_stddev(events, args.standard_codes, args.deviant_codes)
             keep_mask = np.isin(events[:, 2], stddev_set)
-            md_full = derive_metadata_v1(codes.tolist(), token_map=token_map)
+
+        md_full = behavior.metadata.reset_index(drop=True)
 
         if len(events_epo) == 0:
             reason = "condition_map" if condition_map else "standard/deviant codes"
@@ -940,11 +1500,9 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             print("[WARN]", msg)
             rows.append(
                 {
-                    "subject": subj,
-                    "raw_file": str(raw_path.name),
-                    "subject_csv": subject_csv_name,
-                    "subject_csv_path": subject_csv_path,
-                    "subject_csv_exists": subject_csv_exists,
+                    **subject_base,
+                    "behavior_source": behavior.source,
+                    "behavior_source_path": str(behavior_source),
                     **diag,
                     **burst_qc,
                     "n_events_used": int(len(events)),
@@ -953,7 +1511,14 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                     "error": msg,
                 }
             )
-            raw.save(d_raw / f"{subj}-raw.fif", overwrite=True)
+            raw.save(preproc_path, overwrite=True)
+            _write_output_sidecar(
+                preproc_path,
+                args,
+                recording,
+                behavior_source=behavior_source,
+                extra={"Description": "Preprocessed continuous EEG after filtering and rereferencing."},
+            )
             continue
 
         epochs = make_epochs(raw, events_epo, event_id, ep)
@@ -1089,22 +1654,27 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             msg = "All epochs dropped after artifact rejection; skipping evoked computation."
             print("[WARN]", msg)
             rows.append(
-                    {
-                        "subject": subj,
-                        "raw_file": str(raw_path.name),
-                        "subject_csv": subject_csv_name,
-                        "subject_csv_path": subject_csv_path,
-                        "subject_csv_exists": subject_csv_exists,
-                        **diag,
-                        **burst_qc,
-                        **threshold_info,
-                        "n_epochs_before_artifact": int(n_before),
-                        "n_epochs_final": 0,
+                {
+                    **subject_base,
+                    "behavior_source": behavior.source,
+                    "behavior_source_path": str(behavior_source),
+                    **diag,
+                    **burst_qc,
+                    **threshold_info,
+                    "n_epochs_before_artifact": int(n_before),
+                    "n_epochs_final": 0,
                     "status": "SKIP_EMPTY_EPOCHS",
                     "error": msg,
                 }
             )
-            raw.save(d_raw / f"{subj}-raw.fif", overwrite=True)
+            raw.save(preproc_path, overwrite=True)
+            _write_output_sidecar(
+                preproc_path,
+                args,
+                recording,
+                behavior_source=behavior_source,
+                extra={"Description": "Preprocessed continuous EEG after filtering and rereferencing."},
+            )
             continue
 
         if condition_map:
@@ -1118,25 +1688,40 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             msg = f"Empty condition after rejection (Standard={n_std}, Deviant={n_dev}); skipping evokeds."
             print("[WARN]", msg)
             rows.append(
-                    {
-                        "subject": subj,
-                        "raw_file": str(raw_path.name),
-                        "subject_csv": subject_csv_name,
-                        "subject_csv_path": subject_csv_path,
-                        "subject_csv_exists": subject_csv_exists,
-                        **diag,
-                        **burst_qc,
-                        **threshold_info,
-                        "n_epochs_before_artifact": int(n_before),
-                        "n_epochs_final": int(n_after),
+                {
+                    **subject_base,
+                    "behavior_source": behavior.source,
+                    "behavior_source_path": str(behavior_source),
+                    **diag,
+                    **burst_qc,
+                    **threshold_info,
+                    "n_epochs_before_artifact": int(n_before),
+                    "n_epochs_final": int(n_after),
                     "n_standard_final": int(n_std),
                     "n_deviant_final": int(n_dev),
                     "status": "SKIP_EMPTY_CONDITION",
                     "error": msg,
                 }
             )
-            raw.save(d_raw / f"{subj}-raw.fif", overwrite=True)
-            epochs.save(d_epo / f"{subj}-epo.fif", overwrite=True)
+            raw.save(preproc_path, overwrite=True)
+            epochs.save(epochs_path, overwrite=True)
+            _write_output_sidecar(
+                preproc_path,
+                args,
+                recording,
+                behavior_source=behavior_source,
+                extra={"Description": "Preprocessed continuous EEG after filtering and rereferencing."},
+            )
+            _write_output_sidecar(
+                epochs_path,
+                args,
+                recording,
+                behavior_source=behavior_source,
+                extra={
+                    "Description": "Subject-level epochs after artifact rejection.",
+                    "EventID": event_id,
+                },
+            )
             continue
 
         epoch_reject_rate = (n_before - n_after) / n_before if n_before > 0 else 0.0
@@ -1149,11 +1734,9 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             print("[WARN]", msg)
             rows.append(
                 {
-                    "subject": subj,
-                    "raw_file": str(raw_path.name),
-                    "subject_csv": subject_csv_name,
-                    "subject_csv_path": subject_csv_path,
-                    "subject_csv_exists": subject_csv_exists,
+                    **subject_base,
+                    "behavior_source": behavior.source,
+                    "behavior_source_path": str(behavior_source),
                     **diag,
                     **burst_qc,
                     **threshold_info,
@@ -1166,8 +1749,25 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                     "error": msg,
                 }
             )
-            raw.save(d_raw / f"{subj}-raw.fif", overwrite=True)
-            epochs.save(d_epo / f"{subj}-epo.fif", overwrite=True)
+            raw.save(preproc_path, overwrite=True)
+            epochs.save(epochs_path, overwrite=True)
+            _write_output_sidecar(
+                preproc_path,
+                args,
+                recording,
+                behavior_source=behavior_source,
+                extra={"Description": "Preprocessed continuous EEG after filtering and rereferencing."},
+            )
+            _write_output_sidecar(
+                epochs_path,
+                args,
+                recording,
+                behavior_source=behavior_source,
+                extra={
+                    "Description": "Subject-level epochs after artifact rejection.",
+                    "EventID": event_id,
+                },
+            )
             continue
 
         # ------------------------------------------------------------------
@@ -1178,8 +1778,8 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             do_tfr = bool(getattr(args, "metrics_tfr_enabled", True))
 
             if do_erp or do_tfr:
-                metrics_dir = out_dir / "05_metrics"
-                metrics_dir.mkdir(parents=True, exist_ok=True)
+                subject_metrics_dir = _subject_metrics_dir(dataset_root, recording)
+                subject_metrics_dir.mkdir(parents=True, exist_ok=True)
 
             channels = getattr(args, "metrics_channels", None) or ["Fp1", "Fz", "Cz"]
             conds = metrics_conditions
@@ -1199,7 +1799,24 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                         compute_mmn=bool(getattr(args, "compute_mmn", 1)),
                         mmn_name=diff_label if diff_label else "DEV_MINUS_STD",
                     )
-                    df_erp.to_csv(metrics_dir / f"{subj}_erp_metrics.csv", index=False)
+                    df_erp["subject"] = subj
+                    df_erp["task"] = recording.task_id or ""
+                    df_erp["session"] = recording.session_label or ""
+                    df_erp["run"] = recording.run_id or ""
+                    _save_dataframe_with_sidecar(
+                        df_erp,
+                        subject_derivative_path(
+                            dataset_root,
+                            recording.entities,
+                            suffix="metrics",
+                            extension=".tsv",
+                            desc="erp",
+                        ),
+                        args,
+                        recording,
+                        behavior_source=behavior_source,
+                        description="Subject-level ERP metrics computed from derivative epochs.",
+                    )
                     erp_metrics_all.append(df_erp)
                 except Exception as e:
                     print(f"[WARN] ERP metrics failed for {subj}: {e}")
@@ -1226,9 +1843,24 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                             conditions=conds,
                             include_difference_wave=False,
                         )
-                        ts_dir = metrics_dir / "erp_timeseries"
-                        ts_dir.mkdir(parents=True, exist_ok=True)
-                        df_ts.to_parquet(ts_dir / f"{subj}_erp_timeseries.parquet", index=False)
+                        df_ts["subject"] = subj
+                        df_ts["task"] = recording.task_id or ""
+                        df_ts["session"] = recording.session_label or ""
+                        df_ts["run"] = recording.run_id or ""
+                        _save_dataframe_with_sidecar(
+                            df_ts,
+                            subject_derivative_path(
+                                dataset_root,
+                                recording.entities,
+                                suffix="timeseries",
+                                extension=".parquet",
+                                desc="erp",
+                            ),
+                            args,
+                            recording,
+                            behavior_source=behavior_source,
+                            description="Subject-level ERP time series metrics.",
+                        )
                         erp_timeseries_all.append(df_ts)
                     except Exception as e:
                         print(f"[WARN] ERP timeseries failed for {subj}: {e}")
@@ -1258,7 +1890,24 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                         tmax=float(getattr(args, "tfr_tmax", 0.6)),
                         time_decim=int(getattr(args, "tfr_time_decim", 1)),
                     )
-                    df_tfr.to_csv(metrics_dir / f"{subj}_tfr_metrics.csv", index=False)
+                    df_tfr["subject"] = subj
+                    df_tfr["task"] = recording.task_id or ""
+                    df_tfr["session"] = recording.session_label or ""
+                    df_tfr["run"] = recording.run_id or ""
+                    _save_dataframe_with_sidecar(
+                        df_tfr,
+                        subject_derivative_path(
+                            dataset_root,
+                            recording.entities,
+                            suffix="metrics",
+                            extension=".tsv",
+                            desc="tfr",
+                        ),
+                        args,
+                        recording,
+                        behavior_source=behavior_source,
+                        description="Subject-level TFR metrics computed from derivative epochs.",
+                    )
                     tfr_metrics_all.append(df_tfr)
                 except Exception as e:
                     print(f"[WARN] TFR metrics failed for {subj}: {e}")
@@ -1273,25 +1922,63 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             blink_rate_thresh=args.ica_auto_blink_rate_per_min,
         )
 
-        raw.save(d_raw / f"{subj}-raw.fif", overwrite=True)
-        epochs.save(d_epo / f"{subj}-epo.fif", overwrite=True)
+        raw.save(preproc_path, overwrite=True)
+        epochs.save(epochs_path, overwrite=True)
+        _write_output_sidecar(
+            preproc_path,
+            args,
+            recording,
+            behavior_source=behavior_source,
+            extra={
+                "Description": "Preprocessed continuous EEG after filtering and rereferencing.",
+                "ICAApplied": bool(ica_applied),
+            },
+        )
+        _write_output_sidecar(
+            epochs_path,
+            args,
+            recording,
+            behavior_source=behavior_source,
+            extra={
+                "Description": "Subject-level epochs after artifact rejection.",
+                "EventID": event_id,
+                "EpochRejectRate": float(epoch_reject_rate),
+            },
+        )
 
         evoked_conditions = list(event_id.keys())
         evokeds = compute_evokeds(epochs, evoked_conditions)
         for cond, ev in evokeds.items():
-            ev.save(d_evk / f"{subj}_{cond}-ave.fif", overwrite=True)
-            evokeds_by_cond.setdefault(cond, []).append(ev)
+            evoked_path = subject_derivative_path(
+                dataset_root,
+                recording.entities,
+                suffix="ave",
+                extension=".fif",
+                desc=cond.lower(),
+            )
+            ev.save(evoked_path, overwrite=True)
+            _write_output_sidecar(
+                evoked_path,
+                args,
+                recording,
+                behavior_source=behavior_source,
+                extra={
+                    "Description": f"Subject-level evoked average for {cond}.",
+                    "Condition": cond,
+                    "Nave": getattr(ev, "nave", None),
+                },
+            )
+            group_key = (recording.session_id, recording.task_id)
+            evokeds_by_group.setdefault(group_key, {}).setdefault(cond, []).append(ev)
 
         rows.append(
             {
-                "subject": subj,
-                "raw_file": str(raw_path.name),
-                "subject_csv": subject_csv_name,
-                        "subject_csv_path": subject_csv_path,
-                        "subject_csv_exists": subject_csv_exists,
+                **subject_base,
                 "sfreq": float(raw.info["sfreq"]),
                 "token1": token_map.get("token1"),
                 "token2": token_map.get("token2"),
+                "behavior_source": behavior.source,
+                "behavior_source_path": str(behavior_source),
                 "behavioral_codes_total": int(len(codes_all)),
                 "behavioral_codes_used": int(len(codes)),
                 "behavioral_keep_codes": " ".join(map(str, args.behavioral_keep_codes)) if args.behavioral_keep_codes else "",
@@ -1341,69 +2028,96 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             f"({ica_recommendation.get('ica_recommend_reason', '')})"
         )
 
-    if not any(evokeds_by_cond.values()):
-        print("\n[WARN] No successful subjects to grand-average. Writing QC summary only.")
-        write_qc_summary(rows, out_dir / "qc_summary.csv")
+    qc_path = dataset_derivative_path(
+        dataset_root,
+        suffix="qc",
+        extension=".tsv",
+        desc="summary",
+    )
+    write_qc_summary(rows, qc_path)
+    write_json(
+        derivative_sidecar_path(qc_path),
+        {
+            "Description": "Dataset-level QC summary for eeg-pipeline derivatives.",
+            "GeneratedBy": [{"Name": PIPELINE_NAME, "Version": __version__}],
+        },
+    )
 
-        # Combined metrics tables (may still exist even if grand averages fail)
-        metrics_dir = out_dir / "05_metrics"
-        if erp_metrics_all:
-            pd.concat(erp_metrics_all, ignore_index=True).to_csv(
-                metrics_dir / "erp_metrics_all.csv", index=False
-            )
-        if erp_timeseries_all:
-            pd.concat(erp_timeseries_all, ignore_index=True).to_parquet(
-                metrics_dir / "erp_timeseries_all.parquet", index=False
-            )
-        if tfr_metrics_all:
-            pd.concat(tfr_metrics_all, ignore_index=True).to_csv(
-                metrics_dir / "tfr_metrics_all.csv", index=False
-            )
-
-        print(f"Saved QC summary -> {out_dir / 'qc_summary.csv'}")
-        return
-
-    ga_by_cond = grand_averages(evokeds_by_cond)
-    for cond, ga in ga_by_cond.items():
-        ga.save(d_ga / f"grand_average_{cond}-ave.fif", overwrite=True)
-
-    write_qc_summary(rows, out_dir / "qc_summary.csv")
-
-    metrics_dir = out_dir / "05_metrics"
     if erp_metrics_all:
-        pd.concat(erp_metrics_all, ignore_index=True).to_csv(
-            metrics_dir / "erp_metrics_all.csv", index=False
+        _save_dataframe_with_sidecar(
+            pd.concat(erp_metrics_all, ignore_index=True),
+            dataset_derivative_path(dataset_root, suffix="metrics", extension=".tsv", desc="erp"),
+            args,
+            None,
+            behavior_source=None,
+            description="Dataset-level ERP metrics aggregated across processed subjects.",
         )
     if erp_timeseries_all:
-        pd.concat(erp_timeseries_all, ignore_index=True).to_parquet(
-            metrics_dir / "erp_timeseries_all.parquet", index=False
+        _save_dataframe_with_sidecar(
+            pd.concat(erp_timeseries_all, ignore_index=True),
+            dataset_derivative_path(dataset_root, suffix="timeseries", extension=".parquet", desc="erp"),
+            args,
+            None,
+            behavior_source=None,
+            description="Dataset-level ERP time series aggregated across processed subjects.",
         )
     if tfr_metrics_all:
-        pd.concat(tfr_metrics_all, ignore_index=True).to_csv(
-            metrics_dir / "tfr_metrics_all.csv", index=False
+        _save_dataframe_with_sidecar(
+            pd.concat(tfr_metrics_all, ignore_index=True),
+            dataset_derivative_path(dataset_root, suffix="metrics", extension=".tsv", desc="tfr"),
+            args,
+            None,
+            behavior_source=None,
+            description="Dataset-level TFR metrics aggregated across processed subjects.",
         )
 
-    print(f"\nSaved QC summary -> {out_dir / 'qc_summary.csv'}")
-    print(f"Saved grand averages -> {d_ga}")
+    if not any(evokeds_by_group.values()):
+        print("\n[WARN] No successful subjects to grand-average. Writing QC summary only.")
+        print(f"Saved QC summary -> {qc_path}")
+        return
+
+    for (ses, task), evoked_map in evokeds_by_group.items():
+        ga_by_cond = grand_averages(evoked_map)
+        group_entities = {}
+        if ses:
+            group_entities["ses"] = ses
+        if task:
+            group_entities["task"] = task
+        for cond, ga in ga_by_cond.items():
+            ga_path = dataset_derivative_path(
+                dataset_root,
+                entities=group_entities,
+                suffix="ave",
+                extension=".fif",
+                desc=f"grandaverage-{cond.lower()}",
+            )
+            ga.save(ga_path, overwrite=True)
+            write_json(
+                derivative_sidecar_path(ga_path),
+                {
+                    "Description": f"Grand-average evoked response for {cond}.",
+                    "GeneratedBy": [{"Name": PIPELINE_NAME, "Version": __version__}],
+                    "Session": ses,
+                    "Task": task,
+                    "Condition": cond,
+                },
+            )
+
+    print(f"\nSaved QC summary -> {qc_path}")
+    print(f"Saved derivatives -> {dataset_root}")
 
 
 def _subject_from_epochs_path(p: Path) -> str:
-    stem = p.stem
-    if stem.endswith("-epo"):
-        stem = stem[:-4]
-    return stem
+    return source_basename_from_derivative_path(p)
 
 
 def run_metrics_only(args):
-    """Compute ERP/TFR metrics from existing epochs in out_dir/02_epochs."""
-    out_dir = Path(args.out_dir)
-    epochs_dir = out_dir / "02_epochs"
-    metrics_dir = out_dir / "05_metrics"
-    metrics_dir.mkdir(parents=True, exist_ok=True)
-
-    files = sorted(epochs_dir.glob("*-epo.fif"))
+    """Compute ERP/TFR metrics from existing derivative epochs."""
+    _finalize_runtime_paths(args)
+    dataset_root = _prepare_derivatives_root(args)
+    files = sorted(dataset_root.rglob("*_epo.fif"))
     if not files:
-        raise RuntimeError(f"No epochs found in {epochs_dir} (expected *-epo.fif).")
+        raise RuntimeError(f"No epochs found in {dataset_root} (expected *_epo.fif).")
 
     do_erp = bool(getattr(args, "metrics_erp_enabled", True))
     do_tfr = bool(getattr(args, "metrics_tfr_enabled", True))
@@ -1446,7 +2160,9 @@ def run_metrics_only(args):
     erp_timeseries_all: list[pd.DataFrame] = []
 
     for p in files:
-        subj = _subject_from_epochs_path(p)
+        source_basename = _subject_from_epochs_path(p)
+        entities = parse_bids_entities_like_name(source_basename)
+        subj = f"sub-{entities['sub']}"
         loaded = load_epochs(p)
         epochs = loaded.epochs
 
@@ -1462,7 +2178,21 @@ def run_metrics_only(args):
                     compute_mmn=bool(getattr(args, "compute_mmn", 1)),
                     mmn_name=diff_label if diff_label else "DEV_MINUS_STD",
                 )
-                df_erp.to_csv(metrics_dir / f"{subj}_erp_metrics.csv", index=False)
+                df_erp["subject"] = subj
+                _save_dataframe_with_sidecar(
+                    df_erp,
+                    subject_derivative_path(
+                        dataset_root,
+                        entities,
+                        suffix="metrics",
+                        extension=".tsv",
+                        desc="erp",
+                    ),
+                    args,
+                    None,
+                    behavior_source=None,
+                    description="Subject-level ERP metrics computed from derivative epochs.",
+                )
                 erp_metrics_all.append(df_erp)
             except Exception as e:
                 print(f"[WARN] ERP metrics failed for {subj}: {e}")
@@ -1489,9 +2219,21 @@ def run_metrics_only(args):
                     conditions=metrics_conditions,
                     include_difference_wave=False,
                 )
-                ts_dir = metrics_dir / "erp_timeseries"
-                ts_dir.mkdir(parents=True, exist_ok=True)
-                df_ts.to_parquet(ts_dir / f"{subj}_erp_timeseries.parquet", index=False)
+                df_ts["subject"] = subj
+                _save_dataframe_with_sidecar(
+                    df_ts,
+                    subject_derivative_path(
+                        dataset_root,
+                        entities,
+                        suffix="timeseries",
+                        extension=".parquet",
+                        desc="erp",
+                    ),
+                    args,
+                    None,
+                    behavior_source=None,
+                    description="Subject-level ERP time series metrics.",
+                )
                 erp_timeseries_all.append(df_ts)
             except Exception as e:
                 print(f"[WARN] ERP timeseries failed for {subj}: {e}")
@@ -1508,22 +2250,51 @@ def run_metrics_only(args):
                     tmax=float(getattr(args, "tfr_tmax", 0.6)),
                     time_decim=int(getattr(args, "tfr_time_decim", 1)),
                 )
-                df_tfr.to_csv(metrics_dir / f"{subj}_tfr_metrics.csv", index=False)
+                df_tfr["subject"] = subj
+                _save_dataframe_with_sidecar(
+                    df_tfr,
+                    subject_derivative_path(
+                        dataset_root,
+                        entities,
+                        suffix="metrics",
+                        extension=".tsv",
+                        desc="tfr",
+                    ),
+                    args,
+                    None,
+                    behavior_source=None,
+                    description="Subject-level TFR metrics computed from derivative epochs.",
+                )
                 tfr_metrics_all.append(df_tfr)
             except Exception as e:
                 print(f"[WARN] TFR metrics failed for {subj}: {e}")
 
     if erp_metrics_all:
-        pd.concat(erp_metrics_all, ignore_index=True).to_csv(
-            metrics_dir / "erp_metrics_all.csv", index=False
+        _save_dataframe_with_sidecar(
+            pd.concat(erp_metrics_all, ignore_index=True),
+            dataset_derivative_path(dataset_root, suffix="metrics", extension=".tsv", desc="erp"),
+            args,
+            None,
+            behavior_source=None,
+            description="Dataset-level ERP metrics aggregated across processed subjects.",
         )
     if erp_timeseries_all:
-        pd.concat(erp_timeseries_all, ignore_index=True).to_parquet(
-            metrics_dir / "erp_timeseries_all.parquet", index=False
+        _save_dataframe_with_sidecar(
+            pd.concat(erp_timeseries_all, ignore_index=True),
+            dataset_derivative_path(dataset_root, suffix="timeseries", extension=".parquet", desc="erp"),
+            args,
+            None,
+            behavior_source=None,
+            description="Dataset-level ERP time series aggregated across processed subjects.",
         )
     if tfr_metrics_all:
-        pd.concat(tfr_metrics_all, ignore_index=True).to_csv(
-            metrics_dir / "tfr_metrics_all.csv", index=False
+        _save_dataframe_with_sidecar(
+            pd.concat(tfr_metrics_all, ignore_index=True),
+            dataset_derivative_path(dataset_root, suffix="metrics", extension=".tsv", desc="tfr"),
+            args,
+            None,
+            behavior_source=None,
+            description="Dataset-level TFR metrics aggregated across processed subjects.",
         )
 
 
@@ -1569,12 +2340,13 @@ def _prompt_yes_no(msg: str) -> bool:
 def run_plot_figures(args):
     from eeg_pipeline.viz import paper_figures
 
-    out_dir = Path(args.out_dir)
-    metrics_dir = out_dir / "05_metrics"
-    fig_dir = Path(args.figures_out_dir) if args.figures_out_dir else out_dir / "figures"
+    _finalize_runtime_paths(args)
+    dataset_root = _pipeline_dataset_root(args)
+    _dataset_metrics_dir(dataset_root)
+    fig_dir = Path(args.figures_out_dir) if args.figures_out_dir else dataset_root / "figures"
 
-    erp_parquet = metrics_dir / "erp_timeseries_all.parquet"
-    tfr_file = metrics_dir / "tfr_metrics_all.csv"
+    erp_parquet = dataset_derivative_path(dataset_root, suffix="timeseries", extension=".parquet", desc="erp")
+    tfr_file = dataset_derivative_path(dataset_root, suffix="metrics", extension=".tsv", desc="tfr")
 
     erp_exists = erp_parquet.exists()
     tfr_exists = tfr_file.exists()
@@ -1607,15 +2379,7 @@ def run_plot_figures(args):
 
 def prepare_output_dirs(out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
-    for sub in [
-        "01_clean_raw",
-        "02_epochs",
-        "03_evokeds",
-        "04_grand_averages",
-        "05_metrics",
-        "00_ica",
-    ]:
-        (out_dir / sub).mkdir(exist_ok=True)
+    ensure_derivatives_dataset(out_dir, pipeline_version=__version__)
 
 def build_arg_parser():
     ap = argparse.ArgumentParser()
@@ -1626,13 +2390,50 @@ def build_arg_parser():
         action="store_true",
         help="Use ERP CORE-style defaults (TP9/TP10, 0.1–20 Hz, ICA on, individualized thresholds).",
     )
-    ap.add_argument("--process_data", action="store_true", help="Process raw data into epochs/evokeds/QC")
-    ap.add_argument("--get_metrics", action="store_true", help="Compute ERP/TFR metrics")
-    ap.add_argument("--plot_figures", action="store_true", help="Generate paper-ready figures")
-    ap.add_argument("--raw_dir",  help="Folder containing BrainVision .vhdr or EEGLAB .set files (recurses)")
-    ap.add_argument("--subject_csv_dir",  help="Folder containing subject-###.csv files")
-    ap.add_argument("--out_dir", help="Output root folder")
-    ap.add_argument("--summarize_one_file", default=None, help="If provided, summarize this raw file (.vhdr or .set) and exit.")
+    ap.add_argument("--process_data", action="store_true", help="Process EEG inputs into BIDS-derivative epochs/evokeds/QC")
+    ap.add_argument("--get_metrics", action="store_true", help="Compute ERP/TFR metrics from derivative epochs")
+    ap.add_argument("--plot_figures", action="store_true", help="Generate figures from aggregated derivative metrics")
+    ap.add_argument(
+        "--legacy",
+        action="store_true",
+        help="Use the original lab layout instead of BIDS input discovery. BIDS is the default.",
+    )
+    ap.add_argument("--bids_root", help="Root of an input BIDS EEG dataset")
+    ap.add_argument("--raw_dir", help="Legacy raw EEG directory used with --legacy")
+    ap.add_argument("--subject_csv_dir", help="Optional legacy subject CSV directory used with --legacy")
+    ap.add_argument("--derivatives_root", help="Root derivatives folder that will contain derivatives/eeg-pipeline")
+    ap.add_argument("--sourcedata_root", default=None, help="Optional sourcedata root associated with the BIDS dataset")
+    ap.add_argument(
+        "--task_label",
+        default=None,
+        help="Legacy task label used when raw filenames do not already include task-<label>.",
+    )
+    ap.add_argument(
+        "--behavior_csv_fallback_dir",
+        default=None,
+        help="Optional fallback directory containing subject CSV files when source events.tsv is unavailable.",
+    )
+    ap.add_argument(
+        "--convert_to_bids",
+        action="store_true",
+        help="In legacy mode, convert the discovered dataset into BIDS before processing. If no other stage flags are set, conversion runs and exits.",
+    )
+    ap.add_argument(
+        "--conversion_bids_root",
+        default=None,
+        help="Output root for legacy-to-BIDS conversion.",
+    )
+    ap.add_argument(
+        "--conversion_overwrite",
+        type=int,
+        default=1,
+        help="Overwrite converted BIDS files when --convert_to_bids is enabled (1=yes,0=no).",
+    )
+    ap.add_argument(
+        "--summarize_one_file",
+        default=None,
+        help="If provided, summarize this raw EEG file (.vhdr or .set) and exit.",
+    )
 
     ap.add_argument("--use_gpu", action="store_true", help="Enable GPU acceleration where available (MNE/CuPy).")
     ap.add_argument("--gpu_device", type=int, default=None, help="Optional GPU device index (default: first visible).")
@@ -1641,15 +2442,11 @@ def build_arg_parser():
         "--subjects",
         nargs="*",
         default=None,
-        help="Optional list of subject stems to run (e.g., S203 s204). If omitted, runs all .vhdr/.set files in raw_dir.",
+        help="Optional subject filters (01 or sub-01). If omitted, runs all discovered subjects.",
     )
-
-    ap.add_argument(
-        "--on_missing_subject_csv",
-        choices=["skip", "fail"],
-        default="skip",
-        help="What to do if subject-###.csv is missing (default: skip).",
-    )
+    ap.add_argument("--sessions", nargs="*", default=None, help="Optional session filters (e.g., 01 or ses-01).")
+    ap.add_argument("--tasks", nargs="*", default=None, help="Optional task filters.")
+    ap.add_argument("--runs", nargs="*", default=None, help="Optional run filters.")
 
     ap.add_argument(
         "--on_missing_vmrk",
@@ -1688,7 +2485,7 @@ def build_arg_parser():
         nargs="*",
         type=int,
         default=[110, 111, 210, 211],
-        help="Keep only these EventCode values from subject-###.csv when aligning to EEG markers.",
+        help="Keep only these numeric codes from source events.tsv (or an explicit CSV fallback) when aligning to EEG markers.",
     )
     ap.add_argument(
         "--drop_eeg_markers_by_gap_s",
@@ -1787,7 +2584,7 @@ def build_arg_parser():
         type=float,
         help="If --ica auto, run ICA when blink rate >= this threshold (per minute).",
     )
-    ap.add_argument("--save_ica", default=1, type=int, help="Save ICA object to out_dir/00_ica (1=yes,0=no).")
+    ap.add_argument("--save_ica", default=1, type=int, help="Save ICA object into the BIDS derivatives tree (1=yes,0=no).")
 
     ap.add_argument(
         "--on_bv_link_mismatch",
@@ -1801,7 +2598,7 @@ def build_arg_parser():
         "--metrics",
         type=int,
         default=1,
-        help="Compute ERP/TFR metrics and write to out_dir/05_metrics (1=yes,0=no).",
+        help="Compute ERP/TFR metrics and write them into the derivatives dataset (1=yes,0=no).",
     )
     ap.add_argument(
         "--metrics_channels",
@@ -1864,7 +2661,7 @@ def build_arg_parser():
     ap.add_argument("--figure_freq_band", nargs=2, type=float, default=None, metavar=("FMIN", "FMAX"))
     ap.add_argument("--figure_diff_heatmap", action="store_true", help="Add deviant-standard heatmap")
     ap.add_argument("--figure_channels", nargs="+", default=None, help="Optional channel subset for ERP plots")
-    ap.add_argument("--figures_out_dir", default=None, help="Output directory for figures (default: out_dir/figures)")
+    ap.add_argument("--figures_out_dir", default=None, help="Output directory for figures (default: derivatives/eeg-pipeline/figures)")
     return ap
 
 
@@ -1896,22 +2693,36 @@ def main(argv=None):
     # distinguish CLI‑provided arguments from those left unspecified.
     defaults = build_defaults(ap)
     args = ap.parse_args(argv)
+    stages_requested = bool(args.process_data or args.get_metrics or args.plot_figures)
 
     if args.summarize_one_file:
+        apply_erp_core_preset(args, defaults)
+        cfg = apply_config(args, defaults)
+        _finalize_runtime_paths(args, cfg)
         summarize_one_file(args, Path(args.summarize_one_file))
         return
 
-    if not (args.process_data or args.get_metrics or args.plot_figures):
-        # Default behavior: process data + metrics
-        args.process_data = True
-        args.get_metrics = True
-        args.plot_figures = False
+    if not stages_requested:
+        if bool(getattr(args, "convert_to_bids", False)):
+            args.process_data = False
+            args.get_metrics = False
+            args.plot_figures = False
+        else:
+            # Default behavior: process data + metrics
+            args.process_data = True
+            args.get_metrics = True
+            args.plot_figures = False
 
     # Apply ERP CORE preset before config so it can override config defaults.
     apply_erp_core_preset(args, defaults)
 
     # Apply config once for all stages
     cfg = apply_config(args, defaults)
+    _finalize_runtime_paths(args, cfg)
+    if not stages_requested and bool(getattr(args, "convert_to_bids", False)):
+        args.process_data = False
+        args.get_metrics = False
+        args.plot_figures = False
 
     if getattr(args, "_erp_core_preset_enabled", False):
         print("[ERP-CORE] preset enabled")
@@ -1950,6 +2761,12 @@ def main(argv=None):
         # Ensure ERP time-series is available for plotting
         args.metrics_erp_timeseries = True
 
+    if bool(getattr(args, "convert_to_bids", False)) and not (
+        args.process_data or args.get_metrics or args.plot_figures
+    ):
+        run_legacy_to_bids_conversion(args, defaults=defaults, cfg=cfg)
+        return
+
     if args.process_data:
         if not args.get_metrics:
             args.metrics = 0
@@ -1960,9 +2777,9 @@ def main(argv=None):
         run_metrics_only(args)
 
     if args.plot_figures:
-        metrics_dir = Path(args.out_dir) / "05_metrics"
-        erp_parquet = metrics_dir / "erp_timeseries_all.parquet"
-        tfr_file = metrics_dir / "tfr_metrics_all.csv"
+        dataset_root = _pipeline_dataset_root(args)
+        erp_parquet = dataset_derivative_path(dataset_root, suffix="timeseries", extension=".parquet", desc="erp")
+        tfr_file = dataset_derivative_path(dataset_root, suffix="metrics", extension=".tsv", desc="tfr")
 
         missing = []
         if not erp_parquet.exists():

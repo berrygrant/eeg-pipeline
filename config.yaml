@@ -1,26 +1,44 @@
 task: mmn
 
+input:
+  mode: "bids"
+
 paths:
-  raw_dir: "/Volumes/Lab_Studies/RCG_2023/Tasks/2_MMN/1-raw_data"
-  subject_csv_dir: "/Volumes/Lab_Studies/RCG_2023/Tasks/2_MMN/0-behavioral_data"
-  out_dir: "/Users/grantberry/Library/CloudStorage/OneDrive-VillanovaUniversity/Research/LUV_Lab/RCG/MMN_Data_mne_02_2026"
+  # Default mode: consume an existing BIDS EEG dataset.
+  bids_root: "/data/bids_eeg"
+  derivatives_root: "/data/bids_eeg/derivatives"
+  sourcedata_root: "/data/bids_eeg/sourcedata"
+
+  # Legacy mode (--legacy): discover raw EEG files plus optional subject CSVs.
+  raw_dir: null
+  subject_csv_dir: null
+
+bids:
+  subjects: null
+  sessions: null
+  tasks: ["oddball"]
+  runs: null
 
 channels:
   # LUV Lab default has no VEOG, so Fp1 is used as a blink proxy
   blink_proxy_chs: ["Fp1"]
-  eog_chs: []          # leave empty if VEOG/HEOG don’t exist
+  eog_chs: []
   drop_aux_chs: ["AUX"]
 
 preprocess:
   montage: "standard_1020"
+  reref: "average"
   notch_hz: [60.0]
   l_freq: 0.1
   h_freq: 30.0
 
 events:
+  # Primary contract: read finalized events from the source BIDS *_events.tsv.
+  # Optional fallback for legacy imports only when a BIDS recording is missing events.tsv.
+  csv_fallback_dir: null
   behavioral_keep_codes: [110, 111, 210, 211, 310, 311, 410, 411]
-  standard_codes: [110, 210] # Full vowel codes. For reduced, use 310 410 
-  deviant_codes: [111, 211]  # Full vowel codes. For reduced, use 311 411
+  standard_codes: [110, 210]
+  deviant_codes: [111, 211]
   drop_eeg_markers_by_gap_s: null
   auto_drop_to_count: true
 
@@ -40,9 +58,9 @@ artifacts:
     neg_uv: -150.0
 
 ica:
-  mode: "auto"                 # off | auto | on
+  mode: "auto"
   auto_blink_rate_per_min: 15.0
-  method: "fastica"            # or "picard" if installed and you prefer it
+  method: "fastica"
   n_components: 0.99
   random_state: 97
   max_iter: 512
@@ -54,7 +72,16 @@ ica:
   save_ica: true
 
 labels:
-  token_map: ["EH", "IH"]      # optional; can be null
+  token_map: ["EH", "IH"]
+
+compute:
+  use_gpu: false
+  gpu_device: null
+
+conversion:
+  enabled: false
+  bids_output_root: null
+  overwrite: true
 
 metrics:
   erp:

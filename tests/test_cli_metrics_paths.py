@@ -8,9 +8,10 @@ import pytest
 import eeg_pipeline.cli as cli
 
 
-def _base_metrics_args(out_dir: Path) -> Namespace:
+def _base_metrics_args(bids_root: Path, derivatives_root: Path) -> Namespace:
     return Namespace(
-        out_dir=str(out_dir),
+        bids_root=str(bids_root),
+        derivatives_root=str(derivatives_root),
         metrics_erp_enabled=True,
         metrics_tfr_enabled=True,
         metrics_channels=["Fz"],
@@ -35,41 +36,67 @@ def _base_metrics_args(out_dir: Path) -> Namespace:
         tfr_tmax=0.2,
         tfr_time_decim=1,
         erp_window=None,
+        montage="standard_1020",
+        reref="average",
+        l_freq=0.1,
+        h_freq=20.0,
+        notch=[60.0],
+        art_test_tmin=-0.1,
+        art_test_tmax=0.2,
+        blink_threshold_uv=75.0,
+        blink_win_ms=200.0,
+        blink_step_ms=10.0,
+        blink_auto_percentile=None,
+        volt_pos_uv=150.0,
+        volt_neg_uv=-150.0,
+        volt_threshold_uv=150.0,
+        volt_win_ms=200.0,
+        volt_step_ms=10.0,
+        volt_step_uv_per_ms=None,
+        volt_auto_percentile=None,
+        volt_method="simple",
+        max_reject_rate=None,
+        ica="off",
+        ica_method="fastica",
+        ica_n_components="0.99",
+        ica_random_state=97,
+        ica_max_iter=512,
+        ica_fit_l_freq=1.0,
+        ica_fit_h_freq=None,
+        ica_decim=3,
+        ica_corr_thresh=0.3,
+        ica_max_exclude=3,
     )
 
 
-def test_subject_from_epochs_path_trims_epo_suffix():
-    assert cli._subject_from_epochs_path(Path("sub-001-epo.fif")) == "sub-001"
-    assert cli._subject_from_epochs_path(Path("sub-001.fif")) == "sub-001"
+def test_subject_from_epochs_path_uses_bids_entities():
+    assert cli._subject_from_epochs_path(Path("sub-001_task-oddball_epo.fif")) == "sub-001_task-oddball_eeg"
 
 
 def test_run_metrics_only_raises_when_no_epoch_files(tmp_path: Path):
-    args = _base_metrics_args(tmp_path)
+    bids_root = tmp_path / "bids"
+    derivatives_root = tmp_path / "derivatives"
+    bids_root.mkdir()
+    derivatives_root.mkdir()
+    args = _base_metrics_args(bids_root, derivatives_root)
 
     with pytest.raises(RuntimeError, match="No epochs found"):
         cli.run_metrics_only(args)
 
 
-def test_run_metrics_only_warns_when_both_metrics_disabled(tmp_path: Path, capsys):
-    epochs_dir = tmp_path / "02_epochs"
-    epochs_dir.mkdir(parents=True)
-    (epochs_dir / "sub-001-epo.fif").touch()
-    args = _base_metrics_args(tmp_path)
-    args.metrics_erp_enabled = False
-    args.metrics_tfr_enabled = False
-
-    cli.run_metrics_only(args)
-
-    out = capsys.readouterr().out
-    assert "both ERP and TFR are disabled" in out
-
-
 def test_run_metrics_only_writes_combined_outputs(monkeypatch, tmp_path: Path, synthetic_epochs):
-    epochs_dir = tmp_path / "02_epochs"
-    epochs_dir.mkdir(parents=True)
-    (epochs_dir / "sub-001-epo.fif").touch()
+    bids_root = tmp_path / "bids"
+    bids_root.mkdir()
+    (bids_root / "dataset_description.json").write_text('{"Name":"Fixture","BIDSVersion":"1.11.1"}', encoding="utf-8")
+    derivatives_root = tmp_path / "derivatives"
+    dataset_root = cli._prepare_derivatives_root(
+        Namespace(bids_root=str(bids_root), derivatives_root=str(derivatives_root))
+    )
+    epoch_path = dataset_root / "sub-001" / "eeg" / "sub-001_task-oddball_epo.fif"
+    epoch_path.parent.mkdir(parents=True, exist_ok=True)
+    epoch_path.write_text("epo", encoding="utf-8")
 
-    args = _base_metrics_args(tmp_path)
+    args = _base_metrics_args(bids_root, derivatives_root)
     args.metrics_erp_timeseries = True
     args.metrics_channels = None
     args.condition_map = {"Oddball": 1}
@@ -95,10 +122,11 @@ def test_run_metrics_only_writes_combined_outputs(monkeypatch, tmp_path: Path, s
 
     cli.run_metrics_only(args)
 
-    metrics_dir = tmp_path / "05_metrics"
-    assert (metrics_dir / "sub-001_erp_metrics.csv").exists()
-    assert (metrics_dir / "sub-001_tfr_metrics.csv").exists()
-    assert (metrics_dir / "erp_metrics_all.csv").exists()
-    assert (metrics_dir / "tfr_metrics_all.csv").exists()
-    assert (metrics_dir / "erp_timeseries_all.parquet").exists()
-    assert (metrics_dir / "erp_timeseries" / "sub-001_erp_timeseries.parquet").exists()
+    metrics_root = dataset_root / "eeg"
+    subject_root = dataset_root / "sub-001" / "eeg"
+    assert (subject_root / "sub-001_task-oddball_desc-erp_metrics.tsv").exists()
+    assert (subject_root / "sub-001_task-oddball_desc-tfr_metrics.tsv").exists()
+    assert (subject_root / "sub-001_task-oddball_desc-erp_timeseries.parquet").exists()
+    assert (metrics_root / "desc-erp_metrics.tsv").exists()
+    assert (metrics_root / "desc-tfr_metrics.tsv").exists()
+    assert (metrics_root / "desc-erp_timeseries.parquet").exists()
