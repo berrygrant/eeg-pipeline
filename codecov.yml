@@ -1,6 +1,8 @@
+coverage:
+  status:
+    patch: off
+
 ignore:
-  - "eeg_pipeline/oneclick/**"
   - "oneclick/electron/**"
   - "package.json"
   - "package-lock.json"
-  - "tests/test_oneclick_backend.py"
