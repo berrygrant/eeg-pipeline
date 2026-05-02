@@ -364,6 +364,27 @@ def test_handler_serves_jobs_and_error_paths(monkeypatch):
     assert run["job"]["id"] == "new-job"
 
 
+def test_handler_direct_exception_paths(monkeypatch):
+    get_handler = _FakeHandler()
+    get_handler.path = "/api/health"
+    monkeypatch.setattr(backend, "urlparse", lambda path: (_ for _ in ()).throw(RuntimeError("parse failed")))
+
+    backend.OneClickHandler.do_GET(get_handler)
+
+    get_payload = json.loads(get_handler.wfile.getvalue().decode("utf-8"))
+    assert get_handler.status == 500
+    assert get_payload["error"] == "parse failed"
+
+    post_handler = _FakeHandler(["invalid"])
+    post_handler.path = "/api/config/validate"
+
+    backend.OneClickHandler.do_POST(post_handler)
+
+    post_payload = json.loads(post_handler.wfile.getvalue().decode("utf-8"))
+    assert post_handler.status == 400
+    assert "JSON object" in post_payload["error"]
+
+
 def test_find_port_falls_back_when_preferred_port_is_busy():
     import socket
 
@@ -378,6 +399,31 @@ def test_find_port_falls_back_when_preferred_port_is_busy():
 
 def test_find_port_returns_available_preferred_port():
     assert backend._find_port("127.0.0.1", 0) == 0
+
+
+def test_serve_prints_ready_and_closes_server(monkeypatch, capsys):
+    events = []
+
+    class FakeServer:
+        def __init__(self, address, handler):
+            self.address = address
+            self.handler = handler
+
+        def serve_forever(self):
+            events.append("serve")
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            events.append("close")
+
+    monkeypatch.setattr(backend, "_find_port", lambda host, port: 9999)
+    monkeypatch.setattr(backend, "ThreadingHTTPServer", FakeServer)
+
+    backend.serve(host="127.0.0.1", port=8765)
+
+    ready = json.loads(capsys.readouterr().out)
+    assert ready == {"event": "ready", "host": "127.0.0.1", "port": 9999}
+    assert events == ["serve", "close"]
 
 
 def test_main_passes_cli_args_to_serve(monkeypatch):
