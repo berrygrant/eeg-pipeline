@@ -28,8 +28,6 @@ Questions? Try the [ChatGPT eeg-pipeline Assistant](https://chatgpt.com/g/g-6998
 
 ### Event alignment
 - Alignment of EEG markers to behavioral event codes
-- Optional eventcode cleanup modes for task-specific behavioral logging quirks
-- Optional burst collapsing for duplicate StimTrak triggers before alignment
 - Gap-based heuristics for boundary marker removal
 - Automatic trimming when EEG markers exceed behavioral codes
 - Explicit support for **standard vs. deviant** contrasts
@@ -123,13 +121,28 @@ run_metrics.py            # Legacy metrics runner (kept for compatibility)
 All pipeline behavior is controlled via a **single YAML (or JSON) config file**.
 CLI flags are intentionally minimal.
 
+Current contract:
+
+- Default input is an existing **BIDS EEG dataset**.
+- Legacy lab-layout input is still supported via `--legacy`.
+- Optional legacy-to-BIDS conversion is available via `--convert_to_bids`.
+- Output is written as a **BIDS derivatives dataset** under `derivatives/eeg-pipeline/`.
+
 ### Example `config.yaml`
 
 ```yaml
+input:
+  mode: bids
+
 paths:
-  raw_dir: /data/EEG/raw
-  subject_csv_dir: /data/EEG/behavior
-  out_dir: /data/EEG/derivatives
+  bids_root: /data/bids_eeg
+  derivatives_root: /data/bids_eeg/derivatives
+  sourcedata_root: /data/bids_eeg/sourcedata
+  raw_dir: null
+  subject_csv_dir: null
+
+bids:
+  tasks: [oddball]
 
 channels:
   eog_chs: []
@@ -143,12 +156,17 @@ preprocess:
   notch_hz: [60]
 
 events:
+  # Primary contract: read source *_events.tsv and sidecars.
+  # Optional fallback only for legacy imports when an events.tsv is missing.
+  csv_fallback_dir: null
   behavioral_keep_codes: [110, 111, 210, 211]
-  eventcode_cleanup: none
   standard_codes: [110, 210]
   deviant_codes: [111, 211]
-  collapse_eeg_marker_bursts_s: 0.02
-  collapse_eeg_marker_bursts_keep: first
+
+conversion:
+  enabled: false
+  bids_output_root: null
+  overwrite: true
 
 epoching:
   tmin: -0.2
@@ -185,31 +203,60 @@ metrics:
 
 ## Running the Pipeline
 
-Install the package in editable mode for local development:
-
-```bash
-python -m pip install -e ".[dev,viz]"
-```
-
-GPU acceleration is optional because CuPy wheels are CUDA-version specific:
-
-```bash
-python -m pip install -e ".[gpu]"
-```
-
 From the repository root (module invocation):
 
 ```bash
 python -m eeg_pipeline.cli --config config.yaml --process_data --get_metrics
 ```
 
-After installation, the console entry point is also available:
+### OneClick Electron GUI prototype
+
+This branch includes an early Electron + Python-backend GUI shell. It keeps the
+existing CLI as the execution engine and adds a local backend for validation,
+recording discovery, run launch, and log polling.
+
+Install the Electron development dependency, then launch the app:
 
 ```bash
-eeg-pipeline --config config.yaml --process_data --get_metrics
+npm install
+npm run oneclick
 ```
 
+The backend can also be started directly for API testing:
+
+```bash
+python3 -m eeg_pipeline.oneclick.backend
+```
+
+The GUI reads the selected config file, validates it with the same config loader
+used by the CLI, discovers BIDS/legacy recordings, and starts the existing
+pipeline in a subprocess. For this prototype, the config file must be named
+`config.yaml`, `config.yml`, or `config.json` and live at the repository root.
+
 If you omit the stage flags, the default is `--process_data --get_metrics`.
+
+Legacy layout input is opt-in:
+
+```bash
+python -m eeg_pipeline.cli \
+  --config config.yaml \
+  --legacy \
+  --raw_dir /data/legacy_raw \
+  --subject_csv_dir /data/legacy_behavior \
+  --process_data --get_metrics
+```
+
+To convert a legacy dataset to BIDS without running the rest of the pipeline:
+
+```bash
+python -m eeg_pipeline.cli \
+  --config config.yaml \
+  --legacy \
+  --raw_dir /data/legacy_raw \
+  --subject_csv_dir /data/legacy_behavior \
+  --convert_to_bids \
+  --conversion_bids_root /data/legacy_bids
+```
 
 ### ERP CORE preset (optional)
 
@@ -239,7 +286,7 @@ Optional debugging / inspection of a single file:
 ```bash
 python -m eeg_pipeline.cli \
   --config config.yaml \
-  --summarize_one_file /path/to/S203.vhdr
+  --summarize_one_file /data/bids_eeg/sub-01/eeg/sub-01_task-oddball_run-01_eeg.vhdr
 ```
 
 EEGLAB example:
@@ -256,7 +303,6 @@ python -m eeg_pipeline.cli \
 python scripts/process_eeg_data.py --config config.yaml
 python scripts/compute_eeg_metrics.py --config config.yaml
 python scripts/plot_eeg_figures.py --config config.yaml
-python scripts/export_eventcodes.py --raw_dir /data/EEG/raw --behavioral_dir /data/EEG/behavior --out_dir /data/EEG/eventcodes
 ```
 
 ## GPU Acceleration (Optional)
@@ -267,26 +313,22 @@ Enable GPU acceleration to speed up supported steps.
 - CLI: pass `--use_gpu` and optionally `--gpu_device 0`.
 - Behavior: the pipeline attempts to initialize MNE CUDA (if available) and uses CuPy for internal array operations (artifact rejection). If GPU libraries are missing, it falls back to CPU and prints a warning.
 
-## Post-hoc metrics (on existing epochs)
+## Metrics-only reruns
+
+The metrics stage now reads derivative epoch files from the BIDS derivatives tree:
 
 ```bash
-python run_analysis.py \
-  --epochs_dir /path/to/02_epochs \
-  --out_dir /path/to/05_metrics \
-  --do_erp --do_tfr \
-  --channels Fz Cz \
-  --conditions Standard Deviant \
-  --erp_window MMN 0.15 0.25 \
-  --tfr_tmin -0.2 --tfr_tmax 0.6 \
-  --tfr_fmin 3 --tfr_fmax 8 --tfr_fstep 1
+python -m eeg_pipeline.cli \
+  --config config.yaml \
+  --get_metrics
 ```
 
 ## Visualization (paper_figures)
 
 ```bash
 python -m eeg_pipeline.viz.paper_figures \
-  --erp_parquet /path/to/05_metrics/erp_timeseries_all.parquet \
-  --tfr_file /path/to/05_metrics/tfr_metrics_all.csv \
+  --erp_parquet /data/bids_eeg/derivatives/eeg-pipeline/eeg/desc-erp_timeseries.parquet \
+  --tfr_file /data/bids_eeg/derivatives/eeg-pipeline/eeg/desc-tfr_metrics.tsv \
   --out_dir /path/to/figures \
   --time_window 0.15 0.25 \
   --freq_band 3 8 \
@@ -296,19 +338,37 @@ python -m eeg_pipeline.viz.paper_figures \
 ## Outputs
 
 ```
-out_dir/
-├── 00_ica/                 # Saved ICA objects (optional)
-├── 01_clean_raw/           # Preprocessed raw FIF files
-├── 02_epochs/              # Epoched data
-├── 03_evokeds/             # Subject-level evoked responses
-├── 04_grand_averages/      # Grand-average evokeds
-├── 05_metrics/             # ERP / TFR metrics (if enabled)
-│   ├── erp_metrics_all.csv
-│   ├── tfr_metrics_all.csv
-│   ├── erp_timeseries_all.parquet
-│   └── erp_timeseries/      # per-subject Parquet time-series
-└── qc_summary.csv          # Per-subject QC table
+derivatives/
+└── eeg-pipeline/
+    ├── dataset_description.json
+    ├── eeg/
+    │   ├── desc-summary_qc.tsv
+    │   ├── desc-erp_metrics.tsv
+    │   ├── desc-tfr_metrics.tsv
+    │   ├── desc-erp_timeseries.parquet
+    │   └── task-<task>_desc-grandaverage-<condition>_ave.fif
+    └── sub-<id>/
+        └── [ses-<id>/]eeg/
+            ├── sub-<id>[_ses-<id>]_task-<task>[_run-<run>]_desc-preproc_eeg.fif
+            ├── sub-<id>[_ses-<id>]_task-<task>[_run-<run>]_epo.fif
+            ├── sub-<id>[_ses-<id>]_task-<task>[_run-<run>]_desc-aligned_events.tsv
+            ├── sub-<id>[_ses-<id>]_task-<task>[_run-<run>]_desc-standard_ave.fif
+            ├── sub-<id>[_ses-<id>]_task-<task>[_run-<run>]_desc-deviant_ave.fif
+            ├── sub-<id>[_ses-<id>]_task-<task>[_run-<run>]_desc-erp_metrics.tsv
+            ├── sub-<id>[_ses-<id>]_task-<task>[_run-<run>]_desc-tfr_metrics.tsv
+            └── matching JSON sidecars for provenance
 ```
+
+Each derivative file gets a JSON sidecar with filtering, rereferencing, epoch window, artifact rejection, ICA settings, and source-file references. The aligned event export is written in BIDS tabular form as `*_events.tsv` plus `*_events.json`.
+
+## Validation
+
+The test suite now includes a tiny BIDS fixture and validates both:
+
+- the input dataset structure, and
+- the produced derivatives tree
+
+using the repo's BIDS-aware structural validator helpers in `eeg_pipeline.bids`.
 
 ## Design philosophy
 - Explicit over implicit: no hidden heuristics

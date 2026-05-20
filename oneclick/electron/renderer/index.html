@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>eeg-pipeline OneClick</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="toolbar">
+        <div>
+          <h1>eeg-pipeline OneClick</h1>
+          <p id="backendStatus">Starting backend...</p>
+        </div>
+        <button id="validateBtn">Validate</button>
+        <button id="discoverBtn">Discover</button>
+        <button id="runBtn" class="primary">Run</button>
+      </section>
+
+      <section class="panel project-panel">
+        <label>
+          Config file
+          <span class="path-row">
+            <input id="configPath" spellcheck="false" value="config.yaml" />
+            <button id="pickConfigBtn">Browse</button>
+          </span>
+        </label>
+        <div class="stage-grid">
+          <label><input id="stageProcess" type="checkbox" checked /> Process data</label>
+          <label><input id="stageMetrics" type="checkbox" checked /> Metrics</label>
+          <label><input id="stageFigures" type="checkbox" /> Figures</label>
+          <label><input id="erpCore" type="checkbox" /> ERP CORE preset</label>
+          <label><input id="useGpu" type="checkbox" /> GPU</label>
+        </div>
+      </section>
+
+      <section class="content-grid">
+        <section class="panel">
+          <h2>Project</h2>
+          <dl id="summary" class="summary"></dl>
+          <div id="warnings" class="warnings"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Recordings</h2>
+          <div id="recordingCount" class="count">No discovery run yet.</div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Subject</th>
+                  <th>Session</th>
+                  <th>Task</th>
+                  <th>Run</th>
+                  <th>Behavior</th>
+                </tr>
+              </thead>
+              <tbody id="recordings"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section class="panel run-panel">
+        <div class="run-header">
+          <h2>Run Log</h2>
+          <span id="jobStatus">Idle</span>
+        </div>
+        <pre id="logs"></pre>
+      </section>
+    </main>
+    <script src="./renderer.js"></script>
+  </body>
+</html>
+

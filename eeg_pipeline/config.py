@@ -86,9 +86,18 @@ def _apply_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
 
     set_default(cfg, "task", "unknown")
 
+    set_default(cfg, "input.mode", "bids")
+
     set_default(cfg, "paths.raw_dir", None)
     set_default(cfg, "paths.subject_csv_dir", None)
-    set_default(cfg, "paths.out_dir", None)
+    set_default(cfg, "paths.bids_root", None)
+    set_default(cfg, "paths.derivatives_root", None)
+    set_default(cfg, "paths.sourcedata_root", None)
+
+    set_default(cfg, "bids.subjects", None)
+    set_default(cfg, "bids.sessions", None)
+    set_default(cfg, "bids.tasks", None)
+    set_default(cfg, "bids.runs", None)
 
     set_default(cfg, "channels.picks", [])
     set_default(cfg, "channels.eog_chs", [])
@@ -102,12 +111,10 @@ def _apply_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
     set_default(cfg, "preprocess.h_freq", 30.0)
 
     set_default(cfg, "events.behavioral_keep_codes", [])
-    set_default(cfg, "events.eventcode_cleanup", "none")
     set_default(cfg, "events.standard_codes", [])
     set_default(cfg, "events.deviant_codes", [])
     set_default(cfg, "events.condition_map", None)
-    set_default(cfg, "events.collapse_eeg_marker_bursts_s", None)
-    set_default(cfg, "events.collapse_eeg_marker_bursts_keep", "first")
+    set_default(cfg, "events.csv_fallback_dir", None)
     set_default(cfg, "events.drop_eeg_markers_by_gap_s", None)
     set_default(cfg, "events.auto_drop_to_count", True)
 
@@ -163,6 +170,10 @@ def _apply_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
     set_default(cfg, "metrics.tfr.baseline", [-0.2, 0.0])
     set_default(cfg, "metrics.tfr.baseline_mode", "logratio")
 
+    set_default(cfg, "conversion.enabled", False)
+    set_default(cfg, "conversion.bids_output_root", None)
+    set_default(cfg, "conversion.overwrite", True)
+
     return cfg
 
 
@@ -177,16 +188,28 @@ def _validate_config(cfg: dict[str, Any]) -> None:
         if val is None or (isinstance(val, str) and not val.strip()):
             errors.append(f"Missing required field: '{path}'")
 
-    # Paths required for the pipeline proper (you can relax for “metrics-only” runs later)
-    require("paths.raw_dir")
-    require("paths.subject_csv_dir")
-    require("paths.out_dir")
+    input_mode = str(config_get(cfg, "input.mode", "bids")).lower()
+    if input_mode not in {"bids", "legacy"}:
+        errors.append("input.mode must be one of: bids | legacy.")
+
+    bids_root = config_get(cfg, "paths.bids_root", None)
+    raw_dir = config_get(cfg, "paths.raw_dir", None)
+    if not bids_root and not raw_dir:
+        errors.append("Provide at least one input path: paths.bids_root or paths.raw_dir.")
+    if input_mode == "bids" and not bids_root:
+        errors.append("input.mode='bids' requires paths.bids_root.")
+    if input_mode == "legacy" and not raw_dir:
+        errors.append("input.mode='legacy' requires paths.raw_dir.")
 
     # Events required if doing ERP contrasts
     std = config_get(cfg, "events.standard_codes", [])
     dev = config_get(cfg, "events.deviant_codes", [])
-    if not std or not dev:
-        errors.append("events.standard_codes and events.deviant_codes must both be non-empty.")
+    cond_map = config_get(cfg, "events.condition_map", None)
+    if (not std or not dev) and not cond_map:
+        errors.append(
+            "Provide either events.standard_codes + events.deviant_codes or a non-empty "
+            "events.condition_map."
+        )
 
     # Baseline shape
     baseline = config_get(cfg, "epoching.baseline", None)
@@ -236,7 +259,6 @@ def _validate_config(cfg: dict[str, Any]) -> None:
         errors.append("events.standard_codes / deviant_codes must be integers.")
 
     # Condition map (optional)
-    cond_map = config_get(cfg, "events.condition_map", None)
     if cond_map is not None:
         if not isinstance(cond_map, dict):
             errors.append("events.condition_map must be a mapping of name -> code(s).")
@@ -256,23 +278,6 @@ def _validate_config(cfg: dict[str, Any]) -> None:
                     seen.add(c)
             except Exception:
                 errors.append("events.condition_map values must be integers (or lists of integers).")
-
-    eventcode_cleanup = str(config_get(cfg, "events.eventcode_cleanup", "none")).lower()
-    if eventcode_cleanup not in {"none", "mprocacc_thesis"}:
-        errors.append("events.eventcode_cleanup must be one of: none | mprocacc_thesis.")
-
-    collapse_bursts_s = config_get(cfg, "events.collapse_eeg_marker_bursts_s", None)
-    if collapse_bursts_s not in (None, "null", "None"):
-        try:
-            collapse_bursts_s = float(collapse_bursts_s)
-            if collapse_bursts_s < 0:
-                errors.append("events.collapse_eeg_marker_bursts_s must be >= 0.")
-        except Exception:
-            errors.append("events.collapse_eeg_marker_bursts_s must be a number >= 0.")
-
-    collapse_keep = str(config_get(cfg, "events.collapse_eeg_marker_bursts_keep", "first")).lower()
-    if collapse_keep not in {"first", "last"}:
-        errors.append("events.collapse_eeg_marker_bursts_keep must be one of: first | last.")
 
     # ERP windows sanity
     erp_windows = config_get(cfg, "metrics.erp.windows", [])
@@ -313,26 +318,34 @@ def _validate_config(cfg: dict[str, Any]) -> None:
 # ----------------------------
 def _normalize_config(cfg: dict[str, Any]) -> dict[str, Any]:
     cfg = dict(cfg)  # shallow copy; mutate nested dicts
+    cfg["input"]["mode"] = str(cfg["input"].get("mode", "bids")).lower()
 
-    # Keep paths as Path objects so downstream code does not re-normalize strings.
-    for k in ("raw_dir", "subject_csv_dir", "out_dir"):
+    # Paths -> Path objects (IMPORTANT: do NOT convert back to str)
+    for k in ("raw_dir", "subject_csv_dir", "bids_root", "derivatives_root", "sourcedata_root"):
         v = cfg["paths"].get(k)
         if v is not None:
             cfg["paths"][k] = Path(v)
+    conversion_root = cfg["conversion"].get("bids_output_root")
+    if conversion_root is not None:
+        cfg["conversion"]["bids_output_root"] = Path(conversion_root)
+    csv_fallback = cfg["events"].get("csv_fallback_dir")
+    if csv_fallback is not None:
+        cfg["events"]["csv_fallback_dir"] = Path(csv_fallback)
+
+    for key in ("subjects", "sessions", "tasks", "runs"):
+        values = cfg["bids"].get(key)
+        if values is None:
+            cfg["bids"][key] = None
+        elif isinstance(values, (list, tuple)):
+            cfg["bids"][key] = [str(v) for v in values]
+        else:
+            cfg["bids"][key] = [str(values)]
 
     # Int lists
     cfg["events"]["behavioral_keep_codes"] = _as_int_list(cfg["events"].get("behavioral_keep_codes", []))
-    cfg["events"]["eventcode_cleanup"] = str(cfg["events"].get("eventcode_cleanup", "none")).lower()
     cfg["events"]["standard_codes"] = _as_int_list(cfg["events"].get("standard_codes", []))
     cfg["events"]["deviant_codes"] = _as_int_list(cfg["events"].get("deviant_codes", []))
     cfg["events"]["condition_map"] = _normalize_condition_map(cfg["events"].get("condition_map", None))
-    collapse_bursts_s = cfg["events"].get("collapse_eeg_marker_bursts_s", None)
-    cfg["events"]["collapse_eeg_marker_bursts_s"] = (
-        None if collapse_bursts_s in (None, "null", "None") else float(collapse_bursts_s)
-    )
-    cfg["events"]["collapse_eeg_marker_bursts_keep"] = str(
-        cfg["events"].get("collapse_eeg_marker_bursts_keep", "first")
-    ).lower()
 
     # Floats
     cfg["preprocess"]["l_freq"] = float(cfg["preprocess"]["l_freq"])
@@ -383,25 +396,12 @@ def _normalize_config(cfg: dict[str, Any]) -> dict[str, Any]:
     cfg["ica"]["decim"] = int(cfg["ica"]["decim"])
     cfg["ica"]["corr_thresh"] = float(cfg["ica"]["corr_thresh"])
     cfg["ica"]["max_exclude"] = int(cfg["ica"]["max_exclude"])
-    cfg["ica"]["save_ica"] = _as_bool(cfg["ica"]["save_ica"], field="ica.save_ica")
+    cfg["ica"]["save_ica"] = bool(cfg["ica"]["save_ica"])
 
     # Token map convenience normalization -> {"token1": "...", "token2": "..."} or None
     cfg["labels"]["token_map"] = _normalize_token_map(cfg["labels"].get("token_map"))
 
     # Metrics conditions (optional)
-    cfg["metrics"]["erp"]["enabled"] = _as_bool(
-        cfg["metrics"]["erp"].get("enabled", True),
-        field="metrics.erp.enabled",
-    )
-    cfg["metrics"]["erp"]["timeseries"] = _as_bool(
-        cfg["metrics"]["erp"].get("timeseries", False),
-        field="metrics.erp.timeseries",
-    )
-    cfg["metrics"]["tfr"]["enabled"] = _as_bool(
-        cfg["metrics"]["tfr"].get("enabled", False),
-        field="metrics.tfr.enabled",
-    )
-
     conds = cfg["metrics"]["erp"].get("conditions", None)
     if conds is not None:
         if isinstance(conds, (list, tuple)):
@@ -411,9 +411,13 @@ def _normalize_config(cfg: dict[str, Any]) -> dict[str, Any]:
 
     # Compute (optional GPU acceleration)
     compute_cfg = cfg.get("compute", {})
-    cfg["compute"]["use_gpu"] = _as_bool(compute_cfg.get("use_gpu", False), field="compute.use_gpu")
+    cfg["compute"]["use_gpu"] = bool(compute_cfg.get("use_gpu", False))
     gd = compute_cfg.get("gpu_device", None)
     cfg["compute"]["gpu_device"] = None if gd in (None, "null", "None", "") else int(gd)
+
+    conv_cfg = cfg.get("conversion", {})
+    cfg["conversion"]["enabled"] = bool(conv_cfg.get("enabled", False))
+    cfg["conversion"]["overwrite"] = bool(conv_cfg.get("overwrite", True))
 
     return cfg
 
@@ -432,20 +436,6 @@ def _as_float_list(x: Any) -> list[float]:
     if isinstance(x, (tuple, list)):
         return [float(v) for v in x]
     return [float(x)]
-
-
-def _as_bool(x: Any, *, field: str) -> bool:
-    if isinstance(x, bool):
-        return x
-    if isinstance(x, int) and x in {0, 1}:
-        return bool(x)
-    if isinstance(x, str):
-        value = x.strip().lower()
-        if value in {"true", "yes", "y", "1", "on"}:
-            return True
-        if value in {"false", "no", "n", "0", "off"}:
-            return False
-    raise ValueError(f"{field} must be a boolean value.")
 
 
 def _parse_n_components(x: Any) -> int | float:

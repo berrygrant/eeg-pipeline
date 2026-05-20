@@ -1,0 +1,240 @@
+:root {
+  color-scheme: light;
+  --bg: #f7f7f4;
+  --panel: #ffffff;
+  --line: #d8d8d0;
+  --text: #1f2428;
+  --muted: #65717a;
+  --accent: #176b87;
+  --accent-dark: #10546a;
+  --warn: #8a4b00;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+button {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text);
+  font: inherit;
+  font-weight: 650;
+  padding: 9px 14px;
+  cursor: pointer;
+}
+
+button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: white;
+}
+
+button:hover {
+  border-color: var(--accent-dark);
+}
+
+.app-shell {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+
+.toolbar,
+.panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+h2 {
+  font-size: 16px;
+  margin-bottom: 12px;
+}
+
+#backendStatus,
+.count,
+.summary dd {
+  color: var(--muted);
+}
+
+.panel {
+  padding: 14px;
+}
+
+.project-panel {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) auto;
+  gap: 20px;
+  align-items: end;
+}
+
+label {
+  display: grid;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.path-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  gap: 8px;
+}
+
+input[type="text"],
+input:not([type]) {
+  min-width: 0;
+}
+
+#configPath {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+  padding: 9px 10px;
+}
+
+.stage-grid {
+  display: grid;
+  grid-template-columns: repeat(5, max-content);
+  gap: 12px;
+}
+
+.stage-grid label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.content-grid {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.8fr) minmax(480px, 1.2fr);
+  gap: 14px;
+}
+
+.summary {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 8px 12px;
+  margin: 0;
+}
+
+.summary dt {
+  font-weight: 700;
+}
+
+.summary dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.warnings {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.warnings p {
+  border-left: 3px solid var(--warn);
+  background: #fff7eb;
+  color: var(--warn);
+  padding: 8px 10px;
+}
+
+.warnings .error {
+  border-left-color: #b42318;
+  background: #fff1f0;
+  color: #9f1c13;
+}
+
+.table-wrap {
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  margin-top: 12px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th,
+td {
+  border-bottom: 1px solid var(--line);
+  padding: 8px 10px;
+  text-align: left;
+}
+
+th {
+  position: sticky;
+  top: 0;
+  background: #f1f3ef;
+}
+
+.run-panel {
+  min-height: 270px;
+}
+
+.run-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+#jobStatus {
+  color: var(--accent-dark);
+  font-weight: 800;
+}
+
+#logs {
+  min-height: 220px;
+  max-height: 340px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #15191d;
+  color: #e9edf0;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 1000px) {
+  .content-grid,
+  .project-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .stage-grid {
+    grid-template-columns: repeat(2, max-content);
+  }
+}
+
