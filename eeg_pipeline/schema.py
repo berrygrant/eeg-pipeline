@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from typing import Iterable, Optional
 
 
+NA_SENTINEL = "NA"
+UNKNOWN_CONDITION = "UNKNOWN"
+
+
 @dataclass(frozen=True)
 class SchemaV1Config:
     """
@@ -130,7 +134,7 @@ def derive_metadata_v1(
     df.loc[df["A"].isin(cfg.reduced_A), "vowel_variant"] = "reduced"
 
     # Which token is standard in this block
-    df["standard_token_role"] = "NA"
+    df["standard_token_role"] = NA_SENTINEL
     df.loc[df["A"].isin(cfg.token1_standard_A), "standard_token_role"] = "token1"
     df.loc[df["A"].isin(cfg.token2_standard_A), "standard_token_role"] = "token2"
 
@@ -138,7 +142,7 @@ def derive_metadata_v1(
     df["deviant_token_role"] = (
         df["standard_token_role"]
         .map({"token1": "token2", "token2": "token1"})
-        .fillna("NA")
+        .fillna(NA_SENTINEL)
     )
 
     # Trial token role depends on standard vs deviant
@@ -146,7 +150,7 @@ def derive_metadata_v1(
     std_role = df["standard_token_role"].to_numpy()
     dev_role = df["deviant_token_role"].to_numpy()
 
-    df["trial_token_role"] = "NA"
+    df["trial_token_role"] = NA_SENTINEL
     df.loc[is_std, "trial_token_role"] = std_role[is_std]
     df.loc[~is_std, "trial_token_role"] = dev_role[~is_std]
 
@@ -187,7 +191,7 @@ def derive_metadata_from_condition_map(
             code_to_name[int(c)] = str(name)
 
     codes_arr = np.asarray(codes, dtype=int)
-    cond = [code_to_name.get(int(c), "UNKNOWN") for c in codes_arr]
+    cond = [code_to_name.get(int(c), UNKNOWN_CONDITION) for c in codes_arr]
 
     # Parse condition name -> stimulus/task/environment (best-effort)
     stim = []
@@ -205,22 +209,22 @@ def derive_metadata_from_condition_map(
             left_l = left.lower()
             if left_l.startswith("nt"):
                 stim.append("nt")
-                task.append(left[2:] or "NA")
+                task.append(left[2:] or NA_SENTINEL)
             elif left_l.startswith("t"):
                 stim.append("t")
-                task.append(left[1:] or "NA")
+                task.append(left[1:] or NA_SENTINEL)
             else:
                 stim.append(left)
-                task.append("NA")
+                task.append(NA_SENTINEL)
             env.append(right)
         elif len(parts) == 1:
             stim.append(parts[0])
-            task.append("NA")
-            env.append("NA")
+            task.append(NA_SENTINEL)
+            env.append(NA_SENTINEL)
         else:
-            stim.append("NA")
-            task.append("NA")
-            env.append("NA")
+            stim.append(NA_SENTINEL)
+            task.append(NA_SENTINEL)
+            env.append(NA_SENTINEL)
 
     df = pd.DataFrame(
         {

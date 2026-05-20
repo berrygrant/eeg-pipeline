@@ -102,9 +102,12 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
     set_default(cfg, "preprocess.h_freq", 30.0)
 
     set_default(cfg, "events.behavioral_keep_codes", [])
+    set_default(cfg, "events.eventcode_cleanup", "none")
     set_default(cfg, "events.standard_codes", [])
     set_default(cfg, "events.deviant_codes", [])
     set_default(cfg, "events.condition_map", None)
+    set_default(cfg, "events.collapse_eeg_marker_bursts_s", None)
+    set_default(cfg, "events.collapse_eeg_marker_bursts_keep", "first")
     set_default(cfg, "events.drop_eeg_markers_by_gap_s", None)
     set_default(cfg, "events.auto_drop_to_count", True)
 
@@ -254,6 +257,23 @@ def _validate_config(cfg: Dict[str, Any]) -> None:
             except Exception:
                 errors.append("events.condition_map values must be integers (or lists of integers).")
 
+    eventcode_cleanup = str(config_get(cfg, "events.eventcode_cleanup", "none")).lower()
+    if eventcode_cleanup not in {"none", "mprocacc_thesis"}:
+        errors.append("events.eventcode_cleanup must be one of: none | mprocacc_thesis.")
+
+    collapse_bursts_s = config_get(cfg, "events.collapse_eeg_marker_bursts_s", None)
+    if collapse_bursts_s not in (None, "null", "None"):
+        try:
+            collapse_bursts_s = float(collapse_bursts_s)
+            if collapse_bursts_s < 0:
+                errors.append("events.collapse_eeg_marker_bursts_s must be >= 0.")
+        except Exception:
+            errors.append("events.collapse_eeg_marker_bursts_s must be a number >= 0.")
+
+    collapse_keep = str(config_get(cfg, "events.collapse_eeg_marker_bursts_keep", "first")).lower()
+    if collapse_keep not in {"first", "last"}:
+        errors.append("events.collapse_eeg_marker_bursts_keep must be one of: first | last.")
+
     # ERP windows sanity
     erp_windows = config_get(cfg, "metrics.erp.windows", [])
     if erp_windows:
@@ -302,9 +322,17 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     # Int lists
     cfg["events"]["behavioral_keep_codes"] = _as_int_list(cfg["events"].get("behavioral_keep_codes", []))
+    cfg["events"]["eventcode_cleanup"] = str(cfg["events"].get("eventcode_cleanup", "none")).lower()
     cfg["events"]["standard_codes"] = _as_int_list(cfg["events"].get("standard_codes", []))
     cfg["events"]["deviant_codes"] = _as_int_list(cfg["events"].get("deviant_codes", []))
     cfg["events"]["condition_map"] = _normalize_condition_map(cfg["events"].get("condition_map", None))
+    collapse_bursts_s = cfg["events"].get("collapse_eeg_marker_bursts_s", None)
+    cfg["events"]["collapse_eeg_marker_bursts_s"] = (
+        None if collapse_bursts_s in (None, "null", "None") else float(collapse_bursts_s)
+    )
+    cfg["events"]["collapse_eeg_marker_bursts_keep"] = str(
+        cfg["events"].get("collapse_eeg_marker_bursts_keep", "first")
+    ).lower()
 
     # Floats
     cfg["preprocess"]["l_freq"] = float(cfg["preprocess"]["l_freq"])

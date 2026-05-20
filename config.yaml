@@ -19,8 +19,11 @@ preprocess:
 
 events:
   behavioral_keep_codes: [110, 111, 210, 211, 310, 311, 410, 411]
+  eventcode_cleanup: none       # use mprocacc_thesis for Maria's full/reduced eventcode files
   standard_codes: [110, 210] # Full vowel codes. For reduced, use 310 410 
   deviant_codes: [111, 211]  # Full vowel codes. For reduced, use 311 411
+  collapse_eeg_marker_bursts_s: null  # e.g., 0.02 to collapse StimTrak bursts within 20 ms
+  collapse_eeg_marker_bursts_keep: first
   drop_eeg_markers_by_gap_s: null
   auto_drop_to_count: true
 

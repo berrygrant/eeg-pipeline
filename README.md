@@ -28,6 +28,8 @@ Questions? Try the [ChatGPT eeg-pipeline Assistant](https://chatgpt.com/g/g-6998
 
 ### Event alignment
 - Alignment of EEG markers to behavioral event codes
+- Optional eventcode cleanup modes for task-specific behavioral logging quirks
+- Optional burst collapsing for duplicate StimTrak triggers before alignment
 - Gap-based heuristics for boundary marker removal
 - Automatic trimming when EEG markers exceed behavioral codes
 - Explicit support for **standard vs. deviant** contrasts
@@ -142,8 +144,11 @@ preprocess:
 
 events:
   behavioral_keep_codes: [110, 111, 210, 211]
+  eventcode_cleanup: none
   standard_codes: [110, 210]
   deviant_codes: [111, 211]
+  collapse_eeg_marker_bursts_s: 0.02
+  collapse_eeg_marker_bursts_keep: first
 
 epoching:
   tmin: -0.2

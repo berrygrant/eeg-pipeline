@@ -37,6 +37,14 @@ def test_derive_metadata_v1_builds_expected_labels():
     assert list(df["trial_token"]) == ["EH", "IH", "IH"]
 
 
+def test_derive_metadata_v1_uses_na_sentinel_for_practice_blocks():
+    df = derive_metadata_v1([110, 911])
+
+    assert list(df["is_practice"]) == [False, True]
+    assert list(df["is_main"]) == [True, False]
+    assert list(df["trial_token"]) == ["token1", "NA"]
+
+
 def test_derive_metadata_from_condition_map_parses_named_and_unknown_conditions():
     df = derive_metadata_from_condition_map(
         [1, 2, 3, 999],

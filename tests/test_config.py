@@ -25,6 +25,9 @@ def test_load_config_json_applies_defaults_and_normalizes_types(tmp_path: Path):
                     "standard_codes": ["110"],
                     "deviant_codes": ["111"],
                     "behavioral_keep_codes": ["110", "111"],
+                    "eventcode_cleanup": "MPROCACC_THESIS",
+                    "collapse_eeg_marker_bursts_s": "0.02",
+                    "collapse_eeg_marker_bursts_keep": "LAST",
                 },
                 "ica": {"n_components": "20"},
                 "labels": {"token_map": ["Token1=EH", "Token2=IH"]},
@@ -42,6 +45,9 @@ def test_load_config_json_applies_defaults_and_normalizes_types(tmp_path: Path):
     assert cfg["preprocess"]["notch_hz"] == [60.0]
     assert cfg["events"]["standard_codes"] == [110]
     assert cfg["events"]["deviant_codes"] == [111]
+    assert cfg["events"]["eventcode_cleanup"] == "mprocacc_thesis"
+    assert cfg["events"]["collapse_eeg_marker_bursts_s"] == pytest.approx(0.02)
+    assert cfg["events"]["collapse_eeg_marker_bursts_keep"] == "last"
     assert cfg["ica"]["n_components"] == 20
     assert cfg["labels"]["token_map"] == {"token1": "EH", "token2": "IH"}
     assert cfg["metrics"]["erp"]["enabled"] is True
@@ -67,6 +73,54 @@ def test_load_config_rejects_invalid_overlapping_standard_and_deviant_codes(tmp_
     )
 
     with pytest.raises(ValueError, match="Standard/deviant code overlap not allowed"):
+        load_config(cfg_path)
+
+
+def test_load_config_rejects_invalid_burst_keep_strategy(tmp_path: Path):
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "paths": {
+                    "raw_dir": "/tmp/raw",
+                    "subject_csv_dir": "/tmp/subject_csv",
+                    "out_dir": "/tmp/out",
+                },
+                "events": {
+                    "standard_codes": [110],
+                    "deviant_codes": [111],
+                    "collapse_eeg_marker_bursts_keep": "middle",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="events.collapse_eeg_marker_bursts_keep"):
+        load_config(cfg_path)
+
+
+def test_load_config_rejects_invalid_eventcode_cleanup_mode(tmp_path: Path):
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "paths": {
+                    "raw_dir": "/tmp/raw",
+                    "subject_csv_dir": "/tmp/subject_csv",
+                    "out_dir": "/tmp/out",
+                },
+                "events": {
+                    "standard_codes": [110],
+                    "deviant_codes": [111],
+                    "eventcode_cleanup": "maria_magic",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="events.eventcode_cleanup"):
         load_config(cfg_path)
 
 

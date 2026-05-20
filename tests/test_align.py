@@ -3,6 +3,7 @@ import pytest
 
 from eeg_pipeline.align import (
     align_marker_positions_to_codes,
+    collapse_marker_bursts,
     keep_best_dense_markers_to_count,
     keep_by_gap_heuristic,
     marker_gap_stats,
@@ -44,6 +45,29 @@ def test_keep_best_dense_markers_to_count_rejects_large_target():
         keep_best_dense_markers_to_count(np.array([0, 10], dtype=int), sfreq=10.0, target_n=3)
 
 
+def test_collapse_marker_bursts_keeps_first_marker_in_each_burst():
+    markers = np.array([0, 1, 2, 20, 40, 41], dtype=int)
+
+    collapsed, diag = collapse_marker_bursts(markers, sfreq=100.0, min_iti_s=0.02, keep="first")
+
+    assert np.array_equal(collapsed, np.array([0, 20, 40], dtype=int))
+    assert diag == {
+        "markers_after_burst_collapse": 3,
+        "markers_dropped_by_burst": 3,
+        "burst_groups_collapsed": 2,
+        "burst_max_group_size": 3,
+    }
+
+
+def test_collapse_marker_bursts_can_keep_last_marker_in_each_burst():
+    markers = np.array([0, 1, 2, 20, 40, 41], dtype=int)
+
+    collapsed, diag = collapse_marker_bursts(markers, sfreq=100.0, min_iti_s=0.02, keep="last")
+
+    assert np.array_equal(collapsed, np.array([2, 20, 41], dtype=int))
+    assert diag["markers_dropped_by_burst"] == 3
+
+
 def test_align_marker_positions_to_codes_auto_drops_to_match_length():
     markers = np.array([0, 10, 20, 30], dtype=int)
     codes = np.array([101, 102], dtype=int)
@@ -59,8 +83,38 @@ def test_align_marker_positions_to_codes_auto_drops_to_match_length():
     assert np.array_equal(aligned, np.array([10, 20], dtype=int))
     assert diag == {
         "markers_original": 4,
+        "markers_after_burst_collapse": 4,
+        "markers_dropped_by_burst": 0,
+        "burst_groups_collapsed": 0,
+        "burst_max_group_size": 1,
         "markers_dropped_by_gap": 0,
         "markers_dropped_by_auto": 2,
+    }
+
+
+def test_align_marker_positions_to_codes_collapses_bursts_before_auto_drop():
+    markers = np.array([0, 1, 20, 21, 40], dtype=int)
+    codes = np.array([101, 102, 103], dtype=int)
+
+    aligned, diag = align_marker_positions_to_codes(
+        markers_pos=markers,
+        sfreq=100.0,
+        codes=codes,
+        gap_s=None,
+        auto_drop_to_count=True,
+        collapse_bursts_s=0.02,
+        collapse_keep="first",
+    )
+
+    assert np.array_equal(aligned, np.array([0, 20, 40], dtype=int))
+    assert diag == {
+        "markers_original": 5,
+        "markers_after_burst_collapse": 3,
+        "markers_dropped_by_burst": 2,
+        "burst_groups_collapsed": 2,
+        "burst_max_group_size": 2,
+        "markers_dropped_by_gap": 0,
+        "markers_dropped_by_auto": 0,
     }
 
 
