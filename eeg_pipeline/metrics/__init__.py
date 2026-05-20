@@ -7,8 +7,8 @@ Designed to run on:
 - EEGLAB epochs: *.set
 """
 
-from .io import load_epochs
 from .erp import compute_erp_metrics
+from .io import load_epochs
 from .tfr import compute_tfr_metrics
 
 __all__ = ["load_epochs", "compute_erp_metrics", "compute_tfr_metrics"]

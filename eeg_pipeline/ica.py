@@ -1,13 +1,10 @@
-# mmn_pipeline/ica.py
-
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple, Optional, Union
+from typing import Any
 
-import numpy as np
 import mne
-import re
+import numpy as np
 
 
 @dataclass
@@ -41,11 +38,11 @@ class ICAParams:
     """
 
     method: str = "fastica"
-    n_components: Union[float, int] = 0.99
+    n_components: float | int = 0.99
     random_state: int = 97
     max_iter: int = 512
     fit_l_freq: float = 1.0
-    fit_h_freq: Optional[float] = None
+    fit_h_freq: float | None = None
     decim: int = 3
     corr_thresh: float = 0.30
     max_exclude: int = 3
@@ -74,12 +71,12 @@ def _safe_pick_channels(info: mne.Info, names: list[str]) -> list[int]:
     return picks
 
 
-def fit_ica(raw: mne.io.BaseRaw, params: ICAParams) -> Tuple[Optional[mne.preprocessing.ICA], Dict[str, Any]]:
+def fit_ica(raw: mne.io.BaseRaw, params: ICAParams) -> tuple[mne.preprocessing.ICA | None, dict[str, Any]]:
     """
     Fit ICA on a filtered copy of `raw` (ICA-only filtering), returning (ica, diagnostics).
     If ICA cannot be fit (e.g., PCA collapses to 1 component), returns (None, diag) instead of crashing.
     """
-    diag: Dict[str, Any] = {
+    diag: dict[str, Any] = {
         "ica_fit_ok": False,
         "ica_fit_error": "",
         "ica_fit_retry": "",
@@ -108,7 +105,7 @@ def fit_ica(raw: mne.io.BaseRaw, params: ICAParams) -> Tuple[Optional[mne.prepro
         diag["ica_fit_error"] = f"Need >=2 EEG channels for ICA, got {len(picks_eeg)}."
         return None, diag
 
-    def _try_fit(n_components: Union[float, int]) -> mne.preprocessing.ICA:
+    def _try_fit(n_components: float | int) -> mne.preprocessing.ICA:
         ica = mne.preprocessing.ICA(
             method=params.method,
             n_components=n_components,

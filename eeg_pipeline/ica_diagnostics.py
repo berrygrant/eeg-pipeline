@@ -1,8 +1,7 @@
-# mmn_pipeline/ica_diagnostics.py
 from __future__ import annotations
-import numpy as np
-import mne
 
+import mne
+import numpy as np
 from mne.preprocessing import find_eog_events
 
 

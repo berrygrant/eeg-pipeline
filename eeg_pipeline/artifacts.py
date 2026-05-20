@@ -1,9 +1,9 @@
-# mmn_pipeline/artifacts.py
 from __future__ import annotations
 
 import numpy as np
 
-from .gpu import get_xp, to_numpy, backend as gpu_backend
+from .gpu import backend as gpu_backend
+from .gpu import get_xp, to_numpy
 
 
 def _to_uV(x: np.ndarray) -> np.ndarray:
@@ -46,7 +46,7 @@ def moving_window_ptp_mask(
     if win_samp > n_times:
         # Degenerate: window larger than data
         ptp = x.max(axis=-1) - x.min(axis=-1)  # (n_epochs, n_ch)
-        return _maybe_to_numpy((ptp.max(axis=1) >= threshold_uv))
+        return _maybe_to_numpy(ptp.max(axis=1) >= threshold_uv)
 
     bad = xp.zeros(n_epochs, dtype=bool)
     for start in range(0, n_times - win_samp + 1, step_samp):

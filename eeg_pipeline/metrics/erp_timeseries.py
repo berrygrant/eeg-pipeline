@@ -1,12 +1,22 @@
 # eeg_pipeline/metrics/erp_timeseries.py
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
+import mne
 import numpy as np
 import pandas as pd
-import mne
+
+ERP_TIMESERIES_COLUMNS = [
+    "subject",
+    "condition",
+    "n_epochs",
+    "channel",
+    "time_s",
+    "amplitude_uv",
+    "status",
+]
 
 
 @dataclass
@@ -60,7 +70,7 @@ def compute_erp_timeseries(
     *,
     subject: str,
     channels: Sequence[str],
-    params: ERPTimeSeriesParams = ERPTimeSeriesParams(),
+    params: ERPTimeSeriesParams | None = None,
     conditions: Sequence[str] = ("Standard", "Deviant"),
     include_difference_wave: bool = True,
     difference_label: str = "DEV_MINUS_STD",
@@ -70,8 +80,24 @@ def compute_erp_timeseries(
 
     Returns tidy long DataFrame.
     """
+    if params is None:
+        params = ERPTimeSeriesParams()
+
     if epochs is None or len(epochs) == 0:
-        return pd.DataFrame([{"subject": subject, "status": "EMPTY_EPOCHS"}])
+        return pd.DataFrame(
+            [
+                {
+                    "subject": subject,
+                    "condition": "",
+                    "n_epochs": 0,
+                    "channel": "",
+                    "time_s": np.nan,
+                    "amplitude_uv": np.nan,
+                    "status": "EMPTY_EPOCHS",
+                }
+            ],
+            columns=ERP_TIMESERIES_COLUMNS,
+        )
 
     chs = _safe_pick_channels(epochs, channels)
 
@@ -125,8 +151,21 @@ def compute_erp_timeseries(
         )
 
     if not out:
-        return pd.DataFrame([{"subject": subject, "status": "NO_CONDITIONS"}])
+        return pd.DataFrame(
+            [
+                {
+                    "subject": subject,
+                    "condition": "",
+                    "n_epochs": 0,
+                    "channel": "",
+                    "time_s": np.nan,
+                    "amplitude_uv": np.nan,
+                    "status": "NO_CONDITIONS",
+                }
+            ],
+            columns=ERP_TIMESERIES_COLUMNS,
+        )
 
     df = pd.concat(out, ignore_index=True)
     df["status"] = "OK"
-    return df
+    return df[ERP_TIMESERIES_COLUMNS]

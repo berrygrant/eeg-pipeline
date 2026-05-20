@@ -19,7 +19,6 @@ from eeg_pipeline import __version__
 from eeg_pipeline.config import config_get, load_config
 from eeg_pipeline.inputs import discover_pipeline_recordings
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 

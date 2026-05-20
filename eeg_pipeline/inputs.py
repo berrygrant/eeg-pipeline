@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import re
 import shutil
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 import mne
 import pandas as pd
@@ -13,7 +13,6 @@ from .align import align_marker_positions_to_codes
 from .behavior import filter_codes, read_eventcodes_from_subject_csv
 from .bids import (
     BIDS_VERSION,
-    BIDSRecording,
     PIPELINE_NAME,
     build_bids_basename,
     discover_bids_eeg_recordings,

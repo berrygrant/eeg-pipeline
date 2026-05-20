@@ -15,9 +15,9 @@ import json
 import os
 import re
 import subprocess
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 # Avoid numba cache locator issues in some sandboxed/readonly environments.
 os.environ.setdefault("NUMBA_DISABLE_JIT", "1")

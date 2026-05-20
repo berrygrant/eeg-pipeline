@@ -4,6 +4,7 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 from urllib import request
+from urllib.error import HTTPError
 
 import pytest
 
@@ -324,9 +325,9 @@ def test_handler_serves_jobs_and_error_paths(monkeypatch):
             jobs = json.loads(response.read().decode("utf-8"))
         with request.urlopen(f"{base_url}/api/jobs/job-1", timeout=5) as response:
             job_payload = json.loads(response.read().decode("utf-8"))
-        with pytest.raises(Exception):
+        with pytest.raises(HTTPError):
             request.urlopen(f"{base_url}/api/jobs/missing", timeout=5)
-        with pytest.raises(Exception):
+        with pytest.raises(HTTPError):
             request.urlopen(f"{base_url}/api/unknown", timeout=5)
         discover_post = request.Request(
             f"{base_url}/api/recordings/discover",
@@ -350,7 +351,7 @@ def test_handler_serves_jobs_and_error_paths(monkeypatch):
             headers={"content-type": "application/json"},
             method="POST",
         )
-        with pytest.raises(Exception):
+        with pytest.raises(HTTPError):
             request.urlopen(post, timeout=5)
     finally:
         server.shutdown()

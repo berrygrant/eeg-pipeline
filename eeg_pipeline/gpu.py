@@ -1,17 +1,14 @@
 # eeg_pipeline/gpu.py
 from __future__ import annotations
 
-from typing import Optional
-
 import numpy as np
-
 
 _XP = np
 _BACKEND = "numpy"
 _GPU_ENABLED = False
 _MNE_CUDA_STATUS = "disabled"
 _CUPY_STATUS = "disabled"
-_DEVICE: Optional[int] = None
+_DEVICE: int | None = None
 
 
 def _set_backend(xp, name: str, enabled: bool) -> None:
@@ -21,7 +18,7 @@ def _set_backend(xp, name: str, enabled: bool) -> None:
     _GPU_ENABLED = bool(enabled)
 
 
-def _try_init_mne_cuda(device: Optional[int]) -> str:
+def _try_init_mne_cuda(device: int | None) -> str:
     try:
         import mne  # noqa: F401
     except Exception as e:
@@ -44,7 +41,7 @@ def _try_init_mne_cuda(device: Optional[int]) -> str:
         return f"error: {e}"
 
 
-def _try_init_cupy(device: Optional[int]):
+def _try_init_cupy(device: int | None):
     try:
         import cupy as cp  # type: ignore
 
@@ -55,7 +52,7 @@ def _try_init_cupy(device: Optional[int]):
         return f"unavailable: {e}", None
 
 
-def configure(use_gpu: bool, device: Optional[int] = None) -> dict:
+def configure(use_gpu: bool, device: int | None = None) -> dict:
     """Configure optional GPU acceleration.
 
     Returns a status dict with backend + availability information.

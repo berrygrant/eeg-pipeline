@@ -5,10 +5,10 @@ scipy
 pandas
 pyarrow
 PyYAML
-cupy #for GPU support. Adjust for your CUDA version
 
 # Visualization dependencies
 matplotlib
 seaborn
 # Optional extras
+# cupy  # GPU support; install a CUDA-compatible CuPy build for your system.
 # picard

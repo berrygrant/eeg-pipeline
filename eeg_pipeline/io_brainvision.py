@@ -1,9 +1,12 @@
-# mmn_pipeline/io_brainvision.py
 from __future__ import annotations
 
+import re
 from pathlib import Path
+
 import mne
 import pandas as pd
+
+_BV_KEY_RE = re.compile(r"^(?P<key>\w+)\s*=\s*(?P<val>.+?)\s*$", re.MULTILINE)
 
 
 def read_raw_preprocess(
@@ -86,6 +89,31 @@ def read_raw_preprocess(
 def events_from_annotations_positions(raw):
     events, _ = mne.events_from_annotations(raw)
     return events
+
+
+def brainvision_links_ok(vhdr_path: Path) -> tuple[bool, str]:
+    """Return whether a BrainVision header references existing marker/data files."""
+    txt = vhdr_path.read_text(encoding="utf-8", errors="replace")
+    marker = _bv_get(txt, "MarkerFile")
+    data = _bv_get(txt, "DataFile")
+
+    missing = []
+    if marker and not (vhdr_path.parent / marker).exists():
+        missing.append(f"MarkerFile={marker}")
+    if data and not (vhdr_path.parent / data).exists():
+        missing.append(f"DataFile={data}")
+
+    if missing:
+        return False, "Missing referenced file(s): " + ", ".join(missing)
+    return True, ""
+
+
+def _bv_get(txt: str, key: str) -> str | None:
+    key_l = key.lower()
+    for match in _BV_KEY_RE.finditer(txt):
+        if match.group("key").strip().lower() == key_l:
+            return match.group("val").strip()
+    return None
 
 
 def parse_vmrk_markers(vmrk_path: Path) -> pd.DataFrame:

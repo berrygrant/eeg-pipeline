@@ -1,8 +1,8 @@
+import sys
+import types
 from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
-import sys
-import types
 
 import numpy as np
 import pandas as pd

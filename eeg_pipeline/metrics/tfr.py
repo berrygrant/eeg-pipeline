@@ -1,12 +1,12 @@
 # eeg_pipeline/metrics/tfr.py
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence, Optional
 
+import mne
 import numpy as np
 import pandas as pd
-import mne
 
 
 @dataclass(frozen=True)
@@ -17,7 +17,7 @@ class TFRParams:
     method: str = "multitaper"  # "morlet" or "multitaper"
     n_cycles_div: float = 10.0  # n_cycles = freqs / n_cycles_div
     decim: int = 1
-    baseline: Optional[tuple[float, float]] = (-0.1, 0.0)
+    baseline: tuple[float, float] | None = (-0.1, 0.0)
     mode: str = "logratio"  # apply_baseline mode
 
 
@@ -46,7 +46,6 @@ def _compute_tfr_epochs(epochs: mne.Epochs, freqs: np.ndarray, params: TFRParams
 
 def _compute_tfr_evoked(evoked: mne.Evoked, freqs: np.ndarray, params: TFRParams):
     """
-    IMPORTANT:
     Evoked.compute_tfr() has a different signature than Epochs.compute_tfr().
     In particular, it does NOT accept return_itc or average in many MNE versions.
     """
@@ -63,6 +62,58 @@ def _compute_tfr_evoked(evoked: mne.Evoked, freqs: np.ndarray, params: TFRParams
     return tfr
 
 
+def _empty_status_row(subject: str, condition: str, status: str) -> dict:
+    return dict(
+        subject=subject,
+        condition=condition,
+        channel="",
+        frequency=np.nan,
+        time=np.nan,
+        total_power=np.nan,
+        evoked_power=np.nan,
+        induced_power=np.nan,
+        itc=np.nan,
+        n_epochs=0,
+        status=status,
+    )
+
+
+def _tfr_condition_frame(
+    *,
+    subject: str,
+    condition: str,
+    ch_names: Sequence[str],
+    freqs: np.ndarray,
+    times: np.ndarray,
+    total_power: np.ndarray,
+    evoked_power: np.ndarray,
+    itc: np.ndarray,
+    n_epochs: int,
+) -> pd.DataFrame:
+    n_ch = len(ch_names)
+    n_freq = len(freqs)
+    n_times = len(times)
+
+    total_flat = total_power.reshape(-1)
+    evoked_flat = evoked_power.reshape(-1)
+
+    return pd.DataFrame(
+        {
+            "subject": subject,
+            "condition": condition,
+            "channel": np.repeat(np.asarray(ch_names, dtype=object), n_freq * n_times),
+            "frequency": np.tile(np.repeat(freqs.astype(float), n_times), n_ch),
+            "time": np.tile(times.astype(float), n_ch * n_freq),
+            "total_power": total_flat,
+            "evoked_power": evoked_flat,
+            "induced_power": total_flat - evoked_flat,
+            "itc": itc.reshape(-1),
+            "n_epochs": int(n_epochs),
+            "status": "OK",
+        }
+    )
+
+
 def compute_tfr_metrics(
     epochs: mne.Epochs,
     *,
@@ -71,7 +122,7 @@ def compute_tfr_metrics(
     tmin: float,
     tmax: float,
     conditions: Sequence[str] = ("Standard", "Deviant"),
-    params: TFRParams = TFRParams(),
+    params: TFRParams | None = None,
     time_decim: int = 1,
 ) -> pd.DataFrame:
     """
@@ -83,26 +134,11 @@ def compute_tfr_metrics(
 
     Output is a tidy DataFrame (subject × condition × channel × freq × time).
     """
+    if params is None:
+        params = TFRParams()
 
-    # ---- NEW: bail out early on empty epochs objects ----
     if epochs is None or len(epochs) == 0:
-        return pd.DataFrame(
-            [
-                dict(
-                    subject=subject,
-                    condition="",
-                    channel="",
-                    frequency=np.nan,
-                    time=np.nan,
-                    total_power=np.nan,
-                    evoked_power=np.nan,
-                    induced_power=np.nan,
-                    itc=np.nan,
-                    n_epochs=0,
-                    status="EMPTY_EPOCHS_OBJECT",
-                )
-            ]
-        )
+        return pd.DataFrame([_empty_status_row(subject, "", "EMPTY_EPOCHS_OBJECT")])
 
     channels = _safe_pick_channels(epochs, channels)
 
@@ -111,44 +147,16 @@ def compute_tfr_metrics(
 
     freqs = np.arange(params.fmin, params.fmax + params.fstep, params.fstep, dtype=float)
 
-    rows: list[dict] = []
+    frames: list[pd.DataFrame] = []
 
     for cond in conditions:
         if cond not in ep.event_id:
-            rows.append(
-                dict(
-                    subject=subject,
-                    condition=cond,
-                    channel="",
-                    frequency=np.nan,
-                    time=np.nan,
-                    total_power=np.nan,
-                    evoked_power=np.nan,
-                    induced_power=np.nan,
-                    itc=np.nan,
-                    n_epochs=0,
-                    status="MISSING_CONDITION",
-                )
-            )
+            frames.append(pd.DataFrame([_empty_status_row(subject, cond, "MISSING_CONDITION")]))
             continue
 
         ep_cond = ep[cond]
         if len(ep_cond) == 0:
-            rows.append(
-                dict(
-                    subject=subject,
-                    condition=cond,
-                    channel="",
-                    frequency=np.nan,
-                    time=np.nan,
-                    total_power=np.nan,
-                    evoked_power=np.nan,
-                    induced_power=np.nan,
-                    itc=np.nan,
-                    n_epochs=0,
-                    status="EMPTY",
-                )
-            )
+            frames.append(pd.DataFrame([_empty_status_row(subject, cond, "EMPTY")]))
             continue
 
         # Total power + ITC (averaged across epochs)
@@ -171,29 +179,20 @@ def compute_tfr_metrics(
                 "Total-power TFR and evoked-power TFR axes do not match; cannot compute induced power safely."
             )
 
-        induced = power_total.copy()
-        induced.data = power_total.data - tfr_evoked.data
-
-        # Flatten to rows
         t_step = max(1, int(time_decim))
-        for ch_i, ch in enumerate(power_total.ch_names):
-            for f_i, f in enumerate(power_total.freqs):
-                for t_i in range(0, len(power_total.times), t_step):
-                    tt = power_total.times[t_i]
-                    rows.append(
-                        dict(
-                            subject=subject,
-                            condition=cond,
-                            channel=ch,
-                            frequency=float(f),
-                            time=float(tt),
-                            total_power=float(power_total.data[ch_i, f_i, t_i]),
-                            evoked_power=float(tfr_evoked.data[ch_i, f_i, t_i]),
-                            induced_power=float(induced.data[ch_i, f_i, t_i]),
-                            itc=float(itc.data[ch_i, f_i, t_i]),
-                            n_epochs=int(len(ep_cond)),
-                            status="OK",
-                        )
-                    )
+        time_idx = np.arange(0, len(power_total.times), t_step, dtype=int)
+        frames.append(
+            _tfr_condition_frame(
+                subject=subject,
+                condition=cond,
+                ch_names=power_total.ch_names,
+                freqs=power_total.freqs,
+                times=power_total.times[time_idx],
+                total_power=power_total.data[:, :, time_idx],
+                evoked_power=tfr_evoked.data[:, :, time_idx],
+                itc=itc.data[:, :, time_idx],
+                n_epochs=len(ep_cond),
+            )
+        )
 
-    return pd.DataFrame(rows)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
