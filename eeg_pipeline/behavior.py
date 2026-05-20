@@ -1,10 +1,23 @@
 from __future__ import annotations
 
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
 from .schema import SchemaV1Config
+
+
+def subject_number_from_stem(stem: str) -> str:
+    s = stem.strip()
+    if s.lower().startswith("s") and s[1:].isdigit():
+        return s[1:]
+    if s.isdigit():
+        return s
+    digits = "".join(c for c in s if c.isdigit())
+    if not digits:
+        raise ValueError(f"Cannot parse subject number from '{stem}'")
+    return digits
 
 
 def resolve_subject_csv_path(subject_csv_dir: Path, subj_num: str, subj_stem: str | None = None) -> Path:

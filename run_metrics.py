@@ -3,15 +3,16 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from eeg_pipeline.gpu import capability_report, format_capability_report
+from eeg_pipeline.gpu import configure as configure_gpu
 from eeg_pipeline.metrics import (
     compute_erp_metrics,
     compute_tfr_metrics,
     load_epochs,
 )
-from eeg_pipeline.metrics.writers import append_csv
 from eeg_pipeline.metrics.erp_windows import ERP_WINDOWS
 from eeg_pipeline.metrics.tfr import TFRParams
-from eeg_pipeline.gpu import configure as configure_gpu, capability_report, format_capability_report
+from eeg_pipeline.metrics.writers import append_csv
 
 
 def _subject_from_filename(p: Path) -> str:

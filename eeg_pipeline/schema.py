@@ -1,8 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable, Optional
-
 
 NA_SENTINEL = "NA"
 UNKNOWN_CONDITION = "UNKNOWN"
@@ -32,7 +31,7 @@ class SchemaV1Config:
     practice_A: tuple[int, ...] = (8, 9)
 
 
-def parse_token_map(args: Optional[Iterable[str]]) -> dict[str, str]:
+def parse_token_map(args: Iterable[str] | None) -> dict[str, str]:
     """
     Accepts:
       --token_map EH IH

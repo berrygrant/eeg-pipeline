@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 
 # ----------------------------
 # Public API
 # ----------------------------
-def load_config(path: Union[str, Path]) -> Dict[str, Any]:
+def load_config(path: str | Path) -> dict[str, Any]:
     """
     Load a config file (YAML preferred; JSON supported) and validate/normalize it.
 
@@ -36,7 +36,7 @@ def load_config(path: Union[str, Path]) -> Dict[str, Any]:
     return cfg
 
 
-def config_get(cfg: Dict[str, Any], key_path: str, default: Any = None) -> Any:
+def config_get(cfg: dict[str, Any], key_path: str, default: Any = None) -> Any:
     """Simple dotted-path getter: config_get(cfg, 'events.standard_codes')."""
     cur: Any = cfg
     for part in key_path.split("."):
@@ -49,7 +49,7 @@ def config_get(cfg: Dict[str, Any], key_path: str, default: Any = None) -> Any:
 # ----------------------------
 # Reading
 # ----------------------------
-def _read_config_file(path: Path) -> Dict[str, Any]:
+def _read_config_file(path: Path) -> dict[str, Any]:
     suffix = path.suffix.lower()
 
     if suffix in {".yml", ".yaml"}:
@@ -73,9 +73,9 @@ def _read_config_file(path: Path) -> Dict[str, Any]:
 # ----------------------------
 # Defaults (minimal + sane)
 # ----------------------------
-def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
+def _apply_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
     # Only set defaults where missing; do not overwrite user values.
-    def set_default(d: Dict[str, Any], path: str, value: Any):
+    def set_default(d: dict[str, Any], path: str, value: Any):
         parts = path.split(".")
         cur = d
         for p in parts[:-1]:
@@ -169,8 +169,8 @@ def _apply_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
 # ----------------------------
 # Validation
 # ----------------------------
-def _validate_config(cfg: Dict[str, Any]) -> None:
-    errors: List[str] = []
+def _validate_config(cfg: dict[str, Any]) -> None:
+    errors: list[str] = []
 
     def require(path: str):
         val = config_get(cfg, path, None)
@@ -311,7 +311,7 @@ def _validate_config(cfg: Dict[str, Any]) -> None:
 # ----------------------------
 # Normalization (types + conveniences)
 # ----------------------------
-def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_config(cfg: dict[str, Any]) -> dict[str, Any]:
     cfg = dict(cfg)  # shallow copy; mutate nested dicts
 
     # Keep paths as Path objects so downstream code does not re-normalize strings.
@@ -418,7 +418,7 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return cfg
 
 
-def _as_int_list(x: Any) -> List[int]:
+def _as_int_list(x: Any) -> list[int]:
     if x is None:
         return []
     if isinstance(x, (tuple, list)):
@@ -426,7 +426,7 @@ def _as_int_list(x: Any) -> List[int]:
     return [int(x)]
 
 
-def _as_float_list(x: Any) -> List[float]:
+def _as_float_list(x: Any) -> list[float]:
     if x is None:
         return []
     if isinstance(x, (tuple, list)):
@@ -448,7 +448,7 @@ def _as_bool(x: Any, *, field: str) -> bool:
     raise ValueError(f"{field} must be a boolean value.")
 
 
-def _parse_n_components(x: Any) -> Union[int, float]:
+def _parse_n_components(x: Any) -> int | float:
     """
     MNE ICA n_components can be float (variance fraction) or int (#components).
     YAML may give int/float already; JSON may give number; CLI might give string.
@@ -469,13 +469,13 @@ def _parse_n_components(x: Any) -> Union[int, float]:
         return float(s)
 
 
-def _normalize_token_map(token_map: Any) -> Optional[Dict[str, str]]:
+def _normalize_token_map(token_map: Any) -> dict[str, str] | None:
     if token_map is None:
         return None
 
     # Allow dict form in YAML
     if isinstance(token_map, dict):
-        out: Dict[str, str] = {}
+        out: dict[str, str] = {}
         for k, v in token_map.items():
             lk = str(k).strip().lower()
             if lk in {"token1", "token2"}:
@@ -491,7 +491,7 @@ def _normalize_token_map(token_map: Any) -> Optional[Dict[str, str]]:
             return {"token1": parts[0], "token2": parts[1]}
 
         # Keyed: ["Token1=EH", "Token2=IH"] (case-insensitive keys)
-        out: Dict[str, str] = {}
+        out: dict[str, str] = {}
         for p in parts:
             if "=" not in p:
                 continue
@@ -511,12 +511,12 @@ def _normalize_token_map(token_map: Any) -> Optional[Dict[str, str]]:
     return None
 
 
-def _normalize_condition_map(condition_map: Any) -> Optional[Dict[str, list[int]]]:
+def _normalize_condition_map(condition_map: Any) -> dict[str, list[int]] | None:
     if condition_map is None:
         return None
     if not isinstance(condition_map, dict):
         raise ValueError("events.condition_map must be a mapping of name -> code(s).")
-    out: Dict[str, list[int]] = {}
+    out: dict[str, list[int]] = {}
     for k, v in condition_map.items():
         name = str(k)
         if isinstance(v, (list, tuple, set)):

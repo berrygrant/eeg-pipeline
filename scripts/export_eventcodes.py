@@ -5,19 +5,11 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from eeg_pipeline.behavior import resolve_subject_csv_path, write_eventcodes_csv
-
-
-def _subject_number_from_stem(stem: str) -> str:
-    s = stem.strip()
-    if s.lower().startswith("s") and s[1:].isdigit():
-        return s[1:]
-    if s.isdigit():
-        return s
-    digits = "".join(c for c in s if c.isdigit())
-    if not digits:
-        raise ValueError(f"Cannot parse subject number from '{stem}'")
-    return digits
+from eeg_pipeline.behavior import (
+    resolve_subject_csv_path,
+    subject_number_from_stem,
+    write_eventcodes_csv,
+)
 
 
 def _raw_files(raw_dir: Path) -> list[Path]:
@@ -49,7 +41,7 @@ def main(argv=None) -> int:
 
     for raw_path in raws:
         stem = raw_path.stem
-        subj_num = _subject_number_from_stem(stem)
+        subj_num = subject_number_from_stem(stem)
         subject_csv = resolve_subject_csv_path(behavioral_dir, subj_num, stem)
         out_csv = out_dir / f"{stem}-eventcodes.csv"
 

@@ -1,6 +1,5 @@
 from dataclasses import dataclass
-from typing import Literal, Dict
-
+from typing import Literal
 
 Polarity = Literal["positive", "negative", "absolute"]
 
@@ -14,7 +13,7 @@ class ERPWindow:
 
 
 # Canonical named windows
-ERP_WINDOWS: Dict[str, ERPWindow] = {
+ERP_WINDOWS: dict[str, ERPWindow] = {
     "MMN": ERPWindow(
         name="MMN",
         tmin=0.15,

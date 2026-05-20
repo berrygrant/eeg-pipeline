@@ -16,14 +16,14 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import List
 
 import pandas as pd
 
-from eeg_pipeline.metrics import load_epochs, compute_erp_metrics, compute_tfr_metrics
+from eeg_pipeline.gpu import capability_report, format_capability_report
+from eeg_pipeline.gpu import configure as configure_gpu
+from eeg_pipeline.metrics import compute_erp_metrics, compute_tfr_metrics, load_epochs
 from eeg_pipeline.metrics.tfr import TFRParams
 from eeg_pipeline.metrics.writers import append_csv
-from eeg_pipeline.gpu import configure as configure_gpu, capability_report, format_capability_report
 
 # Optional: pre-defined ERP windows, matching run_metrics.py
 try:
@@ -270,8 +270,8 @@ def _close_figures(figures) -> None:
 def _maybe_make_figures(
     *,
     out_dir: Path,
-    erp_rows: List[pd.DataFrame],
-    tfr_rows: List[pd.DataFrame],
+    erp_rows: list[pd.DataFrame],
+    tfr_rows: list[pd.DataFrame],
     args: argparse.Namespace,
 ):
     if not args.make_figures:
@@ -281,8 +281,8 @@ def _maybe_make_figures(
     # To keep this script lightweight and dependency-safe, we only generate
     # group-level ERP/TFR plots if MNE and matplotlib are available.
     try:
-        import mne  # noqa: F401
         import matplotlib.pyplot as plt  # noqa: F401
+        import mne  # noqa: F401
     except Exception as e:
         print(f"[WARN] --make_figures requested but plotting deps unavailable: {e}")
         return
@@ -330,8 +330,8 @@ def _maybe_make_figures(
                 print(f"[WARN] Could not make joint ERP plot for {cond}: {e}")
 
     if args.do_tfr:
-        import numpy as np
         import mne
+        import numpy as np
 
         freqs = np.arange(args.tfr_fmin, args.tfr_fmax + 1e-9, args.tfr_fstep)
 

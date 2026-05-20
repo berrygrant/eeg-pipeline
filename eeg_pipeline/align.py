@@ -22,6 +22,64 @@ def marker_gap_stats(markers_pos: np.ndarray, sfreq: float) -> dict:
     }
 
 
+def format_alignment_diag(diag: dict, aligned_n: int) -> str:
+    return (
+        f"Alignment: markers {diag['markers_original']} -> "
+        f"{diag['markers_after_burst_collapse']} after burst collapse -> {aligned_n} "
+        f"(burst_drop={diag['markers_dropped_by_burst']}, "
+        f"gap_drop={diag['markers_dropped_by_gap']}, "
+        f"auto_drop={diag['markers_dropped_by_auto']})"
+    )
+
+
+def detect_trigger_bursts(
+    markers_pos: np.ndarray,
+    sfreq: float,
+    min_iti_s: float = 0.02,
+    burst_win_s: float = 0.25,
+    burst_count: int = 5,
+) -> dict:
+    """
+    Detect suspicious trigger bursts without modifying the marker sequence.
+    """
+    if len(markers_pos) < 2:
+        return {
+            "burst_flag": False,
+            "n_triggers": int(len(markers_pos)),
+            "n_short_iti": 0,
+            "min_iti_s": None,
+            "burst_max_in_window": 1,
+            "burst_n_windows_ge_thresh": 0,
+        }
+
+    t = markers_pos / float(sfreq)
+    dt = np.diff(t)
+
+    n_short = int(np.sum(dt <= min_iti_s))
+    min_iti = float(np.min(dt))
+
+    j = 0
+    burst_max = 1
+    n_ge = 0
+    for i in range(len(t)):
+        while t[i] - t[j] > burst_win_s:
+            j += 1
+        count = i - j + 1
+        burst_max = max(burst_max, count)
+        if count >= burst_count:
+            n_ge += 1
+
+    return {
+        "burst_flag": bool((n_short > 0) or (burst_max >= burst_count)),
+        "n_triggers": int(len(markers_pos)),
+        "n_short_iti": int(n_short),
+        "min_iti_s": min_iti,
+        "burst_max_in_window": int(burst_max),
+        "burst_n_windows_ge_thresh": int(n_ge),
+        "burst_params": f"min_iti_s={min_iti_s},win_s={burst_win_s},count={burst_count}",
+    }
+
+
 def collapse_marker_bursts(
     markers_pos: np.ndarray,
     sfreq: float,

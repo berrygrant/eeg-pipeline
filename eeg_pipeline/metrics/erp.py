@@ -1,12 +1,12 @@
 # eeg_pipeline/metrics/erp.py
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
+import mne
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
-import mne
 
 from eeg_pipeline.metrics.erp_windows import ERPWindow
 
@@ -18,7 +18,7 @@ def _safe_pick_channels(inst, channels: Sequence[str]) -> list[str]:
     return chs
 
 
-def _get_evoked(epochs: mne.Epochs, condition: str) -> Optional[mne.Evoked]:
+def _get_evoked(epochs: mne.Epochs, condition: str) -> mne.Evoked | None:
     if condition not in epochs.event_id:
         return None
     ep = epochs[condition]

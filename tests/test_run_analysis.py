@@ -7,7 +7,6 @@ import numpy as np
 import run_analysis
 from eeg_pipeline.metrics.erp_timeseries import ERP_TIMESERIES_COLUMNS, compute_erp_timeseries
 
-
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 

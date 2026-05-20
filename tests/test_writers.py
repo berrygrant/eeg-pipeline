@@ -1,6 +1,10 @@
 import pandas as pd
 
-from eeg_pipeline.metrics.writers import ParquetRowGroupWriter, append_csv, reset_combined_metric_outputs
+from eeg_pipeline.metrics.writers import (
+    ParquetRowGroupWriter,
+    append_csv,
+    reset_combined_metric_outputs,
+)
 
 
 def test_append_csv_writes_header_once(tmp_path):

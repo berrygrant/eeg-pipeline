@@ -1,12 +1,12 @@
 # eeg_pipeline/metrics/tfr.py
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence, Optional
 
+import mne
 import numpy as np
 import pandas as pd
-import mne
 
 
 @dataclass(frozen=True)
@@ -17,7 +17,7 @@ class TFRParams:
     method: str = "multitaper"  # "morlet" or "multitaper"
     n_cycles_div: float = 10.0  # n_cycles = freqs / n_cycles_div
     decim: int = 1
-    baseline: Optional[tuple[float, float]] = (-0.1, 0.0)
+    baseline: tuple[float, float] | None = (-0.1, 0.0)
     mode: str = "logratio"  # apply_baseline mode
 
 
@@ -122,7 +122,7 @@ def compute_tfr_metrics(
     tmin: float,
     tmax: float,
     conditions: Sequence[str] = ("Standard", "Deviant"),
-    params: TFRParams = TFRParams(),
+    params: TFRParams | None = None,
     time_decim: int = 1,
 ) -> pd.DataFrame:
     """
@@ -134,6 +134,8 @@ def compute_tfr_metrics(
 
     Output is a tidy DataFrame (subject × condition × channel × freq × time).
     """
+    if params is None:
+        params = TFRParams()
 
     if epochs is None or len(epochs) == 0:
         return pd.DataFrame([_empty_status_row(subject, "", "EMPTY_EPOCHS_OBJECT")])

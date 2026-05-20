@@ -26,7 +26,7 @@ class ParquetRowGroupWriter:
     def close(self) -> None:
         self._counts.clear()
 
-    def __enter__(self) -> "ParquetRowGroupWriter":
+    def __enter__(self) -> ParquetRowGroupWriter:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
