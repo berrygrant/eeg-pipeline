@@ -225,6 +225,52 @@ def _label_missing_condition(df: pd.DataFrame, *, label: str) -> pd.DataFrame:
     return df
 
 
+def _append_csv(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, mode="a", header=not path.exists(), index=False)
+
+
+def _unlink_if_exists(path: Path) -> None:
+    if path.exists():
+        path.unlink()
+
+
+def _iter_figures(figures):
+    if figures is None:
+        return []
+    if isinstance(figures, (list, tuple)):
+        flattened = []
+        for fig in figures:
+            flattened.extend(_iter_figures(fig))
+        return flattened
+    return [figures]
+
+
+def _save_figures(figures, path: Path, *, dpi: int) -> None:
+    fig_list = _iter_figures(figures)
+    if not fig_list:
+        return
+    if len(fig_list) == 1:
+        fig_list[0].savefig(path, dpi=dpi, bbox_inches="tight")
+        return
+    stem = path.stem
+    suffix = path.suffix
+    for idx, fig in enumerate(fig_list, start=1):
+        fig.savefig(path.with_name(f"{stem}_{idx}{suffix}"), dpi=dpi, bbox_inches="tight")
+
+
+def _close_figures(figures) -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return
+    for fig in _iter_figures(figures):
+        try:
+            plt.close(fig)
+        except Exception:
+            pass
+
+
 def _maybe_make_figures(
     *,
     out_dir: Path,
@@ -272,22 +318,18 @@ def _maybe_make_figures(
             gav = grand_average(evs)
             fig = gav.plot(picks=args.channels, spatial_colors=False, show=False)
             fig_path = fig_dir / f"erp_{cond}.{args.fig_format}"
-            fig.savefig(fig_path, dpi=args.dpi, bbox_inches="tight")
             try:
-                import matplotlib.pyplot as plt
-                plt.close(fig)
-            except Exception:
-                pass
+                _save_figures(fig, fig_path, dpi=args.dpi)
+            finally:
+                _close_figures(fig)
 
             try:
                 fig2 = gav.plot_joint(show=False)
                 fig2_path = fig_dir / f"erp_joint_{cond}.{args.fig_format}"
-                fig2.savefig(fig2_path, dpi=args.dpi, bbox_inches="tight")
                 try:
-                    import matplotlib.pyplot as plt
-                    plt.close(fig2)
-                except Exception:
-                    pass
+                    _save_figures(fig2, fig2_path, dpi=args.dpi)
+                finally:
+                    _close_figures(fig2)
             except Exception as e:
                 print(f"[WARN] Could not make joint ERP plot for {cond}: {e}")
 
@@ -346,12 +388,10 @@ def _maybe_make_figures(
                     title=f"TFR (group avg) — {cond}",
                 )
                 fig_path = fig_dir / f"tfr_{cond}.{args.fig_format}"
-                fig.savefig(fig_path, dpi=args.dpi, bbox_inches="tight")
                 try:
-                    import matplotlib.pyplot as plt
-                    plt.close(fig)
-                except Exception:
-                    pass
+                    _save_figures(fig, fig_path, dpi=args.dpi)
+                finally:
+                    _close_figures(fig)
             except Exception as e:
                 print(f"[WARN] Could not make TFR plot for {cond}: {e}")
 
@@ -412,8 +452,14 @@ def main(argv=None):
             mode=args.tfr_baseline_mode,
         )
 
-    erp_rows = []
-    tfr_rows = []
+    out_erp = out_dir / "erp_metrics.csv"
+    out_erp_agg = out_dir / "erp_metrics_aggregates.csv"
+    out_tfr = out_dir / "tfr_metrics.csv"
+    if args.do_erp:
+        _unlink_if_exists(out_erp)
+        _unlink_if_exists(out_erp_agg)
+    if args.do_tfr:
+        _unlink_if_exists(out_tfr)
 
     for p in files:
         subj = _subject_from_filename(p)
@@ -429,7 +475,15 @@ def main(argv=None):
                 compute_mmn=bool(args.compute_mmn),
                 mmn_name=args.difference_label or "DEV_MINUS_STD",
             )
-            erp_rows.append(df_erp)
+            if args.split_aggregate_rows:
+                df_main, df_agg = _split_rows_with_missing_condition(df_erp)
+                _append_csv(df_main, out_erp)
+                if df_agg is not None and len(df_agg):
+                    df_agg = _label_missing_condition(df_agg, label=args.aggregate_condition_label)
+                    _append_csv(df_agg, out_erp_agg)
+            else:
+                df_erp = _label_missing_condition(df_erp, label=args.aggregate_condition_label)
+                _append_csv(df_erp, out_erp)
 
         if args.do_tfr:
             df_tfr = compute_tfr_metrics(
@@ -441,43 +495,28 @@ def main(argv=None):
                 tmax=args.tfr_tmax,
                 params=tfr_params,
             )
-            tfr_rows.append(df_tfr)
+            df_tfr = _label_missing_condition(df_tfr, label=args.aggregate_condition_label)
+            _append_csv(df_tfr, out_tfr)
 
         msg = f"[OK] {subj}"
         if args.do_erp:
-            msg += f" | ERP rows={len(erp_rows[-1])}"
+            msg += f" | ERP rows={len(df_erp)}"
         if args.do_tfr:
-            msg += f" | TFR rows={len(tfr_rows[-1])}"
+            msg += f" | TFR rows={len(df_tfr)}"
         print(msg)
 
     if args.do_erp:
-        df_erp_all = pd.concat(erp_rows, ignore_index=True)
-
         if args.split_aggregate_rows:
-            df_main, df_agg = _split_rows_with_missing_condition(df_erp_all)
-            out_erp = out_dir / "erp_metrics.csv"
-            df_main.to_csv(out_erp, index=False)
             print(f"\nSaved ERP metrics -> {out_erp}")
-
-            if df_agg is not None and len(df_agg):
-                df_agg = _label_missing_condition(df_agg, label=args.aggregate_condition_label)
-                out_erp_agg = out_dir / "erp_metrics_aggregates.csv"
-                df_agg.to_csv(out_erp_agg, index=False)
+            if out_erp_agg.exists():
                 print(f"Saved ERP aggregates -> {out_erp_agg}")
         else:
-            df_erp_all = _label_missing_condition(df_erp_all, label=args.aggregate_condition_label)
-            out_erp = out_dir / "erp_metrics.csv"
-            df_erp_all.to_csv(out_erp, index=False)
             print(f"\nSaved ERP metrics -> {out_erp}")
 
     if args.do_tfr:
-        df_tfr_all = pd.concat(tfr_rows, ignore_index=True)
-        df_tfr_all = _label_missing_condition(df_tfr_all, label=args.aggregate_condition_label)
-        out_tfr = out_dir / "tfr_metrics.csv"
-        df_tfr_all.to_csv(out_tfr, index=False)
         print(f"Saved TFR metrics -> {out_tfr}")
 
-    _maybe_make_figures(out_dir=out_dir, erp_rows=erp_rows, tfr_rows=tfr_rows, args=args)
+    _maybe_make_figures(out_dir=out_dir, erp_rows=[], tfr_rows=[], args=args)
 
 
 if __name__ == "__main__":

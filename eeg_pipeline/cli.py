@@ -10,9 +10,14 @@ import pandas as pd
 import mne
 
 from .schema import parse_token_map, derive_metadata_v1, derive_metadata_from_condition_map
-from .behavior import read_eventcodes_from_subject_csv, filter_codes
+from .behavior import resolve_subject_csv_path, read_eventcodes_from_subject_csv, clean_eventcodes, filter_codes
 from .io_brainvision import read_raw_preprocess, events_from_annotations_positions, parse_vmrk_markers
-from .align import marker_gap_stats, keep_by_gap_heuristic, align_marker_positions_to_codes
+from .align import (
+    marker_gap_stats,
+    keep_by_gap_heuristic,
+    collapse_marker_bursts,
+    align_marker_positions_to_codes,
+)
 from .epoching import (
     EpochParams,
     build_events_from_positions_and_codes,
@@ -135,10 +140,20 @@ def subject_number_from_stem(stem: str) -> str:
     return digits
 
 
+def format_alignment_diag(diag: dict, aligned_n: int) -> str:
+    return (
+        f"Alignment: markers {diag['markers_original']} -> "
+        f"{diag['markers_after_burst_collapse']} after burst collapse -> {aligned_n} "
+        f"(burst_drop={diag['markers_dropped_by_burst']}, "
+        f"gap_drop={diag['markers_dropped_by_gap']}, "
+        f"auto_drop={diag['markers_dropped_by_auto']})"
+    )
+
+
 def summarize_one_file(args, raw_path: Path):
     subj = raw_path.stem
     subj_num = subject_number_from_stem(subj)
-    subject_csv = Path(args.subject_csv_dir) / f"subject-{subj_num}.csv"
+    subject_csv = resolve_subject_csv_path(Path(args.subject_csv_dir), subj_num, subj)
     is_bv = raw_path.suffix.lower() == ".vhdr"
     vmrk_path = raw_path.with_suffix(".vmrk") if is_bv else None
 
@@ -245,6 +260,17 @@ def summarize_one_file(args, raw_path: Path):
         keep_idx = keep_by_gap_heuristic(markers_pos, sfreq=float(raw.info["sfreq"]), gap_s=g)
         print(f"  gap_s={g:>4}: keep {len(keep_idx)}/{len(markers_pos)}")
 
+    cand_bursts = [0.01, 0.02, 0.03, 0.05]
+    print("\nKeep counts for candidate --collapse_eeg_marker_bursts_s values:")
+    for burst_s in cand_bursts:
+        collapsed, _ = collapse_marker_bursts(
+            markers_pos,
+            sfreq=float(raw.info["sfreq"]),
+            min_iti_s=burst_s,
+            keep=args.collapse_eeg_marker_bursts_keep,
+        )
+        print(f"  burst_s={burst_s:>4}: keep {len(collapsed)}/{len(markers_pos)}")
+
     # Parse .vmrk if present (debug)
     if is_bv and vmrk_path and vmrk_path.exists():
         mk = parse_vmrk_markers(vmrk_path)
@@ -264,10 +290,18 @@ def summarize_one_file(args, raw_path: Path):
         print("Cannot summarize behavioral codes without subject CSV. Exiting summary.")
         return
 
-    codes_all = read_eventcodes_from_subject_csv(subject_csv)
-    print("\nBehavioral codes (EventCode) count:", len(codes_all))
+    codes_raw = read_eventcodes_from_subject_csv(subject_csv)
+    print("\nBehavioral codes (EventCode) count:", len(codes_raw))
     print("Behavioral code distribution:")
-    print(pd.Series(codes_all).value_counts().sort_index().to_string())
+    print(pd.Series(codes_raw).value_counts().sort_index().to_string())
+
+    codes_all, cleanup_diag = clean_eventcodes(codes_raw, args.eventcode_cleanup)
+    if cleanup_diag["eventcode_cleanup_removed"] > 0:
+        print("\nEventCode cleanup applied:")
+        print("  mode:", cleanup_diag["eventcode_cleanup_mode"])
+        print("  removed rows:", cleanup_diag["eventcode_cleanup_removed"])
+        print("  affected runs:", cleanup_diag["eventcode_cleanup_runs"])
+        print("  remaining codes:", len(codes_all))
 
     codes = filter_codes(codes_all, args.behavioral_keep_codes)
     if args.behavioral_keep_codes:
@@ -285,12 +319,11 @@ def summarize_one_file(args, raw_path: Path):
         codes=codes,
         gap_s=args.drop_eeg_markers_by_gap_s,
         auto_drop_to_count=bool(args.auto_drop_to_count),
+        collapse_bursts_s=args.collapse_eeg_marker_bursts_s,
+        collapse_keep=args.collapse_eeg_marker_bursts_keep,
     )
     print("  [OK] alignment achievable.")
-    print(
-        f"  Alignment: markers {diag['markers_original']} -> {len(aligned)} "
-        f"(gap_drop={diag['markers_dropped_by_gap']}, auto_drop={diag['markers_dropped_by_auto']})"
-    )
+    print(f"  {format_alignment_diag(diag, len(aligned))}")
 
     token_map = parse_token_map(args.token_map)
     md = derive_metadata_v1(codes.tolist(), token_map=token_map)
@@ -381,8 +414,20 @@ def apply_config(args, defaults=None):
         cfg["events"].get("behavioral_keep_codes", args.behavioral_keep_codes)
     )
     set_if_default(
+        args, defaults, "eventcode_cleanup",
+        cfg["events"].get("eventcode_cleanup", args.eventcode_cleanup)
+    )
+    set_if_default(
         args, defaults, "drop_eeg_markers_by_gap_s",
         cfg["events"].get("drop_eeg_markers_by_gap_s", args.drop_eeg_markers_by_gap_s)
+    )
+    set_if_default(
+        args, defaults, "collapse_eeg_marker_bursts_s",
+        cfg["events"].get("collapse_eeg_marker_bursts_s", args.collapse_eeg_marker_bursts_s)
+    )
+    set_if_default(
+        args, defaults, "collapse_eeg_marker_bursts_keep",
+        cfg["events"].get("collapse_eeg_marker_bursts_keep", args.collapse_eeg_marker_bursts_keep)
     )
     set_if_default(
         args, defaults, "auto_drop_to_count",
@@ -617,8 +662,12 @@ def run_full_pipeline(args, defaults=None, cfg=None):
     d_epo = out_dir / "02_epochs"
     d_evk = out_dir / "03_evokeds"
     d_ga = out_dir / "04_grand_averages"
+    metrics_dir = out_dir / "05_metrics"
     for d in (d_raw, d_epo, d_evk, d_ga):
         d.mkdir(parents=True, exist_ok=True)
+    if int(getattr(args, "metrics", 0)):
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        _reset_combined_metric_outputs(metrics_dir)
 
     ep = EpochParams(
         tmin=args.tmin,
@@ -631,10 +680,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
     rows: list[dict] = []
     evokeds_by_cond: dict[str, list[mne.Evoked]] = {}
 
-    # Metrics outputs collected across subjects
-    erp_metrics_all: list[pd.DataFrame] = []
-    tfr_metrics_all: list[pd.DataFrame] = []
-    erp_timeseries_all: list[pd.DataFrame] = []
+    parquet_writers: dict[Path, object] = {}
 
     raw_files = [p for p in raw_dir.rglob("*.vhdr") if p.is_file() and ".git" not in p.parts]
     raw_files = sorted(raw_files)
@@ -675,7 +721,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
     for raw_path in raw_files:
         subj = raw_path.stem
         subj_num = subject_number_from_stem(subj)
-        subject_csv = subject_csv_dir / f"subject-{subj_num}.csv"
+        subject_csv = resolve_subject_csv_path(subject_csv_dir, subj_num, subj)
         subject_csv_name = subject_csv.name
         subject_csv_path = str(subject_csv)
         subject_csv_exists = bool(subject_csv.exists())
@@ -855,7 +901,31 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             )
             continue
 
-        codes_all = read_eventcodes_from_subject_csv(subject_csv)
+        try:
+            codes_raw = read_eventcodes_from_subject_csv(subject_csv)
+            codes_all, cleanup_diag = clean_eventcodes(codes_raw, args.eventcode_cleanup)
+        except Exception as e:
+            msg = f"Behavioral EventCode cleanup failed for {subj}: {e}"
+            print("[WARN]", msg, "-> skipping")
+            rows.append(
+                    {
+                        "subject": subj,
+                        "raw_file": str(raw_path.name),
+                        "subject_csv": subject_csv_name,
+                        "subject_csv_path": subject_csv_path,
+                        "subject_csv_exists": subject_csv_exists,
+                        **burst_qc,
+                        "status": "SKIP_EVENTCODE_CLEANUP_FAILED",
+                        "error": msg,
+                    }
+            )
+            continue
+        if cleanup_diag["eventcode_cleanup_removed"] > 0:
+            print(
+                f"[INFO] EventCode cleanup {cleanup_diag['eventcode_cleanup_mode']} removed "
+                f"{cleanup_diag['eventcode_cleanup_removed']} rows across "
+                f"{cleanup_diag['eventcode_cleanup_runs']} runs for {subj}."
+            )
         codes = filter_codes(codes_all, args.behavioral_keep_codes)
         expected_trials = len(codes) 
         try:
@@ -865,6 +935,8 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                 codes=codes,
                 gap_s=args.drop_eeg_markers_by_gap_s,
                 auto_drop_to_count=bool(args.auto_drop_to_count),
+                collapse_bursts_s=args.collapse_eeg_marker_bursts_s,
+                collapse_keep=args.collapse_eeg_marker_bursts_keep,
             )
         except Exception as e:
             msg = f"Alignment failed for {subj}: {e}"
@@ -924,7 +996,6 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                 }
             )
             continue
-        epochs = make_epochs(raw, events_stddev, event_id, ep)
         if condition_map:
             events_epo, event_id, cond_codes = select_and_filter_conditions(events, condition_map)
             keep_mask = np.isin(events[:, 2], np.asarray(cond_codes, dtype=int))
@@ -977,8 +1048,10 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             proxy = [ch for ch in args.blink_proxy_chs if ch in epochs_test.ch_names]
             if proxy:
                 blink_picks = mne.pick_channels(epochs_test.ch_names, include=proxy)
+        blink_data = (
+            epochs_test.get_data(picks=blink_picks) if len(blink_picks) > 0 else np.empty((0,))
+        )
         if blink_auto_pct is not None and len(blink_picks) > 0:
-            blink_data = epochs_test.get_data(picks=blink_picks)
             if blink_data.size:
                 ptp_max = moving_window_ptp_max(
                     blink_data,
@@ -992,7 +1065,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
 
         if len(blink_picks) > 0:
             blink_bad = moving_window_ptp_mask(
-                epochs_test.get_data(picks=blink_picks),
+                blink_data,
                 sfreq=float(epochs_test.info["sfreq"]),
                 win_ms=args.blink_win_ms,
                 step_ms=args.blink_step_ms,
@@ -1009,8 +1082,10 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             volt_auto_pct = None
         if volt_auto_pct is not None:
             volt_auto_pct = float(volt_auto_pct)
+        eeg_data = (
+            epochs_test.get_data(picks=eeg_picks) if len(eeg_picks) > 0 else np.empty((0,))
+        )
         if volt_auto_pct is not None and len(eeg_picks) > 0:
-            eeg_data = epochs_test.get_data(picks=eeg_picks)
             if eeg_data.size:
                 max_abs = np.nanmax(np.abs(eeg_data) * 1e6, axis=(1, 2))
                 if np.isfinite(max_abs).any():
@@ -1027,9 +1102,11 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                     )
                     if np.isfinite(ptp_max).any():
                         volt_threshold_uv = float(np.nanpercentile(ptp_max, volt_auto_pct))
-        if volt_method == "window_ptp":
+        if len(eeg_picks) == 0:
+            muscle_bad = np.zeros(len(epochs_test), dtype=bool)
+        elif volt_method == "window_ptp":
             muscle_bad = moving_window_ptp_mask(
-                epochs_test.get_data(picks=eeg_picks),
+                eeg_data,
                 sfreq=float(epochs_test.info["sfreq"]),
                 win_ms=float(getattr(args, "volt_win_ms", 200.0)),
                 step_ms=float(getattr(args, "volt_step_ms", 10.0)),
@@ -1037,12 +1114,12 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             )
         elif volt_method == "combined":
             simple_bad = simple_voltage_threshold_mask(
-                epochs_test.get_data(picks=eeg_picks),
+                eeg_data,
                 pos_limit_uv=volt_pos_uv,
                 neg_limit_uv=volt_neg_uv,
             )
             ptp_bad = moving_window_ptp_mask(
-                epochs_test.get_data(picks=eeg_picks),
+                eeg_data,
                 sfreq=float(epochs_test.info["sfreq"]),
                 win_ms=float(getattr(args, "volt_win_ms", 200.0)),
                 step_ms=float(getattr(args, "volt_step_ms", 10.0)),
@@ -1051,15 +1128,15 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             muscle_bad = simple_bad | ptp_bad
         else:
             muscle_bad = simple_voltage_threshold_mask(
-                epochs_test.get_data(picks=eeg_picks),
+                eeg_data,
                 pos_limit_uv=volt_pos_uv,
                 neg_limit_uv=volt_neg_uv,
             )
 
         step_thresh = getattr(args, "volt_step_uv_per_ms", None)
-        if step_thresh not in (None, "None", "null"):
+        if step_thresh not in (None, "None", "null") and len(eeg_picks) > 0:
             step_bad = step_threshold_mask(
-                epochs_test.get_data(picks=eeg_picks),
+                eeg_data,
                 sfreq=float(epochs_test.info["sfreq"]),
                 threshold_uv_per_ms=float(step_thresh),
             )
@@ -1178,7 +1255,6 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             do_tfr = bool(getattr(args, "metrics_tfr_enabled", True))
 
             if do_erp or do_tfr:
-                metrics_dir = out_dir / "05_metrics"
                 metrics_dir.mkdir(parents=True, exist_ok=True)
 
             channels = getattr(args, "metrics_channels", None) or ["Fp1", "Fz", "Cz"]
@@ -1200,7 +1276,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                         mmn_name=diff_label if diff_label else "DEV_MINUS_STD",
                     )
                     df_erp.to_csv(metrics_dir / f"{subj}_erp_metrics.csv", index=False)
-                    erp_metrics_all.append(df_erp)
+                    _append_csv(df_erp, metrics_dir / "erp_metrics_all.csv")
                 except Exception as e:
                     print(f"[WARN] ERP metrics failed for {subj}: {e}")
 
@@ -1229,7 +1305,11 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                         ts_dir = metrics_dir / "erp_timeseries"
                         ts_dir.mkdir(parents=True, exist_ok=True)
                         df_ts.to_parquet(ts_dir / f"{subj}_erp_timeseries.parquet", index=False)
-                        erp_timeseries_all.append(df_ts)
+                        _append_parquet_row_group(
+                            df_ts,
+                            metrics_dir / "erp_timeseries_all.parquet",
+                            parquet_writers,
+                        )
                     except Exception as e:
                         print(f"[WARN] ERP timeseries failed for {subj}: {e}")
 
@@ -1259,7 +1339,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                         time_decim=int(getattr(args, "tfr_time_decim", 1)),
                     )
                     df_tfr.to_csv(metrics_dir / f"{subj}_tfr_metrics.csv", index=False)
-                    tfr_metrics_all.append(df_tfr)
+                    _append_csv(df_tfr, metrics_dir / "tfr_metrics_all.csv")
                 except Exception as e:
                     print(f"[WARN] TFR metrics failed for {subj}: {e}")
 
@@ -1329,8 +1409,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         )
 
         print(
-            f"Alignment: markers {diag['markers_original']} -> {len(markers_aligned)} "
-            f"(gap_drop={diag['markers_dropped_by_gap']}, auto_drop={diag['markers_dropped_by_auto']})"
+            format_alignment_diag(diag, len(markers_aligned))
         )
         print(
             f"Dropped {n_before - n_after}/{n_before} epochs "
@@ -1344,21 +1423,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
     if not any(evokeds_by_cond.values()):
         print("\n[WARN] No successful subjects to grand-average. Writing QC summary only.")
         write_qc_summary(rows, out_dir / "qc_summary.csv")
-
-        # Combined metrics tables (may still exist even if grand averages fail)
-        metrics_dir = out_dir / "05_metrics"
-        if erp_metrics_all:
-            pd.concat(erp_metrics_all, ignore_index=True).to_csv(
-                metrics_dir / "erp_metrics_all.csv", index=False
-            )
-        if erp_timeseries_all:
-            pd.concat(erp_timeseries_all, ignore_index=True).to_parquet(
-                metrics_dir / "erp_timeseries_all.parquet", index=False
-            )
-        if tfr_metrics_all:
-            pd.concat(tfr_metrics_all, ignore_index=True).to_csv(
-                metrics_dir / "tfr_metrics_all.csv", index=False
-            )
+        _close_parquet_writers(parquet_writers)
 
         print(f"Saved QC summary -> {out_dir / 'qc_summary.csv'}")
         return
@@ -1368,20 +1433,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         ga.save(d_ga / f"grand_average_{cond}-ave.fif", overwrite=True)
 
     write_qc_summary(rows, out_dir / "qc_summary.csv")
-
-    metrics_dir = out_dir / "05_metrics"
-    if erp_metrics_all:
-        pd.concat(erp_metrics_all, ignore_index=True).to_csv(
-            metrics_dir / "erp_metrics_all.csv", index=False
-        )
-    if erp_timeseries_all:
-        pd.concat(erp_timeseries_all, ignore_index=True).to_parquet(
-            metrics_dir / "erp_timeseries_all.parquet", index=False
-        )
-    if tfr_metrics_all:
-        pd.concat(tfr_metrics_all, ignore_index=True).to_csv(
-            metrics_dir / "tfr_metrics_all.csv", index=False
-        )
+    _close_parquet_writers(parquet_writers)
 
     print(f"\nSaved QC summary -> {out_dir / 'qc_summary.csv'}")
     print(f"Saved grand averages -> {d_ga}")
@@ -1400,6 +1452,7 @@ def run_metrics_only(args):
     epochs_dir = out_dir / "02_epochs"
     metrics_dir = out_dir / "05_metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
+    _reset_combined_metric_outputs(metrics_dir)
 
     files = sorted(epochs_dir.glob("*-epo.fif"))
     if not files:
@@ -1441,9 +1494,7 @@ def run_metrics_only(args):
             mode=str(getattr(args, "tfr_baseline_mode", "logratio")),
         )
 
-    erp_metrics_all: list[pd.DataFrame] = []
-    tfr_metrics_all: list[pd.DataFrame] = []
-    erp_timeseries_all: list[pd.DataFrame] = []
+    parquet_writers: dict[Path, object] = {}
 
     for p in files:
         subj = _subject_from_epochs_path(p)
@@ -1463,7 +1514,7 @@ def run_metrics_only(args):
                     mmn_name=diff_label if diff_label else "DEV_MINUS_STD",
                 )
                 df_erp.to_csv(metrics_dir / f"{subj}_erp_metrics.csv", index=False)
-                erp_metrics_all.append(df_erp)
+                _append_csv(df_erp, metrics_dir / "erp_metrics_all.csv")
             except Exception as e:
                 print(f"[WARN] ERP metrics failed for {subj}: {e}")
 
@@ -1492,7 +1543,11 @@ def run_metrics_only(args):
                 ts_dir = metrics_dir / "erp_timeseries"
                 ts_dir.mkdir(parents=True, exist_ok=True)
                 df_ts.to_parquet(ts_dir / f"{subj}_erp_timeseries.parquet", index=False)
-                erp_timeseries_all.append(df_ts)
+                _append_parquet_row_group(
+                    df_ts,
+                    metrics_dir / "erp_timeseries_all.parquet",
+                    parquet_writers,
+                )
             except Exception as e:
                 print(f"[WARN] ERP timeseries failed for {subj}: {e}")
 
@@ -1509,22 +1564,11 @@ def run_metrics_only(args):
                     time_decim=int(getattr(args, "tfr_time_decim", 1)),
                 )
                 df_tfr.to_csv(metrics_dir / f"{subj}_tfr_metrics.csv", index=False)
-                tfr_metrics_all.append(df_tfr)
+                _append_csv(df_tfr, metrics_dir / "tfr_metrics_all.csv")
             except Exception as e:
                 print(f"[WARN] TFR metrics failed for {subj}: {e}")
 
-    if erp_metrics_all:
-        pd.concat(erp_metrics_all, ignore_index=True).to_csv(
-            metrics_dir / "erp_metrics_all.csv", index=False
-        )
-    if erp_timeseries_all:
-        pd.concat(erp_timeseries_all, ignore_index=True).to_parquet(
-            metrics_dir / "erp_timeseries_all.parquet", index=False
-        )
-    if tfr_metrics_all:
-        pd.concat(tfr_metrics_all, ignore_index=True).to_csv(
-            metrics_dir / "tfr_metrics_all.csv", index=False
-        )
+    _close_parquet_writers(parquet_writers)
 
 
 def _resolve_figure_time_window(args) -> tuple[float, float]:
@@ -1557,6 +1601,43 @@ def _build_erp_windows(args) -> list[ERPWindow]:
         windows.append(ERP_WINDOWS["P300"])
 
     return windows
+
+
+def _append_csv(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, mode="a", header=not path.exists(), index=False)
+
+
+def _append_parquet_row_group(
+    df: pd.DataFrame,
+    path: Path,
+    writers: dict[Path, object],
+) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    table = pa.Table.from_pandas(df, preserve_index=False)
+    writer = writers.get(path)
+    if writer is None:
+        writer = pq.ParquetWriter(path, table.schema)
+        writers[path] = writer
+    else:
+        table = table.cast(writer.schema)
+    writer.write_table(table)
+
+
+def _close_parquet_writers(writers: dict[Path, object]) -> None:
+    for writer in writers.values():
+        writer.close()
+    writers.clear()
+
+
+def _reset_combined_metric_outputs(metrics_dir: Path) -> None:
+    for name in ("erp_metrics_all.csv", "erp_timeseries_all.parquet", "tfr_metrics_all.csv"):
+        path = metrics_dir / name
+        if path.exists():
+            path.unlink()
 
 
 def _prompt_yes_no(msg: str) -> bool:
@@ -1691,10 +1772,28 @@ def build_arg_parser():
         help="Keep only these EventCode values from subject-###.csv when aligning to EEG markers.",
     )
     ap.add_argument(
+        "--eventcode_cleanup",
+        default="none",
+        choices=["none", "mprocacc_thesis"],
+        help="Optional cleanup rule to apply to EventCode sequences before behavioral_keep_codes filtering.",
+    )
+    ap.add_argument(
         "--drop_eeg_markers_by_gap_s",
         type=float,
         default=None,
         help="Optional gap threshold heuristic (seconds) to drop likely boundary markers before auto-drop-to-count.",
+    )
+    ap.add_argument(
+        "--collapse_eeg_marker_bursts_s",
+        type=float,
+        default=None,
+        help="Optional ITI threshold (seconds) for collapsing bursty EEG markers before behavioral alignment.",
+    )
+    ap.add_argument(
+        "--collapse_eeg_marker_bursts_keep",
+        default="first",
+        choices=["first", "last"],
+        help="Which marker to keep from each collapsed burst (default: first).",
     )
     ap.add_argument(
         "--auto_drop_to_count",
@@ -1897,10 +1996,6 @@ def main(argv=None):
     defaults = build_defaults(ap)
     args = ap.parse_args(argv)
 
-    if args.summarize_one_file:
-        summarize_one_file(args, Path(args.summarize_one_file))
-        return
-
     if not (args.process_data or args.get_metrics or args.plot_figures):
         # Default behavior: process data + metrics
         args.process_data = True
@@ -1912,6 +2007,10 @@ def main(argv=None):
 
     # Apply config once for all stages
     cfg = apply_config(args, defaults)
+
+    if args.summarize_one_file:
+        summarize_one_file(args, Path(args.summarize_one_file))
+        return
 
     if getattr(args, "_erp_core_preset_enabled", False):
         print("[ERP-CORE] preset enabled")
