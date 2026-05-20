@@ -24,11 +24,11 @@ def marker_gap_stats(markers_pos: np.ndarray, sfreq: float) -> dict:
 
 def format_alignment_diag(diag: dict, aligned_n: int) -> str:
     return (
-        f"Alignment: markers {diag['markers_original']} -> "
-        f"{diag['markers_after_burst_collapse']} after burst collapse -> {aligned_n} "
-        f"(burst_drop={diag['markers_dropped_by_burst']}, "
-        f"gap_drop={diag['markers_dropped_by_gap']}, "
-        f"auto_drop={diag['markers_dropped_by_auto']})"
+        f"Alignment: markers {diag.get('markers_original', aligned_n)} -> "
+        f"{diag.get('markers_after_burst_collapse', aligned_n)} after burst collapse -> {aligned_n} "
+        f"(burst_drop={diag.get('markers_dropped_by_burst', 0)}, "
+        f"gap_drop={diag.get('markers_dropped_by_gap', 0)}, "
+        f"auto_drop={diag.get('markers_dropped_by_auto', 0)})"
     )
 
 

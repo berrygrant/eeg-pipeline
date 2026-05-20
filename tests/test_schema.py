@@ -21,6 +21,9 @@ def test_parse_token_map_rejects_unknown_and_incomplete_inputs():
     with pytest.raises(ValueError, match="Incomplete --token_map"):
         parse_token_map(["EH"])
 
+    with pytest.raises(ValueError, match="Too many bare token labels"):
+        parse_token_map(["", None, "EH", "IH", "EXTRA"])
+
 
 def test_decode_eventcode_v1_splits_hundreds_tens_and_ones():
     assert decode_eventcode_v1(210) == {"A": 2, "B": 1, "C": 0}
@@ -37,7 +40,7 @@ def test_derive_metadata_v1_builds_expected_labels():
     assert list(df["trial_token"]) == ["EH", "IH", "IH"]
 
 
-def test_derive_metadata_v1_uses_na_sentinel_for_practice_blocks():
+def test_derive_metadata_v1_uses_defaults_for_cfg_and_token_map():
     df = derive_metadata_v1([110, 911])
 
     assert list(df["is_practice"]) == [False, True]
@@ -66,3 +69,15 @@ def test_derive_metadata_from_condition_map_parses_named_and_unknown_conditions(
     assert list(df["environment"]) == ["lab", "campus", "NA", "NA"]
     assert list(df["is_standard"]) == [True, False, False, False]
     assert list(df["is_deviant"]) == [False, True, False, False]
+
+
+def test_derive_metadata_from_condition_map_validates_input_and_handles_plain_two_part_names():
+    with pytest.raises(ValueError, match="condition_map must be a non-empty dict"):
+        derive_metadata_from_condition_map([1], {})
+
+    df = derive_metadata_from_condition_map([1, 2], {"plain_lab": [1], "tcount_lab": [2]})
+
+    assert list(df["condition"]) == ["plain_lab", "tcount_lab"]
+    assert list(df["stimulus"]) == ["plain", "t"]
+    assert list(df["task"]) == ["NA", "count"]
+    assert list(df["environment"]) == ["lab", "lab"]

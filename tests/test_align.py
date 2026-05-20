@@ -32,12 +32,26 @@ def test_keep_by_gap_heuristic_keeps_dense_interior_markers():
     assert np.array_equal(kept, np.array([1, 2], dtype=int))
 
 
+def test_keep_by_gap_heuristic_handles_empty_inputs():
+    kept = keep_by_gap_heuristic(np.array([], dtype=int), sfreq=10.0, gap_s=1.0)
+
+    assert np.array_equal(kept, np.array([], dtype=int))
+
+
 def test_keep_best_dense_markers_to_count_returns_dense_cluster():
     markers = np.array([0, 10, 20, 30, 100], dtype=int)
 
     kept = keep_best_dense_markers_to_count(markers, sfreq=10.0, target_n=3)
 
     assert np.array_equal(kept, np.array([1, 2, 3], dtype=int))
+
+
+def test_keep_best_dense_markers_to_count_returns_all_when_target_matches():
+    markers = np.array([0, 10, 20], dtype=int)
+
+    kept = keep_best_dense_markers_to_count(markers, sfreq=10.0, target_n=3)
+
+    assert np.array_equal(kept, np.array([0, 1, 2], dtype=int))
 
 
 def test_keep_best_dense_markers_to_count_rejects_large_target():
@@ -127,3 +141,24 @@ def test_align_marker_positions_to_codes_errors_when_counts_still_mismatch():
             gap_s=None,
             auto_drop_to_count=False,
         )
+
+
+def test_align_marker_positions_to_codes_can_match_exactly_after_gap_filter():
+    aligned, diag = align_marker_positions_to_codes(
+        markers_pos=np.array([0, 10, 20, 30], dtype=int),
+        sfreq=10.0,
+        codes=np.array([101, 102], dtype=int),
+        gap_s=1.1,
+        auto_drop_to_count=False,
+    )
+
+    assert np.array_equal(aligned, np.array([10, 20], dtype=int))
+    assert diag == {
+        "markers_original": 4,
+        "markers_after_burst_collapse": 4,
+        "markers_dropped_by_burst": 0,
+        "burst_groups_collapsed": 0,
+        "burst_max_group_size": 1,
+        "markers_dropped_by_gap": 2,
+        "markers_dropped_by_auto": 0,
+    }

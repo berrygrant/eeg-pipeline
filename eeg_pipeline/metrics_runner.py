@@ -170,7 +170,7 @@ def run_metrics_only(args: Namespace) -> None:
     do_tfr = bool(getattr(args, "metrics_tfr_enabled", True))
     do_ts = bool(getattr(args, "metrics_erp_timeseries", False))
     if not (do_erp or do_tfr or do_ts):
-        print("[WARN] Metrics requested but ERP, ERP time series, and TFR are disabled.")
+        print("[WARN] Metrics requested but both ERP and TFR are disabled.")
         return
 
     conditions = resolve_metrics_conditions(args)

@@ -4,13 +4,192 @@ import argparse
 import sys
 from pathlib import Path
 
+import mne
+import numpy as np
+
+from . import metrics_runner as _metrics_runner
+from . import pipeline_config as _pipeline_config
+from . import pipeline_runner as _pipeline_runner
+from . import summary_runner as _summary_runner
+from .align import (
+    align_marker_positions_to_codes,
+    detect_trigger_bursts,
+    keep_by_gap_heuristic,
+    marker_gap_stats,
+)
+from .artifacts import (
+    moving_window_ptp_mask,
+    moving_window_ptp_max,
+    simple_voltage_threshold_mask,
+    step_threshold_mask,
+)
+from .behavior import (
+    clean_eventcodes,
+    filter_codes,
+    read_eventcodes_from_subject_csv,
+    subject_number_from_stem,
+)
+from .epoching import (
+    build_events_from_positions_and_codes,
+    make_epochs,
+    select_and_filter_conditions,
+    select_and_recode_stddev,
+)
+from .evoked import compute_evokeds, grand_averages
+from .figure_runner import resolve_figure_freq_band as _resolve_figure_freq_band
+from .figure_runner import resolve_figure_time_window as _resolve_figure_time_window
 from .figure_runner import run_plot_figures
 from .gpu import capability_report, format_capability_report
 from .gpu import configure as configure_gpu
-from .metrics_runner import run_metrics_only
-from .pipeline_config import apply_config, apply_erp_core_preset
-from .pipeline_runner import run_full_pipeline
-from .summary_runner import summarize_one_file
+from .ica import apply_ica, find_ica_excludes, fit_ica
+from .ica_diagnostics import compute_ica_diagnostics, recommend_ica
+from .io_brainvision import (
+    _bv_get,
+    brainvision_links_ok,
+    events_from_annotations_positions,
+    parse_vmrk_markers,
+    read_raw_preprocess,
+)
+from .metrics import compute_erp_metrics, compute_tfr_metrics, load_epochs
+from .metrics.erp_timeseries import compute_erp_timeseries
+from .metrics.erp_windows import ERP_WINDOWS
+from .metrics_runner import build_erp_windows as _build_erp_windows
+from .metrics_runner import subject_from_epochs_path as _subject_from_epochs_path
+from .pipeline_config import apply_erp_core_preset, load_config, set_if_default
+from .pipeline_runner import _parse_n_components, prepare_output_dirs
+from .qc import write_qc_summary
+from .schema import derive_metadata_from_condition_map, derive_metadata_v1, parse_token_map
+
+_COMPAT_EXPORTS = (
+    subject_number_from_stem,
+    _resolve_figure_freq_band,
+    _resolve_figure_time_window,
+    _bv_get,
+    ERP_WINDOWS,
+    _subject_from_epochs_path,
+    set_if_default,
+    _parse_n_components,
+    prepare_output_dirs,
+)
+
+_MISSING = object()
+
+
+def apply_config(args, defaults=None):
+    original_loader = _pipeline_config.load_config
+    _pipeline_config.load_config = load_config
+    try:
+        return _pipeline_config.apply_config(args, defaults)
+    finally:
+        _pipeline_config.load_config = original_loader
+
+
+def run_metrics_only(args):
+    if not hasattr(args, "allow_metric_failures"):
+        args.allow_metric_failures = True
+    original = {
+        "build_erp_windows": _metrics_runner.build_erp_windows,
+        "load_epochs": _metrics_runner.load_epochs,
+        "compute_erp_metrics": _metrics_runner.compute_erp_metrics,
+        "compute_erp_timeseries": _metrics_runner.compute_erp_timeseries,
+        "compute_tfr_metrics": _metrics_runner.compute_tfr_metrics,
+    }
+    _metrics_runner.build_erp_windows = _build_erp_windows
+    _metrics_runner.load_epochs = load_epochs
+    _metrics_runner.compute_erp_metrics = compute_erp_metrics
+    _metrics_runner.compute_erp_timeseries = compute_erp_timeseries
+    _metrics_runner.compute_tfr_metrics = compute_tfr_metrics
+    try:
+        return _metrics_runner.run_metrics_only(args)
+    finally:
+        for name, value in original.items():
+            setattr(_metrics_runner, name, value)
+
+
+def run_full_pipeline(args, defaults=None, cfg=None):
+    sync = {
+        "mne": mne,
+        "np": np,
+        "parse_token_map": parse_token_map,
+        "brainvision_links_ok": brainvision_links_ok,
+        "read_raw_preprocess": read_raw_preprocess,
+        "compute_ica_diagnostics": compute_ica_diagnostics,
+        "fit_ica": fit_ica,
+        "find_ica_excludes": find_ica_excludes,
+        "apply_ica": apply_ica,
+        "events_from_annotations_positions": events_from_annotations_positions,
+        "detect_trigger_bursts": detect_trigger_bursts,
+        "read_eventcodes_from_subject_csv": read_eventcodes_from_subject_csv,
+        "clean_eventcodes": clean_eventcodes,
+        "filter_codes": filter_codes,
+        "align_marker_positions_to_codes": align_marker_positions_to_codes,
+        "build_events_from_positions_and_codes": build_events_from_positions_and_codes,
+        "select_and_recode_stddev": select_and_recode_stddev,
+        "select_and_filter_conditions": select_and_filter_conditions,
+        "make_epochs": make_epochs,
+        "derive_metadata_v1": derive_metadata_v1,
+        "derive_metadata_from_condition_map": derive_metadata_from_condition_map,
+        "moving_window_ptp_max": moving_window_ptp_max,
+        "moving_window_ptp_mask": moving_window_ptp_mask,
+        "simple_voltage_threshold_mask": simple_voltage_threshold_mask,
+        "step_threshold_mask": step_threshold_mask,
+        "compute_erp_metrics": compute_erp_metrics,
+        "compute_erp_timeseries": compute_erp_timeseries,
+        "compute_tfr_metrics": compute_tfr_metrics,
+        "recommend_ica": recommend_ica,
+        "compute_evokeds": compute_evokeds,
+        "grand_averages": grand_averages,
+        "write_qc_summary": write_qc_summary,
+    }
+    runner_original = {name: getattr(_pipeline_runner, name, _MISSING) for name in sync}
+    metrics_original = {
+        "build_erp_windows": _metrics_runner.build_erp_windows,
+        "compute_erp_metrics": _metrics_runner.compute_erp_metrics,
+        "compute_erp_timeseries": _metrics_runner.compute_erp_timeseries,
+        "compute_tfr_metrics": _metrics_runner.compute_tfr_metrics,
+    }
+    try:
+        for name, value in sync.items():
+            setattr(_pipeline_runner, name, value)
+        _metrics_runner.build_erp_windows = _build_erp_windows
+        _metrics_runner.compute_erp_metrics = compute_erp_metrics
+        _metrics_runner.compute_erp_timeseries = compute_erp_timeseries
+        _metrics_runner.compute_tfr_metrics = compute_tfr_metrics
+        return _pipeline_runner.run_full_pipeline(args, defaults=defaults, cfg=cfg)
+    finally:
+        for name, value in runner_original.items():
+            if value is _MISSING:
+                delattr(_pipeline_runner, name)
+            else:
+                setattr(_pipeline_runner, name, value)
+        for name, value in metrics_original.items():
+            setattr(_metrics_runner, name, value)
+
+
+def summarize_one_file(args, raw_path: Path):
+    sync = {
+        "mne": mne,
+        "read_raw_preprocess": read_raw_preprocess,
+        "compute_ica_diagnostics": compute_ica_diagnostics,
+        "events_from_annotations_positions": events_from_annotations_positions,
+        "marker_gap_stats": marker_gap_stats,
+        "keep_by_gap_heuristic": keep_by_gap_heuristic,
+        "parse_vmrk_markers": parse_vmrk_markers,
+        "read_eventcodes_from_subject_csv": read_eventcodes_from_subject_csv,
+        "clean_eventcodes": clean_eventcodes,
+        "filter_codes": filter_codes,
+        "align_marker_positions_to_codes": align_marker_positions_to_codes,
+        "parse_token_map": parse_token_map,
+        "derive_metadata_v1": derive_metadata_v1,
+    }
+    original = {name: getattr(_summary_runner, name) for name in sync}
+    try:
+        for name, value in sync.items():
+            setattr(_summary_runner, name, value)
+        return _summary_runner.summarize_one_file(args, raw_path)
+    finally:
+        for name, value in original.items():
+            setattr(_summary_runner, name, value)
 
 
 def _prompt_yes_no(msg: str) -> bool:

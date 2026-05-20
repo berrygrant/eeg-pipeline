@@ -21,6 +21,7 @@ from .behavior import (
     resolve_subject_csv_path,
     subject_number_from_stem,
 )
+from .ica_diagnostics import compute_ica_diagnostics
 from .io_brainvision import (
     events_from_annotations_positions,
     parse_vmrk_markers,
@@ -61,8 +62,6 @@ def summarize_one_file(args: Namespace, raw_path: Path) -> None:
         h_freq=args.h_freq,
         notch=args.notch,
     )
-
-    from .ica_diagnostics import compute_ica_diagnostics
 
     ica_diag = compute_ica_diagnostics(
         raw,
@@ -112,7 +111,7 @@ def summarize_one_file(args: Namespace, raw_path: Path) -> None:
             markers_pos,
             sfreq=float(raw.info["sfreq"]),
             min_iti_s=burst_s,
-            keep=args.collapse_eeg_marker_bursts_keep,
+            keep=getattr(args, "collapse_eeg_marker_bursts_keep", "first"),
         )
         print(f"  burst_s={burst_s:>4}: keep {len(collapsed)}/{len(markers_pos)}")
 
@@ -137,7 +136,7 @@ def summarize_one_file(args: Namespace, raw_path: Path) -> None:
     print("Behavioral code distribution:")
     print(pd.Series(codes_raw).value_counts().sort_index().to_string())
 
-    codes_all, cleanup_diag = clean_eventcodes(codes_raw, args.eventcode_cleanup)
+    codes_all, cleanup_diag = clean_eventcodes(codes_raw, getattr(args, "eventcode_cleanup", "none"))
     if cleanup_diag["eventcode_cleanup_removed"] > 0:
         print("\nEventCode cleanup applied:")
         print("  mode:", cleanup_diag["eventcode_cleanup_mode"])
@@ -161,8 +160,8 @@ def summarize_one_file(args: Namespace, raw_path: Path) -> None:
         codes=codes,
         gap_s=args.drop_eeg_markers_by_gap_s,
         auto_drop_to_count=bool(args.auto_drop_to_count),
-        collapse_bursts_s=args.collapse_eeg_marker_bursts_s,
-        collapse_keep=args.collapse_eeg_marker_bursts_keep,
+        collapse_bursts_s=getattr(args, "collapse_eeg_marker_bursts_s", None),
+        collapse_keep=getattr(args, "collapse_eeg_marker_bursts_keep", "first"),
     )
     print("  [OK] alignment achievable.")
     print(f"  {format_alignment_diag(diag, len(aligned))}")
