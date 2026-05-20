@@ -314,7 +314,7 @@ def _validate_config(cfg: Dict[str, Any]) -> None:
 def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     cfg = dict(cfg)  # shallow copy; mutate nested dicts
 
-    # Paths -> Path objects (IMPORTANT: do NOT convert back to str)
+    # Keep paths as Path objects so downstream code does not re-normalize strings.
     for k in ("raw_dir", "subject_csv_dir", "out_dir"):
         v = cfg["paths"].get(k)
         if v is not None:
@@ -383,12 +383,25 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     cfg["ica"]["decim"] = int(cfg["ica"]["decim"])
     cfg["ica"]["corr_thresh"] = float(cfg["ica"]["corr_thresh"])
     cfg["ica"]["max_exclude"] = int(cfg["ica"]["max_exclude"])
-    cfg["ica"]["save_ica"] = bool(cfg["ica"]["save_ica"])
+    cfg["ica"]["save_ica"] = _as_bool(cfg["ica"]["save_ica"], field="ica.save_ica")
 
     # Token map convenience normalization -> {"token1": "...", "token2": "..."} or None
     cfg["labels"]["token_map"] = _normalize_token_map(cfg["labels"].get("token_map"))
 
     # Metrics conditions (optional)
+    cfg["metrics"]["erp"]["enabled"] = _as_bool(
+        cfg["metrics"]["erp"].get("enabled", True),
+        field="metrics.erp.enabled",
+    )
+    cfg["metrics"]["erp"]["timeseries"] = _as_bool(
+        cfg["metrics"]["erp"].get("timeseries", False),
+        field="metrics.erp.timeseries",
+    )
+    cfg["metrics"]["tfr"]["enabled"] = _as_bool(
+        cfg["metrics"]["tfr"].get("enabled", False),
+        field="metrics.tfr.enabled",
+    )
+
     conds = cfg["metrics"]["erp"].get("conditions", None)
     if conds is not None:
         if isinstance(conds, (list, tuple)):
@@ -398,7 +411,7 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     # Compute (optional GPU acceleration)
     compute_cfg = cfg.get("compute", {})
-    cfg["compute"]["use_gpu"] = bool(compute_cfg.get("use_gpu", False))
+    cfg["compute"]["use_gpu"] = _as_bool(compute_cfg.get("use_gpu", False), field="compute.use_gpu")
     gd = compute_cfg.get("gpu_device", None)
     cfg["compute"]["gpu_device"] = None if gd in (None, "null", "None", "") else int(gd)
 
@@ -419,6 +432,20 @@ def _as_float_list(x: Any) -> List[float]:
     if isinstance(x, (tuple, list)):
         return [float(v) for v in x]
     return [float(x)]
+
+
+def _as_bool(x: Any, *, field: str) -> bool:
+    if isinstance(x, bool):
+        return x
+    if isinstance(x, int) and x in {0, 1}:
+        return bool(x)
+    if isinstance(x, str):
+        value = x.strip().lower()
+        if value in {"true", "yes", "y", "1", "on"}:
+            return True
+        if value in {"false", "no", "n", "0", "off"}:
+            return False
+    raise ValueError(f"{field} must be a boolean value.")
 
 
 def _parse_n_components(x: Any) -> Union[int, float]:

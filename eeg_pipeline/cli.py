@@ -1,4 +1,3 @@
-# mmn_pipeline/cli.py
 from __future__ import annotations
 
 import argparse
@@ -77,6 +76,11 @@ from eeg_pipeline.metrics.erp import ERPWindow
 from eeg_pipeline.metrics.erp_windows import ERP_WINDOWS
 from eeg_pipeline.metrics.erp_timeseries import ERPTimeSeriesParams, compute_erp_timeseries
 from eeg_pipeline.metrics.tfr import TFRParams
+from eeg_pipeline.metrics.writers import (
+    ParquetRowGroupWriter,
+    append_csv,
+    reset_combined_metric_outputs,
+)
 
 import re
 import tempfile
@@ -667,7 +671,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         d.mkdir(parents=True, exist_ok=True)
     if int(getattr(args, "metrics", 0)):
         metrics_dir.mkdir(parents=True, exist_ok=True)
-        _reset_combined_metric_outputs(metrics_dir)
+        reset_combined_metric_outputs(metrics_dir)
 
     ep = EpochParams(
         tmin=args.tmin,
@@ -680,7 +684,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
     rows: list[dict] = []
     evokeds_by_cond: dict[str, list[mne.Evoked]] = {}
 
-    parquet_writers: dict[Path, object] = {}
+    parquet_writer = ParquetRowGroupWriter()
 
     raw_files = [p for p in raw_dir.rglob("*.vhdr") if p.is_file() and ".git" not in p.parts]
     raw_files = sorted(raw_files)
@@ -1276,9 +1280,12 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                         mmn_name=diff_label if diff_label else "DEV_MINUS_STD",
                     )
                     df_erp.to_csv(metrics_dir / f"{subj}_erp_metrics.csv", index=False)
-                    _append_csv(df_erp, metrics_dir / "erp_metrics_all.csv")
+                    append_csv(df_erp, metrics_dir / "erp_metrics_all.csv")
                 except Exception as e:
-                    print(f"[WARN] ERP metrics failed for {subj}: {e}")
+                    msg = f"ERP metrics failed for {subj}: {e}"
+                    print(f"[WARN] {msg}")
+                    if not args.allow_metric_failures:
+                        raise RuntimeError(msg) from e
 
                 if bool(getattr(args, "metrics_erp_timeseries", False)):
                     try:
@@ -1305,13 +1312,12 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                         ts_dir = metrics_dir / "erp_timeseries"
                         ts_dir.mkdir(parents=True, exist_ok=True)
                         df_ts.to_parquet(ts_dir / f"{subj}_erp_timeseries.parquet", index=False)
-                        _append_parquet_row_group(
-                            df_ts,
-                            metrics_dir / "erp_timeseries_all.parquet",
-                            parquet_writers,
-                        )
+                        parquet_writer.write(df_ts, metrics_dir / "erp_timeseries_all.parquet")
                     except Exception as e:
-                        print(f"[WARN] ERP timeseries failed for {subj}: {e}")
+                        msg = f"ERP timeseries failed for {subj}: {e}"
+                        print(f"[WARN] {msg}")
+                        if not args.allow_metric_failures:
+                            raise RuntimeError(msg) from e
 
             if do_tfr:
                 try:
@@ -1339,9 +1345,12 @@ def run_full_pipeline(args, defaults=None, cfg=None):
                         time_decim=int(getattr(args, "tfr_time_decim", 1)),
                     )
                     df_tfr.to_csv(metrics_dir / f"{subj}_tfr_metrics.csv", index=False)
-                    _append_csv(df_tfr, metrics_dir / "tfr_metrics_all.csv")
+                    append_csv(df_tfr, metrics_dir / "tfr_metrics_all.csv")
                 except Exception as e:
-                    print(f"[WARN] TFR metrics failed for {subj}: {e}")
+                    msg = f"TFR metrics failed for {subj}: {e}"
+                    print(f"[WARN] {msg}")
+                    if not args.allow_metric_failures:
+                        raise RuntimeError(msg) from e
 
         ica_recommendation = recommend_ica(
             epoch_reject_rate=epoch_reject_rate,
@@ -1423,7 +1432,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
     if not any(evokeds_by_cond.values()):
         print("\n[WARN] No successful subjects to grand-average. Writing QC summary only.")
         write_qc_summary(rows, out_dir / "qc_summary.csv")
-        _close_parquet_writers(parquet_writers)
+        parquet_writer.close()
 
         print(f"Saved QC summary -> {out_dir / 'qc_summary.csv'}")
         return
@@ -1433,7 +1442,7 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         ga.save(d_ga / f"grand_average_{cond}-ave.fif", overwrite=True)
 
     write_qc_summary(rows, out_dir / "qc_summary.csv")
-    _close_parquet_writers(parquet_writers)
+    parquet_writer.close()
 
     print(f"\nSaved QC summary -> {out_dir / 'qc_summary.csv'}")
     print(f"Saved grand averages -> {d_ga}")
@@ -1452,7 +1461,7 @@ def run_metrics_only(args):
     epochs_dir = out_dir / "02_epochs"
     metrics_dir = out_dir / "05_metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
-    _reset_combined_metric_outputs(metrics_dir)
+    reset_combined_metric_outputs(metrics_dir)
 
     files = sorted(epochs_dir.glob("*-epo.fif"))
     if not files:
@@ -1494,7 +1503,7 @@ def run_metrics_only(args):
             mode=str(getattr(args, "tfr_baseline_mode", "logratio")),
         )
 
-    parquet_writers: dict[Path, object] = {}
+    parquet_writer = ParquetRowGroupWriter()
 
     for p in files:
         subj = _subject_from_epochs_path(p)
@@ -1514,9 +1523,12 @@ def run_metrics_only(args):
                     mmn_name=diff_label if diff_label else "DEV_MINUS_STD",
                 )
                 df_erp.to_csv(metrics_dir / f"{subj}_erp_metrics.csv", index=False)
-                _append_csv(df_erp, metrics_dir / "erp_metrics_all.csv")
+                append_csv(df_erp, metrics_dir / "erp_metrics_all.csv")
             except Exception as e:
-                print(f"[WARN] ERP metrics failed for {subj}: {e}")
+                msg = f"ERP metrics failed for {subj}: {e}"
+                print(f"[WARN] {msg}")
+                if not args.allow_metric_failures:
+                    raise RuntimeError(msg) from e
 
         if bool(getattr(args, "metrics_erp_timeseries", False)):
             try:
@@ -1543,13 +1555,12 @@ def run_metrics_only(args):
                 ts_dir = metrics_dir / "erp_timeseries"
                 ts_dir.mkdir(parents=True, exist_ok=True)
                 df_ts.to_parquet(ts_dir / f"{subj}_erp_timeseries.parquet", index=False)
-                _append_parquet_row_group(
-                    df_ts,
-                    metrics_dir / "erp_timeseries_all.parquet",
-                    parquet_writers,
-                )
+                parquet_writer.write(df_ts, metrics_dir / "erp_timeseries_all.parquet")
             except Exception as e:
-                print(f"[WARN] ERP timeseries failed for {subj}: {e}")
+                msg = f"ERP timeseries failed for {subj}: {e}"
+                print(f"[WARN] {msg}")
+                if not args.allow_metric_failures:
+                    raise RuntimeError(msg) from e
 
         if do_tfr and tfr_params is not None:
             try:
@@ -1564,11 +1575,14 @@ def run_metrics_only(args):
                     time_decim=int(getattr(args, "tfr_time_decim", 1)),
                 )
                 df_tfr.to_csv(metrics_dir / f"{subj}_tfr_metrics.csv", index=False)
-                _append_csv(df_tfr, metrics_dir / "tfr_metrics_all.csv")
+                append_csv(df_tfr, metrics_dir / "tfr_metrics_all.csv")
             except Exception as e:
-                print(f"[WARN] TFR metrics failed for {subj}: {e}")
+                msg = f"TFR metrics failed for {subj}: {e}"
+                print(f"[WARN] {msg}")
+                if not args.allow_metric_failures:
+                    raise RuntimeError(msg) from e
 
-    _close_parquet_writers(parquet_writers)
+    parquet_writer.close()
 
 
 def _resolve_figure_time_window(args) -> tuple[float, float]:
@@ -1601,43 +1615,6 @@ def _build_erp_windows(args) -> list[ERPWindow]:
         windows.append(ERP_WINDOWS["P300"])
 
     return windows
-
-
-def _append_csv(df: pd.DataFrame, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, mode="a", header=not path.exists(), index=False)
-
-
-def _append_parquet_row_group(
-    df: pd.DataFrame,
-    path: Path,
-    writers: dict[Path, object],
-) -> None:
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    table = pa.Table.from_pandas(df, preserve_index=False)
-    writer = writers.get(path)
-    if writer is None:
-        writer = pq.ParquetWriter(path, table.schema)
-        writers[path] = writer
-    else:
-        table = table.cast(writer.schema)
-    writer.write_table(table)
-
-
-def _close_parquet_writers(writers: dict[Path, object]) -> None:
-    for writer in writers.values():
-        writer.close()
-    writers.clear()
-
-
-def _reset_combined_metric_outputs(metrics_dir: Path) -> None:
-    for name in ("erp_metrics_all.csv", "erp_timeseries_all.parquet", "tfr_metrics_all.csv"):
-        path = metrics_dir / name
-        if path.exists():
-            path.unlink()
 
 
 def _prompt_yes_no(msg: str) -> bool:
@@ -1901,6 +1878,11 @@ def build_arg_parser():
         type=int,
         default=1,
         help="Compute ERP/TFR metrics and write to out_dir/05_metrics (1=yes,0=no).",
+    )
+    ap.add_argument(
+        "--allow_metric_failures",
+        action="store_true",
+        help="Continue when subject-level metric computation fails. By default metric failures abort the run.",
     )
     ap.add_argument(
         "--metrics_channels",

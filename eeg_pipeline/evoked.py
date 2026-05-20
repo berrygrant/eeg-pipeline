@@ -1,4 +1,3 @@
-# mmn_pipeline/evoked.py
 from __future__ import annotations
 
 import mne

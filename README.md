@@ -185,10 +185,28 @@ metrics:
 
 ## Running the Pipeline
 
+Install the package in editable mode for local development:
+
+```bash
+python -m pip install -e ".[dev,viz]"
+```
+
+GPU acceleration is optional because CuPy wheels are CUDA-version specific:
+
+```bash
+python -m pip install -e ".[gpu]"
+```
+
 From the repository root (module invocation):
 
 ```bash
 python -m eeg_pipeline.cli --config config.yaml --process_data --get_metrics
+```
+
+After installation, the console entry point is also available:
+
+```bash
+eeg-pipeline --config config.yaml --process_data --get_metrics
 ```
 
 If you omit the stage flags, the default is `--process_data --get_metrics`.
@@ -238,6 +256,7 @@ python -m eeg_pipeline.cli \
 python scripts/process_eeg_data.py --config config.yaml
 python scripts/compute_eeg_metrics.py --config config.yaml
 python scripts/plot_eeg_figures.py --config config.yaml
+python scripts/export_eventcodes.py --raw_dir /data/EEG/raw --behavioral_dir /data/EEG/behavior --out_dir /data/EEG/eventcodes
 ```
 
 ## GPU Acceleration (Optional)

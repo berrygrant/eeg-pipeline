@@ -46,7 +46,6 @@ def _compute_tfr_epochs(epochs: mne.Epochs, freqs: np.ndarray, params: TFRParams
 
 def _compute_tfr_evoked(evoked: mne.Evoked, freqs: np.ndarray, params: TFRParams):
     """
-    IMPORTANT:
     Evoked.compute_tfr() has a different signature than Epochs.compute_tfr().
     In particular, it does NOT accept return_itc or average in many MNE versions.
     """
@@ -136,7 +135,6 @@ def compute_tfr_metrics(
     Output is a tidy DataFrame (subject × condition × channel × freq × time).
     """
 
-    # ---- NEW: bail out early on empty epochs objects ----
     if epochs is None or len(epochs) == 0:
         return pd.DataFrame([_empty_status_row(subject, "", "EMPTY_EPOCHS_OBJECT")])
 

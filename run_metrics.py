@@ -1,16 +1,14 @@
-# run_metrics.py
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
-import pandas as pd
-
 from eeg_pipeline.metrics import (
-    load_epochs,
     compute_erp_metrics,
     compute_tfr_metrics,
+    load_epochs,
 )
+from eeg_pipeline.metrics.writers import append_csv
 from eeg_pipeline.metrics.erp_windows import ERP_WINDOWS
 from eeg_pipeline.metrics.tfr import TFRParams
 from eeg_pipeline.gpu import configure as configure_gpu, capability_report, format_capability_report
@@ -138,8 +136,11 @@ def main(argv=None):
         mode=args.tfr_baseline_mode,
     )
 
-    erp_rows = []
-    tfr_rows = []
+    out_erp = out_dir / "erp_metrics.csv"
+    out_tfr = out_dir / "tfr_metrics.csv"
+    for path in (out_erp, out_tfr):
+        if path.exists():
+            path.unlink()
 
     for p in files:
         subj = _subject_from_filename(p)
@@ -155,7 +156,7 @@ def main(argv=None):
             compute_mmn=bool(args.compute_mmn),
             mmn_name=args.difference_label or "DEV_MINUS_STD",
         )
-        erp_rows.append(df_erp)
+        append_csv(df_erp, out_erp)
 
         # ---- TFR metrics ----
         df_tfr = compute_tfr_metrics(
@@ -167,23 +168,13 @@ def main(argv=None):
             tmax=args.tfr_tmax,
             params=tfr_params,
         )
-        tfr_rows.append(df_tfr)
+        append_csv(df_tfr, out_tfr)
 
         print(
             f"[OK] {subj}: "
             f"ERP rows={len(df_erp)} | "
             f"TFR rows={len(df_tfr)}"
         )
-
-    # Concatenate + save
-    df_erp_all = pd.concat(erp_rows, ignore_index=True)
-    df_tfr_all = pd.concat(tfr_rows, ignore_index=True)
-
-    out_erp = out_dir / "erp_metrics.csv"
-    out_tfr = out_dir / "tfr_metrics.csv"
-
-    df_erp_all.to_csv(out_erp, index=False)
-    df_tfr_all.to_csv(out_tfr, index=False)
 
     print(f"\nSaved ERP metrics -> {out_erp}")
     print(f"Saved TFR metrics -> {out_tfr}")

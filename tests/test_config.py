@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from eeg_pipeline.config import (
+    _as_bool,
     _normalize_token_map,
     _parse_n_components,
     config_get,
@@ -30,6 +31,7 @@ def test_load_config_json_applies_defaults_and_normalizes_types(tmp_path: Path):
                     "collapse_eeg_marker_bursts_keep": "LAST",
                 },
                 "ica": {"n_components": "20"},
+                "metrics": {"erp": {"timeseries": "true"}, "tfr": {"enabled": "false"}},
                 "labels": {"token_map": ["Token1=EH", "Token2=IH"]},
             }
         ),
@@ -51,6 +53,8 @@ def test_load_config_json_applies_defaults_and_normalizes_types(tmp_path: Path):
     assert cfg["ica"]["n_components"] == 20
     assert cfg["labels"]["token_map"] == {"token1": "EH", "token2": "IH"}
     assert cfg["metrics"]["erp"]["enabled"] is True
+    assert cfg["metrics"]["erp"]["timeseries"] is True
+    assert cfg["metrics"]["tfr"]["enabled"] is False
 
 
 def test_load_config_rejects_invalid_overlapping_standard_and_deviant_codes(tmp_path: Path):
@@ -142,6 +146,28 @@ def test_config_get_returns_default_for_missing_paths():
 )
 def test_parse_n_components_handles_default_int_and_float_values(raw_value, expected):
     assert _parse_n_components(raw_value) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        (True, True),
+        (False, False),
+        (1, True),
+        (0, False),
+        ("true", True),
+        ("False", False),
+        ("yes", True),
+        ("off", False),
+    ],
+)
+def test_as_bool_parses_explicit_boolean_values(raw_value, expected):
+    assert _as_bool(raw_value, field="x") is expected
+
+
+def test_as_bool_rejects_ambiguous_strings():
+    with pytest.raises(ValueError, match="x must be a boolean"):
+        _as_bool("maybe", field="x")
 
 
 def test_normalize_token_map_supports_dict_and_shorthand_list_inputs():

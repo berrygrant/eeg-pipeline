@@ -5,6 +5,7 @@ import mne
 import numpy as np
 
 import run_analysis
+from eeg_pipeline.metrics.erp_timeseries import ERP_TIMESERIES_COLUMNS, compute_erp_timeseries
 
 
 matplotlib.use("Agg")
@@ -93,3 +94,10 @@ def test_maybe_make_figures_saves_expected_outputs_and_closes_figures(tmp_path):
         "tfr_Deviant.png",
     } <= figure_names
     assert plt.get_fignums() == []
+
+
+def test_erp_timeseries_empty_epochs_uses_stable_schema():
+    df = compute_erp_timeseries(None, subject="s001", channels=["Fz"])
+
+    assert list(df.columns) == ERP_TIMESERIES_COLUMNS
+    assert df.loc[0, "status"] == "EMPTY_EPOCHS"

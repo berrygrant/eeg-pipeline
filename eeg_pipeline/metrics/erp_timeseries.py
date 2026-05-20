@@ -9,6 +9,17 @@ import pandas as pd
 import mne
 
 
+ERP_TIMESERIES_COLUMNS = [
+    "subject",
+    "condition",
+    "n_epochs",
+    "channel",
+    "time_s",
+    "amplitude_uv",
+    "status",
+]
+
+
 @dataclass
 class ERPTimeSeriesParams:
     tmin: float = -0.2
@@ -71,7 +82,20 @@ def compute_erp_timeseries(
     Returns tidy long DataFrame.
     """
     if epochs is None or len(epochs) == 0:
-        return pd.DataFrame([{"subject": subject, "status": "EMPTY_EPOCHS"}])
+        return pd.DataFrame(
+            [
+                {
+                    "subject": subject,
+                    "condition": "",
+                    "n_epochs": 0,
+                    "channel": "",
+                    "time_s": np.nan,
+                    "amplitude_uv": np.nan,
+                    "status": "EMPTY_EPOCHS",
+                }
+            ],
+            columns=ERP_TIMESERIES_COLUMNS,
+        )
 
     chs = _safe_pick_channels(epochs, channels)
 
@@ -125,8 +149,21 @@ def compute_erp_timeseries(
         )
 
     if not out:
-        return pd.DataFrame([{"subject": subject, "status": "NO_CONDITIONS"}])
+        return pd.DataFrame(
+            [
+                {
+                    "subject": subject,
+                    "condition": "",
+                    "n_epochs": 0,
+                    "channel": "",
+                    "time_s": np.nan,
+                    "amplitude_uv": np.nan,
+                    "status": "NO_CONDITIONS",
+                }
+            ],
+            columns=ERP_TIMESERIES_COLUMNS,
+        )
 
     df = pd.concat(out, ignore_index=True)
     df["status"] = "OK"
-    return df
+    return df[ERP_TIMESERIES_COLUMNS]

@@ -1,4 +1,3 @@
-# mmn_pipeline/io_brainvision.py
 from __future__ import annotations
 
 from pathlib import Path

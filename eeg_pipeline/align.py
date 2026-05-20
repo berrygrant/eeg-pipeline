@@ -1,4 +1,3 @@
-# mmn_pipeline/align.py
 from __future__ import annotations
 
 import numpy as np

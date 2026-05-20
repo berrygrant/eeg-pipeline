@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eeg-pipeline"
+version = "1.1.0"
+description = "Config-driven EEG preprocessing and metrics pipeline built on MNE-Python."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Grant Berry" }]
+dependencies = [
+  "mne",
+  "numpy",
+  "pandas",
+  "pyarrow",
+  "PyYAML",
+  "scipy",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "pytest-cov",
+  "ruff",
+]
+gpu = [
+  "cupy",
+]
+viz = [
+  "matplotlib",
+  "seaborn",
+]
+
+[project.scripts]
+eeg-pipeline = "eeg_pipeline.cli:main"
+eeg-run-analysis = "run_analysis:main"
+
+[tool.setuptools]
+packages = ["eeg_pipeline", "eeg_pipeline.metrics", "eeg_pipeline.viz"]
+py-modules = ["run_analysis", "run_metrics"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]

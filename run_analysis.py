@@ -22,6 +22,7 @@ import pandas as pd
 
 from eeg_pipeline.metrics import load_epochs, compute_erp_metrics, compute_tfr_metrics
 from eeg_pipeline.metrics.tfr import TFRParams
+from eeg_pipeline.metrics.writers import append_csv
 from eeg_pipeline.gpu import configure as configure_gpu, capability_report, format_capability_report
 
 # Optional: pre-defined ERP windows, matching run_metrics.py
@@ -223,11 +224,6 @@ def _label_missing_condition(df: pd.DataFrame, *, label: str) -> pd.DataFrame:
     s = df["condition"]
     df["condition"] = s.replace("", pd.NA).fillna(label)
     return df
-
-
-def _append_csv(df: pd.DataFrame, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, mode="a", header=not path.exists(), index=False)
 
 
 def _unlink_if_exists(path: Path) -> None:
@@ -477,13 +473,13 @@ def main(argv=None):
             )
             if args.split_aggregate_rows:
                 df_main, df_agg = _split_rows_with_missing_condition(df_erp)
-                _append_csv(df_main, out_erp)
+                append_csv(df_main, out_erp)
                 if df_agg is not None and len(df_agg):
                     df_agg = _label_missing_condition(df_agg, label=args.aggregate_condition_label)
-                    _append_csv(df_agg, out_erp_agg)
+                    append_csv(df_agg, out_erp_agg)
             else:
                 df_erp = _label_missing_condition(df_erp, label=args.aggregate_condition_label)
-                _append_csv(df_erp, out_erp)
+                append_csv(df_erp, out_erp)
 
         if args.do_tfr:
             df_tfr = compute_tfr_metrics(
@@ -496,7 +492,7 @@ def main(argv=None):
                 params=tfr_params,
             )
             df_tfr = _label_missing_condition(df_tfr, label=args.aggregate_condition_label)
-            _append_csv(df_tfr, out_tfr)
+            append_csv(df_tfr, out_tfr)
 
         msg = f"[OK] {subj}"
         if args.do_erp:
