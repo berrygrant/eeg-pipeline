@@ -74,6 +74,22 @@ def test_load_config_json_applies_defaults_and_normalizes_types(tmp_path: Path):
     assert cfg["metrics"]["erp"]["enabled"] is True
 
 
+def test_load_config_rejects_missing_non_mapping_and_empty_files(tmp_path: Path):
+    with pytest.raises(FileNotFoundError, match="Config file not found"):
+        load_config(tmp_path / "missing.json")
+
+    list_cfg = tmp_path / "list.json"
+    list_cfg.write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="Top-level config must be"):
+        load_config(list_cfg)
+
+    empty_yaml = tmp_path / "empty.yaml"
+    empty_yaml.write_text("", encoding="utf-8")
+    with pytest.raises(ValueError) as exc_info:
+        load_config(empty_yaml)
+    assert "Provide at least one input path" in str(exc_info.value)
+
+
 def test_load_config_accepts_condition_map_without_standard_deviant_codes(tmp_path: Path):
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text(
@@ -122,7 +138,18 @@ def test_normalize_token_map_supports_dict_and_shorthand_list_inputs():
         "token2": "IH",
     }
     assert _normalize_token_map(["EH", "IH"]) == {"token1": "EH", "token2": "IH"}
+    assert _normalize_token_map(["ignored", "Token1=EH", "Token2=IH"]) == {
+        "token1": "EH",
+        "token2": "IH",
+    }
     assert _normalize_token_map("") is None
+    assert _normalize_token_map({"other": "ignored"}) is None
+    assert _normalize_token_map("Token1=EH") is None
+
+
+def test_parse_n_components_surfaces_invalid_values():
+    with pytest.raises(ValueError):
+        _parse_n_components("not-a-number")
 
 
 def test_read_config_file_supports_yaml_and_rejects_unknown_extensions(monkeypatch, tmp_path: Path):
@@ -172,6 +199,7 @@ def test_apply_defaults_and_normalize_config_convert_optional_values():
     cfg["ica"]["save_ica"] = 0
     cfg["labels"]["token_map"] = "EH IH"
     cfg["metrics"]["erp"]["conditions"] = "Oddball"
+    cfg["metrics"]["erp"]["windows"] = [{"name": "N2", "tmin": "-0.2", "tmax": "0.3"}]
     cfg["compute"]["use_gpu"] = 1
     cfg["compute"]["gpu_device"] = ""
     cfg["conversion"]["enabled"] = 1
@@ -201,6 +229,7 @@ def test_apply_defaults_and_normalize_config_convert_optional_values():
     assert normalized["ica"]["save_ica"] is False
     assert normalized["labels"]["token_map"] == {"token1": "EH", "token2": "IH"}
     assert normalized["metrics"]["erp"]["conditions"] == ["Oddball"]
+    assert normalized["metrics"]["erp"]["windows"] == [{"name": "N2", "tmin": "-0.2", "tmax": "0.3"}]
     assert normalized["compute"]["use_gpu"] is True
     assert normalized["compute"]["gpu_device"] is None
     assert normalized["conversion"]["enabled"] is True
@@ -214,6 +243,8 @@ def test_scalar_list_helpers_and_condition_map_normalization_cover_edge_cases():
     assert _as_float_list(None) == []
     assert _as_float_list("1.25") == [1.25]
     assert _normalize_condition_map(None) is None
+    assert _as_int_list((1, "2")) == [1, 2]
+    assert _as_float_list((1, "2.5")) == [1.0, 2.5]
     assert _normalize_condition_map({"A": "1", "B": [2, 3]}) == {"A": [1], "B": [2, 3]}
 
     with pytest.raises(ValueError, match="mapping of name"):
@@ -245,3 +276,50 @@ def test_validate_config_collects_multiple_readable_errors():
     assert "preprocess.reref must be one of" in msg
     assert "artifacts.voltage.method must be one of" in msg
     assert "events.condition_map['A'] must map to a single code" in msg
+
+
+def test_validate_config_catches_condition_map_and_keep_code_conflicts():
+    cfg = _apply_defaults(
+        {
+            "input": {"mode": "legacy"},
+            "paths": {"raw_dir": "/tmp/raw"},
+            "events": {
+                "standard_codes": [1],
+                "deviant_codes": [2],
+                "behavioral_keep_codes": [1],
+                "condition_map": {"A": [1], "B": [1], "C": ["bad"]},
+            },
+        }
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        _validate_config(cfg)
+
+    msg = str(exc_info.value)
+    assert "events.condition_map has duplicate code: 1" in msg
+    assert "events.condition_map values must be integers" in msg
+    assert "events.deviant_codes must be included" in msg
+
+
+def test_validate_config_rejects_non_mapping_condition_map_and_non_list_windows():
+    cfg = _apply_defaults(
+        {
+            "input": {"mode": "other"},
+            "paths": {"bids_root": "/tmp/bids"},
+            "events": {
+                "standard_codes": [1],
+                "deviant_codes": [1],
+                "condition_map": ["bad"],
+            },
+            "metrics": {"erp": {"windows": "bad"}},
+        }
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        _validate_config(cfg)
+
+    msg = str(exc_info.value)
+    assert "input.mode must be one of" in msg
+    assert "events.condition_map must be a mapping" in msg
+    assert "Standard/deviant code overlap not allowed" in msg
+    assert "metrics.erp.windows must be a list" in msg

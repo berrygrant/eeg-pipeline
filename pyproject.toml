@@ -45,6 +45,24 @@ py-modules = ["run_analysis", "run_metrics"]
 testpaths = ["tests"]
 pythonpath = ["."]
 
+[tool.coverage.run]
+omit = [
+  "eeg_pipeline/analysis_runner.py",
+  "eeg_pipeline/cli.py",
+  "eeg_pipeline/cli_common.py",
+  "eeg_pipeline/cli_config.py",
+  "eeg_pipeline/cli_figures.py",
+  "eeg_pipeline/cli_metrics.py",
+  "eeg_pipeline/cli_parser.py",
+  "eeg_pipeline/cli_pipeline.py",
+  "eeg_pipeline/cli_summary.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+  "if __name__ == .__main__.:",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py39"
