@@ -5,4 +5,4 @@ Invoke CLI with:
   python -m eeg_pipeline.cli ...
 """
 
-__version__ = "1.1.0"
+__version__ = "2.0.0"

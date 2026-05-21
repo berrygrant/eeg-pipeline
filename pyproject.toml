@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eeg-pipeline"
-version = "1.1.0"
+version = "2.0.0"
 description = "Config-driven EEG preprocessing and metrics pipeline built on MNE-Python."
 readme = "README.md"
 requires-python = ">=3.9"
