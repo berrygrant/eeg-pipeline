@@ -11,7 +11,8 @@ This project is designed for **research-grade EEG workflows** with an emphasis o
 - MATLAB → MNE conceptual continuity
 - Scalable batch processing
 
-Current Release: v1.1 | [![DOI](https://zenodo.org/badge/1139314445.svg)](https://doi.org/10.5281/zenodo.19224469) | [![codecov](https://codecov.io/gh/berrygrant/eeg-pipeline/graph/badge.svg?token=YFC9JPJUL3)](https://codecov.io/gh/berrygrant/eeg-pipeline)
+Current Release: v2.0.0 | [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20326493.svg)](https://doi.org/10.5281/zenodo.20326493)
+ | [![codecov](https://codecov.io/gh/berrygrant/eeg-pipeline/graph/badge.svg?token=YFC9JPJUL3)](https://codecov.io/gh/berrygrant/eeg-pipeline)
 
 Questions? Try the [ChatGPT eeg-pipeline Assistant](https://chatgpt.com/g/g-69985fa61c3881918c1621403999cf9d-eeg-pipeline-assistant)
 
