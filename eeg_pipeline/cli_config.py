@@ -7,11 +7,114 @@ from .cli_common import *  # noqa: F403
 globals().update({name: value for name, value in vars(_common).items() if not name.startswith("__") or name == "__version__"})
 
 
+def _set_override(overrides: dict, path: tuple[str, ...], value) -> None:
+    cur = overrides
+    for part in path[:-1]:
+        cur = cur.setdefault(part, {})
+    cur[path[-1]] = value
+
+
+def _build_config_overrides(args, defaults: dict | None) -> dict:
+    defaults = defaults or {}
+    overrides: dict = {}
+
+    def provided(field: str) -> bool:
+        if field not in defaults:
+            return False
+        return getattr(args, field) != defaults[field]
+
+    scalar_paths = {
+        "bids_root": ("paths", "bids_root"),
+        "raw_dir": ("paths", "raw_dir"),
+        "subject_csv_dir": ("paths", "subject_csv_dir"),
+        "derivatives_root": ("paths", "derivatives_root"),
+        "sourcedata_root": ("paths", "sourcedata_root"),
+        "task_label": ("task",),
+        "behavior_csv_fallback_dir": ("events", "csv_fallback_dir"),
+        "montage": ("preprocess", "montage"),
+        "reref": ("preprocess", "reref"),
+        "l_freq": ("preprocess", "l_freq"),
+        "h_freq": ("preprocess", "h_freq"),
+        "notch": ("preprocess", "notch_hz"),
+        "eog_chs": ("channels", "eog_chs"),
+        "blink_proxy_chs": ("channels", "blink_proxy_chs"),
+        "aux_chs": ("channels", "drop_aux_chs"),
+        "standard_codes": ("events", "standard_codes"),
+        "deviant_codes": ("events", "deviant_codes"),
+        "behavioral_keep_codes": ("events", "behavioral_keep_codes"),
+        "drop_eeg_markers_by_gap_s": ("events", "drop_eeg_markers_by_gap_s"),
+        "auto_drop_to_count": ("events", "auto_drop_to_count"),
+        "blink_threshold_uv": ("artifacts", "blink", "threshold_uv"),
+        "blink_win_ms": ("artifacts", "blink", "win_ms"),
+        "blink_step_ms": ("artifacts", "blink", "step_ms"),
+        "blink_auto_percentile": ("artifacts", "blink", "auto_percentile"),
+        "volt_pos_uv": ("artifacts", "voltage", "pos_uv"),
+        "volt_neg_uv": ("artifacts", "voltage", "neg_uv"),
+        "volt_method": ("artifacts", "voltage", "method"),
+        "volt_threshold_uv": ("artifacts", "voltage", "threshold_uv"),
+        "volt_win_ms": ("artifacts", "voltage", "win_ms"),
+        "volt_step_ms": ("artifacts", "voltage", "step_ms"),
+        "volt_step_uv_per_ms": ("artifacts", "voltage", "step_uv_per_ms"),
+        "volt_auto_percentile": ("artifacts", "voltage", "auto_percentile"),
+        "max_reject_rate": ("artifacts", "max_reject_rate"),
+        "ica": ("ica", "mode"),
+        "ica_auto_blink_rate_per_min": ("ica", "auto_blink_rate_per_min"),
+        "ica_method": ("ica", "method"),
+        "ica_n_components": ("ica", "n_components"),
+        "ica_random_state": ("ica", "random_state"),
+        "ica_max_iter": ("ica", "max_iter"),
+        "ica_fit_l_freq": ("ica", "fit_l_freq"),
+        "ica_fit_h_freq": ("ica", "fit_h_freq"),
+        "ica_decim": ("ica", "decim"),
+        "ica_corr_thresh": ("ica", "corr_thresh"),
+        "ica_max_exclude": ("ica", "max_exclude"),
+        "save_ica": ("ica", "save_ica"),
+        "token_map": ("labels", "token_map"),
+        "use_gpu": ("compute", "use_gpu"),
+        "gpu_device": ("compute", "gpu_device"),
+        "convert_to_bids": ("conversion", "enabled"),
+        "conversion_bids_root": ("conversion", "bids_output_root"),
+        "conversion_overwrite": ("conversion", "overwrite"),
+    }
+    list_paths = {
+        "subjects": ("bids", "subjects"),
+        "sessions": ("bids", "sessions"),
+        "tasks": ("bids", "tasks"),
+        "runs": ("bids", "runs"),
+    }
+
+    if getattr(args, "legacy", False):
+        _set_override(overrides, ("input", "mode"), "legacy")
+
+    for field, path in scalar_paths.items():
+        if provided(field):
+            _set_override(overrides, path, getattr(args, field))
+
+    for field, path in list_paths.items():
+        if provided(field):
+            _set_override(overrides, path, list(getattr(args, field)))
+
+    if provided("tmin"):
+        _set_override(overrides, ("epoching", "tmin"), args.tmin)
+    if provided("tmax"):
+        _set_override(overrides, ("epoching", "tmax"), args.tmax)
+    if provided("baseline"):
+        _set_override(overrides, ("epoching", "baseline"), list(args.baseline))
+    if provided("art_test_tmin") or provided("art_test_tmax"):
+        _set_override(overrides, ("artifacts", "test_window"), [args.art_test_tmin, args.art_test_tmax])
+
+    return overrides
+
+
 def apply_config(args, defaults=None):
     """Load config and apply values to args (respecting CLI overrides)."""
     if defaults is None:
         defaults = {}
-    cfg = load_config(args.config)
+    config_overrides = _build_config_overrides(args, defaults)
+    if config_overrides:
+        cfg = load_config(args.config, overrides=config_overrides)
+    else:
+        cfg = load_config(args.config)
 
     # Paths
     set_if_default(args, defaults, "raw_dir", cfg["paths"].get("raw_dir"))
@@ -282,5 +385,4 @@ def apply_erp_core_preset(args, defaults):
     set_if_default(args, defaults, "blink_auto_percentile", 99.0)
     # ERP CORE runs ICA by default.
     set_if_default(args, defaults, "ica", "on")
-
 

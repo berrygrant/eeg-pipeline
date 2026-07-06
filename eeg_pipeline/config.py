@@ -9,12 +9,17 @@ from typing import Any
 # ----------------------------
 # Public API
 # ----------------------------
-def load_config(path: str | Path) -> dict[str, Any]:
+def load_config(path: str | Path, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     """
     Load a config file (YAML preferred; JSON supported) and validate/normalize it.
 
     YAML requires PyYAML:
       pip install pyyaml
+
+    Optional ``overrides`` are merged into the config before normalization and
+    validation. This allows runtime CLI flags to participate in validation
+    instead of being applied only after the config has already been accepted or
+    rejected.
 
     Returns a plain dict with defaults filled and types normalized.
     Raises ValueError with a readable message on validation failure.
@@ -30,6 +35,8 @@ def load_config(path: str | Path) -> dict[str, Any]:
         raise ValueError("Top-level config must be a mapping/dict.")
 
     cfg = _apply_defaults(cfg)
+    if overrides:
+        cfg = _merge_config_dicts(cfg, overrides)
     cfg = _normalize_config(cfg)   # normalize types (including paths -> Path)
     _validate_config(cfg)
 
@@ -44,6 +51,16 @@ def config_get(cfg: dict[str, Any], key_path: str, default: Any = None) -> Any:
             return default
         cur = cur[part]
     return cur
+
+
+def _merge_config_dicts(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_config_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
 
 
 # ----------------------------

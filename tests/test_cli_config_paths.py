@@ -135,7 +135,7 @@ def _rich_config():
 
 def test_apply_config_maps_rich_config_onto_args(monkeypatch):
     _, args, defaults = _parser_and_args()
-    monkeypatch.setattr(cli, "load_config", lambda path: _rich_config())
+    monkeypatch.setattr(cli, "load_config", lambda path, overrides=None: _rich_config())
 
     cfg = cli.apply_config(args, defaults)
 
@@ -172,11 +172,38 @@ def test_apply_config_maps_rich_config_onto_args(monkeypatch):
 def test_apply_config_legacy_flag_overrides_config_mode(monkeypatch):
     _, args, defaults = _parser_and_args()
     args.legacy = True
-    monkeypatch.setattr(cli, "load_config", lambda path: _rich_config())
+    monkeypatch.setattr(cli, "load_config", lambda path, overrides=None: _rich_config())
 
     cli.apply_config(args, defaults)
 
     assert args.input_mode == "legacy"
+
+
+def test_apply_config_legacy_flag_overrides_validation_mode(tmp_path: Path):
+    cfg_path = tmp_path / "legacy.json"
+    cfg_path.write_text(
+        """
+        {
+          "paths": {},
+          "events": {
+            "standard_codes": [1],
+            "deviant_codes": [2]
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    parser = cli.build_arg_parser()
+    args = parser.parse_args(["--config", str(cfg_path), "--legacy", "--raw_dir", "/tmp/legacy_raw"])
+    defaults = cli.build_defaults(parser)
+
+    cfg = cli.apply_config(args, defaults)
+
+    assert cfg["input"]["mode"] == "legacy"
+    assert cfg["paths"]["raw_dir"] == Path("/tmp/legacy_raw")
+    assert args.input_mode == "legacy"
+    assert args.raw_dir == Path("/tmp/legacy_raw")
 
 
 def test_run_full_pipeline_raises_when_no_bids_recordings(tmp_path: Path):

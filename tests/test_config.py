@@ -112,6 +112,33 @@ def test_load_config_accepts_condition_map_without_standard_deviant_codes(tmp_pa
     assert cfg["events"]["condition_map"] == {"Standard": [1], "Deviant": [2]}
 
 
+def test_load_config_applies_overrides_before_validation(tmp_path: Path):
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "paths": {},
+                "events": {
+                    "standard_codes": [1],
+                    "deviant_codes": [2],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(
+        cfg_path,
+        overrides={
+            "input": {"mode": "legacy"},
+            "paths": {"raw_dir": "/tmp/raw"},
+        },
+    )
+
+    assert cfg["input"]["mode"] == "legacy"
+    assert cfg["paths"]["raw_dir"] == Path("/tmp/raw")
+
+
 def test_config_get_returns_default_for_missing_paths():
     cfg = {"events": {"standard_codes": [110]}}
 
