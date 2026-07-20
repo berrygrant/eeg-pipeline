@@ -266,6 +266,28 @@ def _job_payload(job: PipelineJob, *, include_logs: bool) -> dict[str, Any]:
     return payload
 
 
+_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _origin_allowed(handler: BaseHTTPRequestHandler) -> bool:
+    """Reject browser cross-origin POSTs (CSRF) to this local command runner.
+
+    A missing Origin (non-browser clients such as curl or the test suite) or the
+    file:// renderer's ``null`` origin is allowed; any real, non-loopback web
+    origin is rejected before a pipeline job can be started. The server binds to
+    127.0.0.1 with a permissive CORS header, so without this check any website
+    open in the user's browser could POST /api/run.
+    """
+    origin = handler.headers.get("Origin")
+    if not origin or origin == "null":
+        return True
+    try:
+        host = urlparse(origin).hostname
+    except Exception:
+        return False
+    return host in _LOCAL_HOSTS
+
+
 class OneClickHandler(BaseHTTPRequestHandler):
     server_version = "EEGPipelineOneClick/0.1"
 
@@ -297,6 +319,9 @@ class OneClickHandler(BaseHTTPRequestHandler):
             _ok(self, {"ok": False, "error": str(exc)}, status=500)
 
     def do_POST(self) -> None:
+        if not _origin_allowed(self):
+            _ok(self, {"ok": False, "error": "Cross-origin request rejected."}, status=403)
+            return
         try:
             payload = _read_json(self)
             if self.path == "/api/config/validate":

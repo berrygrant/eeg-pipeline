@@ -350,3 +350,52 @@ def test_validate_config_rejects_non_mapping_condition_map_and_non_list_windows(
     assert "events.condition_map must be a mapping" in msg
     assert "Standard/deviant code overlap not allowed" in msg
     assert "metrics.erp.windows must be a list" in msg
+
+
+def test_validate_config_rejects_unknown_and_misspelled_keys():
+    cfg = _apply_defaults(
+        {
+            "input": {"mode": "bids"},
+            "paths": {"bids_root": "/tmp/bids"},
+            "events": {"standard_codes": [1], "deviant_codes": [2]},
+        }
+    )
+    # A misspelled leaf and an unknown top-level section must both be flagged
+    # instead of silently falling back to defaults.
+    cfg["epoching"]["tmim"] = -0.2
+    cfg["preprocesss"] = {"reref": "average"}
+
+    with pytest.raises(ValueError) as exc_info:
+        _validate_config(cfg)
+
+    msg = str(exc_info.value)
+    assert "Unknown config key: 'epoching.tmim'" in msg
+    assert "Unknown config key: 'preprocesss'" in msg
+
+
+def test_validate_config_accepts_alias_keys_and_condition_map_names():
+    cfg = _apply_defaults(
+        {
+            "input": {"mode": "bids"},
+            "paths": {"bids_root": "/tmp/bids"},
+            # Arbitrary condition-map names are user data, not schema keys.
+            "events": {"condition_map": {"Oddball": 7, "Rare": [8], "custom_x": 9}},
+            # Undocumented-but-consumed alias keys must not be treated as typos.
+            "metrics": {
+                "enabled": True,
+                "channels": ["Fz"],
+                "erp": {"enabled": True, "compute_mmn": 1, "channels": ["Fz"]},
+                "tfr": {
+                    "enabled": True,
+                    "time_decim": 1,
+                    "n_cycles_div": 4.0,
+                    "decim": 2,
+                    "fstep": 1.0,
+                    "mode": "logratio",
+                },
+            },
+        }
+    )
+
+    # Must not raise: every key above is part of the known schema.
+    _validate_config(cfg)

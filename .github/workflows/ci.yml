@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install ruff
+        run: python -m pip install --upgrade pip ruff
+      - name: Ruff lint
+        run: ruff check .
+      # Non-blocking until a dedicated `ruff format` pass lands (most existing
+      # files predate the formatter). Flip to blocking once the tree is
+      # formatted so format drift is caught thereafter.
+      - name: Ruff format check
+        run: ruff format --check .
+        continue-on-error: true
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install package and mypy
+        run: |
+          python -m pip install --upgrade pip mypy
+          pip install -e .
+      # Non-blocking while typing is ratcheted up (see [tool.mypy]). Step-level
+      # continue-on-error keeps the check green so mypy informs without gating;
+      # most current errors are the runtime name-injection that Phase 4 removes.
+      - name: Mypy
+        run: mypy eeg_pipeline
+        continue-on-error: true
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # Installs the package itself (proves packaging + both console scripts),
+      # not just requirements via PYTHONPATH.
+      - name: Install package with dev + viz extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,viz]"
+      - name: Smoke-test console entry points
+        run: |
+          eeg-pipeline --help
+          eeg-run-analysis --help
+      - name: Run tests with coverage
+        run: >-
+          pytest tests
+          --cov=eeg_pipeline --cov-branch
+          --cov-report=term-missing --cov-report=xml
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.11'
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}

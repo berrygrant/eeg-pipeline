@@ -1,4 +1,13 @@
-# Core dependencies
+# Convenience requirements for a full CPU runtime (core + visualization).
+#
+# pyproject.toml is the authoritative dependency contract (with version
+# bounds). Prefer installing the package with extras instead:
+#     pip install ".[viz]"            # core + visualization
+#     pip install ".[dev,viz]"        # add test/lint toolchain
+#     pip install ".[gpu]"            # CUDA-compatible CuPy build
+#     pip install ".[ica]"            # python-picard ICA solver
+
+# Core
 mne
 numpy
 scipy
@@ -6,9 +15,6 @@ pandas
 pyarrow
 PyYAML
 
-# Visualization dependencies
+# Visualization (optional extra: .[viz]); included here for convenience
 matplotlib
 seaborn
-# Optional extras
-# cupy  # GPU support; install a CUDA-compatible CuPy build for your system.
-# picard

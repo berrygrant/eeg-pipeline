@@ -4,19 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eeg-pipeline"
-version = "2.0.0"
+dynamic = ["version"]
 description = "Config-driven EEG preprocessing and metrics pipeline built on MNE-Python."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Grant Berry" }]
+# Lower bounds only: the pipeline tracks recent MNE/NumPy/pandas but pinning
+# exact versions would fight downstream environments. Bounds keep a major
+# upstream change from silently breaking installs.
 dependencies = [
-  "mne",
-  "numpy",
-  "pandas",
-  "pyarrow",
-  "PyYAML",
-  "scipy",
+  "mne>=1.5",
+  "numpy>=1.23",
+  "pandas>=1.5",
+  "pyarrow>=10",
+  "PyYAML>=6",
+  "scipy>=1.9",
 ]
 
 [project.optional-dependencies]
@@ -32,40 +35,60 @@ viz = [
   "matplotlib",
   "seaborn",
 ]
+# ICA solver alternative selectable via ica.method: picard
+ica = [
+  "python-picard",
+]
+
+[tool.setuptools.dynamic]
+version = { attr = "eeg_pipeline.__version__" }
 
 [project.scripts]
 eeg-pipeline = "eeg_pipeline.cli:main"
 eeg-run-analysis = "run_analysis:main"
 
 [tool.setuptools]
-packages = ["eeg_pipeline", "eeg_pipeline.metrics", "eeg_pipeline.viz"]
 py-modules = ["run_analysis", "run_metrics"]
+
+# Auto-discover all eeg_pipeline subpackages so new ones (and the previously
+# omitted eeg_pipeline.oneclick) are shipped without editing an explicit list.
+[tool.setuptools.packages.find]
+include = ["eeg_pipeline*"]
+
+[tool.setuptools.package-data]
+eeg_pipeline = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
 
+[tool.mypy]
+python_version = "3.10"
+# Gradual typing: lenient to start (third-party scientific stacks lack stubs),
+# tighten over time. The CI mypy job runs non-blocking until this ratchets up.
+ignore_missing_imports = true
+warn_redundant_casts = true
+warn_unused_ignores = false
+no_implicit_optional = true
+
 [tool.coverage.run]
-omit = [
-  "eeg_pipeline/analysis_runner.py",
-  "eeg_pipeline/cli.py",
-  "eeg_pipeline/cli_common.py",
-  "eeg_pipeline/cli_config.py",
-  "eeg_pipeline/cli_figures.py",
-  "eeg_pipeline/cli_metrics.py",
-  "eeg_pipeline/cli_parser.py",
-  "eeg_pipeline/cli_pipeline.py",
-  "eeg_pipeline/cli_summary.py",
-]
+branch = true
+source = ["eeg_pipeline"]
+# No omit list: the CLI/orchestration layer (cli_*.py, analysis_runner.py) is
+# the largest and most complex code in the package and must be measured, not
+# hidden. Coverage numbers reflect the whole package.
 
 [tool.coverage.report]
 exclude_lines = [
   "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "@(abc\\.)?abstractmethod",
 ]
 
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

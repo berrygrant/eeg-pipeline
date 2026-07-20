@@ -249,7 +249,7 @@ def _tfr_evoked_heatmap(
     else:
         vmin, vmax = None, None
 
-    for ax, cond in zip(axes, conds):
+    for ax, cond in zip(axes, conds, strict=False):
         sub = avg[avg["condition"] == cond]
         pivot = sub.pivot_table(index="frequency", columns="time", values="evoked_power_log10")
         times = pivot.columns.values

@@ -1,0 +1,19 @@
+# Files to include in the source distribution (sdist).
+include LICENSE
+include README.md
+include requirements.txt
+include config.yaml
+include RELEASE_NOTES_*.md
+include CHANGELOG.md
+include CITATION.cff
+
+# Ship the PEP 561 typing marker.
+recursive-include eeg_pipeline py.typed
+
+# Include the opinionated wrapper/utility scripts for reference (they are not
+# installed as console commands).
+recursive-include scripts *.py
+
+# Keep build noise out of the sdist.
+global-exclude __pycache__/*
+global-exclude *.py[cod]

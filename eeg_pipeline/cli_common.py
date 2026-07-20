@@ -1,5 +1,4 @@
 # ruff: noqa: F401
-# mmn_pipeline/cli.py
 from __future__ import annotations
 
 import argparse

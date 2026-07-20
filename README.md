@@ -11,7 +11,7 @@ This project is designed for **research-grade EEG workflows** with an emphasis o
 - MATLAB → MNE conceptual continuity
 - Scalable batch processing
 
-Current Release: v2.0.0 | [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20326493.svg)](https://doi.org/10.5281/zenodo.20326493)
+Current Release: v2.1.0 | [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20326493.svg)](https://doi.org/10.5281/zenodo.20326493)
  | [![codecov](https://codecov.io/gh/berrygrant/eeg-pipeline/graph/badge.svg?token=YFC9JPJUL3)](https://codecov.io/gh/berrygrant/eeg-pipeline)
 
 Questions? Try the [ChatGPT eeg-pipeline Assistant](https://chatgpt.com/g/g-69985fa61c3881918c1621403999cf9d-eeg-pipeline-assistant)
@@ -86,8 +86,18 @@ Questions? Try the [ChatGPT eeg-pipeline Assistant](https://chatgpt.com/g/g-6998
 
 ```
 eeg_pipeline/
-├── cli.py                # Main pipeline entry point
+├── cli.py                # Main entry point (python -m eeg_pipeline.cli)
+├── cli_parser.py         # Argument parser + argparse defaults
+├── cli_config.py         # Config ↔ CLI-arg precedence merging
+├── cli_common.py         # Shared CLI helpers / path + metadata utilities
+├── cli_pipeline.py       # Full per-recording processing orchestration
+├── cli_metrics.py        # Metrics-only stage (reads BIDS derivatives)
+├── cli_summary.py        # Single-file summarize/inspect stage
+├── cli_figures.py        # Figure-plotting stage
 ├── config.py             # YAML/JSON config loader + validation
+├── schema.py             # Event-code decoding / token-map schema
+├── bids.py               # BIDS discovery, derivatives, validation
+├── inputs.py             # Recording discovery + legacy→BIDS conversion
 ├── io_brainvision.py     # BrainVision I/O helpers
 ├── behavior.py           # Behavioral CSV parsing
 ├── align.py              # EEG ↔ behavioral alignment logic
@@ -96,22 +106,29 @@ eeg_pipeline/
 ├── ica.py                # ICA fitting and application
 ├── ica_diagnostics.py    # Blink diagnostics and ICA recommendation logic
 ├── evoked.py             # Evoked and grand-average helpers
+├── gpu.py                # Optional GPU (MNE CUDA / CuPy) backend
+├── qc.py                 # QC summary writer
+├── analysis_runner.py    # Flat-directory post-hoc metrics engine
 ├── metrics/
 │   ├── erp.py            # ERP windowed metrics
 │   ├── erp_timeseries.py # ERP time-series metrics (Parquet)
 │   ├── erp_windows.py    # Canonical ERP window definitions
 │   ├── io.py             # Epochs loaders (.fif, .set)
+│   ├── writers.py        # CSV/Parquet output writers
 │   └── tfr.py            # Time–frequency metrics
 ├── viz/
 │   └── paper_figures.py  # Paper-ready plots from metrics outputs
-└── qc.py                 # QC summary writer
+└── oneclick/
+    └── backend.py        # Local HTTP backend for the Electron GUI prototype
 
-scripts/
-├── process_eeg_data.py    # Process raw data → epochs/evokeds/QC
-├── compute_eeg_metrics.py # Metrics from existing epochs
-└── plot_eeg_figures.py    # Paper-ready figures from metrics outputs
+scripts/                          # Thin wrappers / legacy utilities (not installed)
+├── process_eeg_data.py           # Wrapper: --process_data
+├── compute_eeg_metrics.py        # Wrapper: --get_metrics
+├── plot_eeg_figures.py           # Wrapper: --plot_figures
+├── export_eventcodes.py          # Legacy: export event codes
+└── import_manual_rejection_sets.py  # Legacy: import EEGLAB manual rejections
 
-run_analysis.py           # Post-hoc ERP/TFR metrics on epochs
+run_analysis.py           # Compatibility shim for analysis_runner (eeg-run-analysis)
 run_metrics.py            # Legacy metrics runner (kept for compatibility)
 ```
 
@@ -261,7 +278,7 @@ python -m eeg_pipeline.cli \
 
 ### ERP CORE preset (optional)
 
-You can enable an [ERP CORE‑style preset](https://doi.org/10.1016/j.neuroimage.2020.117465) (Kappeman et al., 2021) via `--erp-core`. This applies the following defaults:
+You can enable an [ERP CORE‑style preset](https://doi.org/10.1016/j.neuroimage.2020.117465) (Kappenman et al., 2021) via `--erp-core`. This applies the following defaults:
 
 - `preprocess.reref = tp9_tp10`
 - `preprocess.l_freq = 0.1`
@@ -381,19 +398,31 @@ using the repo's BIDS-aware structural validator helpers in `eeg_pipeline.bids`.
 ⸻
 
 ## Requirements
+
+**Core** (required):
 - Python ≥ 3.10
 - mne
 - numpy
+- scipy
 - pandas
 - pyarrow (Parquet)
-- matplotlib
-- seaborn
 - pyyaml (for YAML configs)
+
+**Optional extras** (install only if needed):
+- `viz` — matplotlib, seaborn (paper figures / `--plot_figures`)
+- `gpu` — a CUDA-compatible CuPy build
+- `ica` — python-picard (for `ica.method: picard`)
 
 Install:
 ```bash
+pip install ".[viz]"        # core + visualization (typical)
+pip install ".[dev,viz]"    # add the test/lint toolchain
+# or, for a plain convenience install:
 pip install -r requirements.txt
 ```
+
+The authoritative dependency contract (with version bounds) lives in
+`pyproject.toml`.
 
 ## Acknowledgments
 
@@ -404,4 +433,4 @@ All scientific decisions, methodological choices, and final code were reviewed a
 
 If you use this pipeline in data processing, please consider citing the package:
 
-`Berry, G. M. (2026). eeg-pipeline (v1.1). Zenodo. https://doi.org/10.5281/zenodo.19224469`
+`Berry, G. M. (2026). eeg-pipeline (v2.1.0). Zenodo. https://doi.org/10.5281/zenodo.20326493`

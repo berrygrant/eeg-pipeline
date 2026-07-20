@@ -84,24 +84,6 @@ def summarize_one_file(args, raw_path: Path):
         burst_count=5,       # ≥5 triggers in 250 ms
     )
 
-    {
-        "trigger_burst_flag": burst_diag["burst_flag"],
-        "trigger_n_short_iti": burst_diag["n_short_iti"],
-        "trigger_min_iti_s": burst_diag["min_iti_s"],
-        "trigger_burst_max_in_window": burst_diag["burst_max_in_window"],
-        "trigger_burst_n_windows_ge_thresh": burst_diag["burst_n_windows_ge_thresh"],
-        "trigger_burst_params": burst_diag.get("burst_params", ""),
-    }
-
-    {
-        "trigger_burst_flag": bool(burst_diag.get("burst_flag", False)),
-        "trigger_n_short_iti": int(burst_diag.get("n_short_iti", 0) or 0),
-        "trigger_min_iti_s": burst_diag.get("min_iti_s", ""),
-        "trigger_burst_max_in_window": int(burst_diag.get("burst_max_in_window", 1) or 1),
-        "trigger_burst_n_windows_ge_thresh": int(burst_diag.get("burst_n_windows_ge_thresh", 0) or 0),
-        "trigger_burst_params": burst_diag.get("burst_params", ""),
-    }
-
     if burst_diag["burst_flag"]:
         print(f"[WARN] Trigger burst detected for {subj}: "
               f"short_iti={burst_diag['n_short_iti']}, "

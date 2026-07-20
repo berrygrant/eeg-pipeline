@@ -217,6 +217,6 @@ def align_marker_positions_to_codes(
 
     raise ValueError(
         f"Alignment failed: EEG markers={len(markers_pos2)} vs behavioral codes={len(codes)}. "
-        "Try --behavioral_keep_codes, --collapse_eeg_marker_bursts_s, "
-        "--drop_eeg_markers_by_gap_s, and/or enable auto-drop."
+        "Try --behavioral_keep_codes, --drop_eeg_markers_by_gap_s, "
+        "and/or enable auto-drop (events.auto_drop_to_count)."
     )

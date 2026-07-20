@@ -279,7 +279,7 @@ def _read_raw_minimal(raw_path: Path):
 def _channels_tsv(raw) -> pd.DataFrame:
     ch_types = raw.get_channel_types()
     rows = []
-    for name, ch_type in zip(raw.ch_names, ch_types):
+    for name, ch_type in zip(raw.ch_names, ch_types, strict=True):
         rows.append(
             {
                 "name": name,
@@ -377,7 +377,9 @@ def convert_legacy_recordings_to_bids(
                 auto_drop_to_count=bool(auto_drop_to_count),
             )
             event_rows = []
-            for sample, code in zip(markers_aligned.tolist(), codes.tolist()):
+            # strict=False: with auto_drop_to_count disabled, aligned markers
+            # may exceed codes; pair each code with its marker and ignore extras.
+            for sample, code in zip(markers_aligned.tolist(), codes.tolist(), strict=False):
                 if code in std_set:
                     trial_type = "Standard"
                 elif code in dev_set:

@@ -1,6 +1,7 @@
 # eeg_pipeline/config.py
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from typing import Any
@@ -90,6 +91,134 @@ def _read_config_file(path: Path) -> dict[str, Any]:
 # ----------------------------
 # Defaults (minimal + sane)
 # ----------------------------
+# Canonical (dotted-path, default-value) pairs. This is the single source of
+# truth for both default-filling (``_apply_defaults``) and unknown-key
+# detection (``_check_unknown_keys``). Add new options here only.
+_CONFIG_DEFAULTS: list[tuple[str, Any]] = [
+    ("task", "unknown"),
+    ("input.mode", "bids"),
+    ("paths.raw_dir", None),
+    ("paths.subject_csv_dir", None),
+    ("paths.bids_root", None),
+    ("paths.derivatives_root", None),
+    ("paths.sourcedata_root", None),
+    ("bids.subjects", None),
+    ("bids.sessions", None),
+    ("bids.tasks", None),
+    ("bids.runs", None),
+    ("channels.picks", []),
+    ("channels.eog_chs", []),
+    ("channels.blink_proxy_chs", ["Fp1"]),
+    ("channels.drop_aux_chs", ["AUX"]),
+    ("preprocess.montage", "standard_1020"),
+    ("preprocess.reref", "average"),  # average | none | p9_p10/tp9_tp10
+    ("preprocess.notch_hz", [60.0]),
+    ("preprocess.l_freq", 0.1),
+    ("preprocess.h_freq", 30.0),
+    ("events.behavioral_keep_codes", []),
+    ("events.standard_codes", []),
+    ("events.deviant_codes", []),
+    ("events.condition_map", None),
+    ("events.csv_fallback_dir", None),
+    ("events.drop_eeg_markers_by_gap_s", None),
+    ("events.auto_drop_to_count", True),
+    ("epoching.tmin", -0.2),
+    ("epoching.tmax", 0.6),
+    ("epoching.baseline", [-0.2, 0.0]),
+    ("artifacts.test_window", [-0.2, 0.3]),
+    ("artifacts.max_reject_rate", None),
+    ("artifacts.blink.threshold_uv", 75.0),
+    ("artifacts.blink.win_ms", 200.0),
+    ("artifacts.blink.step_ms", 10.0),
+    ("artifacts.blink.auto_percentile", None),
+    ("artifacts.voltage.method", "simple"),  # simple | window_ptp
+    ("artifacts.voltage.threshold_uv", 150.0),
+    ("artifacts.voltage.win_ms", 200.0),
+    ("artifacts.voltage.step_ms", 10.0),
+    ("artifacts.voltage.pos_uv", 150.0),
+    ("artifacts.voltage.neg_uv", -150.0),
+    ("artifacts.voltage.step_uv_per_ms", None),
+    ("artifacts.voltage.auto_percentile", None),
+    ("ica.mode", "off"),  # off | auto | on
+    ("ica.auto_blink_rate_per_min", 15.0),
+    ("ica.method", "fastica"),
+    ("ica.n_components", 0.99),  # float variance fraction OR int #components (we normalize below)
+    ("ica.random_state", 97),
+    ("ica.max_iter", 512),
+    ("ica.fit_l_freq", 1.0),
+    ("ica.fit_h_freq", None),
+    ("ica.decim", 3),
+    ("ica.corr_thresh", 0.30),
+    ("ica.max_exclude", 3),
+    ("ica.save_ica", True),
+    ("labels.token_map", None),
+    ("compute.use_gpu", False),
+    ("compute.gpu_device", None),
+    ("metrics.erp.enabled", True),
+    ("metrics.erp.windows", []),
+    ("metrics.erp.timeseries", False),
+    ("metrics.erp.difference_label", None),
+    ("metrics.erp.conditions", None),
+    ("metrics.tfr.enabled", False),
+    ("metrics.tfr.method", "multitaper"),
+    ("metrics.tfr.tmin", -0.2),
+    ("metrics.tfr.tmax", 0.6),
+    ("metrics.tfr.fmin", 1.0),
+    ("metrics.tfr.fmax", 30.0),
+    ("metrics.tfr.baseline", [-0.2, 0.0]),
+    ("metrics.tfr.baseline_mode", "logratio"),
+    ("conversion.enabled", False),
+    ("conversion.bids_output_root", None),
+    ("conversion.overwrite", True),
+]
+
+# Keys that are read by the CLI/metrics layer but intentionally carry no
+# default (aliases, or values whose fallback lives at the consumption site).
+# Listed here so unknown-key detection does not flag them as typos.
+_EXTRA_CONFIG_KEYS: tuple[str, ...] = (
+    # Output dir read by scripts/import_manual_rejection_sets.py as its default;
+    # tolerated in shared configs so load_config does not reject it as a typo.
+    "paths.out_dir",
+    "metrics.enabled",
+    "metrics.channels",
+    "metrics.conditions",
+    "metrics.erp_windows",
+    "metrics.compute_mmn",
+    "metrics.compute_p300",
+    "metrics.difference_label",
+    "metrics.erp.channels",
+    "metrics.erp.compute_mmn",
+    "metrics.erp.compute_p300",
+    "metrics.tfr.fstep",
+    "metrics.tfr.n_cycles_div",
+    "metrics.tfr.decim",
+    "metrics.tfr.time_decim",
+    "metrics.tfr.mode",  # alias for baseline_mode
+)
+
+
+def _known_config_paths() -> tuple[set[str], set[str]]:
+    """Return (all-known-dotted-paths, intermediate-paths).
+
+    A path is *intermediate* if a longer known path lives beneath it (so it is
+    a section to recurse into). Everything else is a leaf whose value is opaque
+    user data (e.g. ``events.condition_map``, ``metrics.erp.windows``) and must
+    not be key-checked.
+    """
+    known: set[str] = set()
+    for dotted in [p for p, _ in _CONFIG_DEFAULTS] + list(_EXTRA_CONFIG_KEYS):
+        parts = dotted.split(".")
+        for i in range(1, len(parts) + 1):
+            known.add(".".join(parts[:i]))
+    intermediates = {
+        p for p in known if any(q != p and q.startswith(p + ".") for q in known)
+    }
+    return known, intermediates
+
+
+_KNOWN_CONFIG_PATHS, _KNOWN_INTERMEDIATE_PATHS = _known_config_paths()
+
+
 def _apply_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
     # Only set defaults where missing; do not overwrite user values.
     def set_default(d: dict[str, Any], path: str, value: Any):
@@ -99,99 +228,31 @@ def _apply_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
             if p not in cur or not isinstance(cur[p], dict):
                 cur[p] = {}
             cur = cur[p]
-        cur.setdefault(parts[-1], value)
+        # deepcopy so shared module-level mutable defaults are never aliased
+        # into (and mutated through) a returned config.
+        cur.setdefault(parts[-1], copy.deepcopy(value))
 
-    set_default(cfg, "task", "unknown")
-
-    set_default(cfg, "input.mode", "bids")
-
-    set_default(cfg, "paths.raw_dir", None)
-    set_default(cfg, "paths.subject_csv_dir", None)
-    set_default(cfg, "paths.bids_root", None)
-    set_default(cfg, "paths.derivatives_root", None)
-    set_default(cfg, "paths.sourcedata_root", None)
-
-    set_default(cfg, "bids.subjects", None)
-    set_default(cfg, "bids.sessions", None)
-    set_default(cfg, "bids.tasks", None)
-    set_default(cfg, "bids.runs", None)
-
-    set_default(cfg, "channels.picks", [])
-    set_default(cfg, "channels.eog_chs", [])
-    set_default(cfg, "channels.blink_proxy_chs", ["Fp1"])
-    set_default(cfg, "channels.drop_aux_chs", ["AUX"])
-
-    set_default(cfg, "preprocess.montage", "standard_1020")
-    set_default(cfg, "preprocess.reref", "average")  # average | none | p9_p10/tp9_tp10
-    set_default(cfg, "preprocess.notch_hz", [60.0])
-    set_default(cfg, "preprocess.l_freq", 0.1)
-    set_default(cfg, "preprocess.h_freq", 30.0)
-
-    set_default(cfg, "events.behavioral_keep_codes", [])
-    set_default(cfg, "events.standard_codes", [])
-    set_default(cfg, "events.deviant_codes", [])
-    set_default(cfg, "events.condition_map", None)
-    set_default(cfg, "events.csv_fallback_dir", None)
-    set_default(cfg, "events.drop_eeg_markers_by_gap_s", None)
-    set_default(cfg, "events.auto_drop_to_count", True)
-
-    set_default(cfg, "epoching.tmin", -0.2)
-    set_default(cfg, "epoching.tmax", 0.6)
-    set_default(cfg, "epoching.baseline", [-0.2, 0.0])
-
-    set_default(cfg, "artifacts.test_window", [-0.2, 0.3])
-    set_default(cfg, "artifacts.max_reject_rate", None)
-    set_default(cfg, "artifacts.blink.threshold_uv", 75.0)
-    set_default(cfg, "artifacts.blink.win_ms", 200.0)
-    set_default(cfg, "artifacts.blink.step_ms", 10.0)
-    set_default(cfg, "artifacts.blink.auto_percentile", None)
-    set_default(cfg, "artifacts.voltage.method", "simple")  # simple | window_ptp
-    set_default(cfg, "artifacts.voltage.threshold_uv", 150.0)
-    set_default(cfg, "artifacts.voltage.win_ms", 200.0)
-    set_default(cfg, "artifacts.voltage.step_ms", 10.0)
-    set_default(cfg, "artifacts.voltage.pos_uv", 150.0)
-    set_default(cfg, "artifacts.voltage.neg_uv", -150.0)
-    set_default(cfg, "artifacts.voltage.step_uv_per_ms", None)
-    set_default(cfg, "artifacts.voltage.auto_percentile", None)
-
-    set_default(cfg, "ica.mode", "off")  # off | auto | on
-    set_default(cfg, "ica.auto_blink_rate_per_min", 15.0)
-    set_default(cfg, "ica.method", "fastica")
-    set_default(cfg, "ica.n_components", 0.99)  # float variance fraction OR int #components (we normalize below)
-    set_default(cfg, "ica.random_state", 97)
-    set_default(cfg, "ica.max_iter", 512)
-    set_default(cfg, "ica.fit_l_freq", 1.0)
-    set_default(cfg, "ica.fit_h_freq", None)
-    set_default(cfg, "ica.decim", 3)
-    set_default(cfg, "ica.corr_thresh", 0.30)
-    set_default(cfg, "ica.max_exclude", 3)
-    set_default(cfg, "ica.save_ica", True)
-
-    set_default(cfg, "labels.token_map", None)
-
-    set_default(cfg, "compute.use_gpu", False)
-    set_default(cfg, "compute.gpu_device", None)
-
-    set_default(cfg, "metrics.erp.enabled", True)
-    set_default(cfg, "metrics.erp.windows", [])
-    set_default(cfg, "metrics.erp.timeseries", False)
-    set_default(cfg, "metrics.erp.difference_label", None)
-    set_default(cfg, "metrics.erp.conditions", None)
-
-    set_default(cfg, "metrics.tfr.enabled", False)
-    set_default(cfg, "metrics.tfr.method", "multitaper")
-    set_default(cfg, "metrics.tfr.tmin", -0.2)
-    set_default(cfg, "metrics.tfr.tmax", 0.6)
-    set_default(cfg, "metrics.tfr.fmin", 1.0)
-    set_default(cfg, "metrics.tfr.fmax", 30.0)
-    set_default(cfg, "metrics.tfr.baseline", [-0.2, 0.0])
-    set_default(cfg, "metrics.tfr.baseline_mode", "logratio")
-
-    set_default(cfg, "conversion.enabled", False)
-    set_default(cfg, "conversion.bids_output_root", None)
-    set_default(cfg, "conversion.overwrite", True)
+    for path, value in _CONFIG_DEFAULTS:
+        set_default(cfg, path, value)
 
     return cfg
+
+
+def _check_unknown_keys(node: Any, prefix: str, errors: list[str]) -> None:
+    """Append an error for every user key not in the known config schema.
+
+    Recurses only into known *section* nodes; known leaves are treated as
+    opaque (their children may be arbitrary user data such as condition names).
+    """
+    if not isinstance(node, dict):
+        return
+    for key in node:
+        path = f"{prefix}.{key}" if prefix else str(key)
+        if path not in _KNOWN_CONFIG_PATHS:
+            errors.append(f"Unknown config key: '{path}' (check for a typo)")
+            continue
+        if path in _KNOWN_INTERMEDIATE_PATHS:
+            _check_unknown_keys(node[key], path, errors)
 
 
 # ----------------------------
@@ -199,6 +260,10 @@ def _apply_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
 # ----------------------------
 def _validate_config(cfg: dict[str, Any]) -> None:
     errors: list[str] = []
+
+    # Reject unknown/misspelled keys before value checks so typos surface
+    # loudly instead of being silently ignored in favour of a default.
+    _check_unknown_keys(cfg, "", errors)
 
     def require(path: str):
         val = config_get(cfg, path, None)
