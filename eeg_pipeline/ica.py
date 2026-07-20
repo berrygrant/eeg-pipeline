@@ -24,7 +24,7 @@ class ICAParams:
         Maximum number of iterations for the ICA solver.
     fit_l_freq : float
         High‑pass frequency applied only before fitting ICA.  Setting this to
-        at least 1 Hz improves decomposition stability【639331183304365†L606-L616】.
+        at least 1 Hz improves decomposition stability.
     fit_h_freq : float or None
         Optional low‑pass frequency applied only before fitting ICA.  None
         leaves the data unfiltered on the upper bound.
@@ -163,7 +163,7 @@ def find_ica_excludes(
       1. If any EOG channels are present, use :meth:`ICA.find_bads_eog` to detect EOG-related
          components.  Components are sorted by the absolute value of their correlation scores
          and the top ``max_exclude`` are returned.  This leverages MNE's adaptive z‑scoring
-         which determines an appropriate correlation threshold automatically【52308007362329†L1406-L1465】.
+         which determines an appropriate correlation threshold automatically.
       2. If no EOG channels exist, fall back to correlating ICA sources with a proxy frontal EEG
          channel (e.g., ``Fp1``).  Components whose absolute correlation with the proxy exceeds
          ``corr_thresh`` are considered ocular; the top ``max_exclude`` components are returned.

@@ -308,7 +308,32 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.run_metrics:
         print("\nRunning pipeline metrics...")
-        cmd = [os.environ.get("PYTHON", "python3"), "-m", "eeg_pipeline.cli", "--config", str(args.config), "--out_dir", str(out_dir), "--get_metrics"]
+        # This utility writes a flat 02_epochs/*-epo.fif tree, so metrics run
+        # through the flat-directory analysis runner (--epochs_dir/--out_dir).
+        # The config-driven `eeg_pipeline.cli --get_metrics` reads BIDS
+        # derivatives instead and does not accept --out_dir.
+        metrics_cfg = cfg.get("metrics", {}) if isinstance(cfg.get("metrics"), dict) else {}
+        erp_cfg = metrics_cfg.get("erp", {}) if isinstance(metrics_cfg.get("erp"), dict) else {}
+        tfr_cfg = metrics_cfg.get("tfr", {}) if isinstance(metrics_cfg.get("tfr"), dict) else {}
+        do_erp = bool(erp_cfg.get("enabled", True))
+        do_tfr = bool(tfr_cfg.get("enabled", False))
+        if not do_erp and not do_tfr:
+            # analysis_runner requires at least one analysis; default to ERP.
+            do_erp = True
+        metrics_dir = out_dir / "05_metrics"
+        cmd = [
+            os.environ.get("PYTHON", "python3"),
+            "-m",
+            "eeg_pipeline.analysis_runner",
+            "--epochs_dir",
+            str(epochs_dir),
+            "--out_dir",
+            str(metrics_dir),
+        ]
+        if do_erp:
+            cmd.append("--do_erp")
+        if do_tfr:
+            cmd.append("--do_tfr")
         subprocess.run(cmd, check=True)
 
 

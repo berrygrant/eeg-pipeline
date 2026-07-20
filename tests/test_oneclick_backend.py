@@ -386,6 +386,35 @@ def test_handler_direct_exception_paths(monkeypatch):
     assert "JSON object" in post_payload["error"]
 
 
+def test_do_post_rejects_cross_origin_requests():
+    # A real (non-loopback) web origin must be rejected before any job starts,
+    # defeating drive-by CSRF from a page open in the user's browser.
+    handler = _FakeHandler({"configPath": "config.yaml"})
+    handler.path = "/api/run"
+    handler.headers["Origin"] = "https://evil.example"
+
+    backend.OneClickHandler.do_POST(handler)
+
+    assert handler.status == 403
+    payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert payload["ok"] is False
+    assert "Cross-origin" in payload["error"]
+
+
+def test_do_post_allows_loopback_origin():
+    # A loopback origin passes the CSRF gate; the invalid body then yields the
+    # normal 400, proving the request was not blocked at the origin check.
+    handler = _FakeHandler(["invalid"])
+    handler.path = "/api/config/validate"
+    handler.headers["Origin"] = "http://127.0.0.1:8765"
+
+    backend.OneClickHandler.do_POST(handler)
+
+    assert handler.status == 400
+    payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert "JSON object" in payload["error"]
+
+
 def test_find_port_falls_back_when_preferred_port_is_busy():
     import socket
 

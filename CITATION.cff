@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: eeg-pipeline
+abstract: >-
+  A modular, config-driven EEG preprocessing and analysis pipeline built on
+  MNE-Python, supporting BIDS datasets, ERP and time-frequency analyses.
+type: software
+authors:
+  - family-names: Berry
+    given-names: Grant M.
+version: 2.1.0
+doi: 10.5281/zenodo.20326493
+license: MIT
+repository-code: https://github.com/berrygrant/eeg-pipeline
+url: https://github.com/berrygrant/eeg-pipeline
+keywords:
+  - EEG
+  - MNE-Python
+  - ERP
+  - time-frequency
+  - BIDS
+  - neuroscience

@@ -1,7 +1,23 @@
 coverage:
   status:
-    patch: off
+    project:
+      default:
+        # Honest baseline measured over the whole package (no omit list).
+        # Auto-compares against the branch base; small tolerance avoids
+        # flapping. The first honest run re-baselines the number, so the
+        # transition PR is expected to show a drop from the old (inflated,
+        # omit-list) figure -- that is the point.
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        # New/changed lines must carry coverage. Kept modest during the
+        # coverage-honesty transition; raise toward 80% as CLI-layer tests land.
+        target: 60%
+        threshold: 5%
 
+# Only genuinely non-Python assets are ignored. The Python OneClick backend
+# (eeg_pipeline/oneclick/) IS measured.
 ignore:
   - "oneclick/electron/**"
   - "package.json"

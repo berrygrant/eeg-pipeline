@@ -33,29 +33,48 @@ function stages() {
   };
 }
 
+function clearNode(el) {
+  while (el.firstChild) el.removeChild(el.firstChild);
+}
+
+// All render* helpers build DOM with textContent rather than innerHTML: the
+// values below are backend-derived (config summaries, warnings, and recording
+// fields parsed from on-disk filenames), so string interpolation into HTML
+// would be an injection sink.
 function renderSummary(summary) {
-  const entries = Object.entries(summary || {});
-  $("summary").innerHTML = entries
-    .map(([key, value]) => `<dt>${key}</dt><dd>${value == null ? "" : String(value)}</dd>`)
-    .join("");
+  const el = $("summary");
+  clearNode(el);
+  for (const [key, value] of Object.entries(summary || {})) {
+    const dt = document.createElement("dt");
+    dt.textContent = key;
+    const dd = document.createElement("dd");
+    dd.textContent = value == null ? "" : String(value);
+    el.append(dt, dd);
+  }
 }
 
 function renderWarnings(warnings) {
-  $("warnings").innerHTML = (warnings || []).map((item) => `<p>${item}</p>`).join("");
+  const el = $("warnings");
+  clearNode(el);
+  for (const item of warnings || []) {
+    const p = document.createElement("p");
+    p.textContent = item;
+    el.appendChild(p);
+  }
 }
 
 function renderRecordings(items) {
-  $("recordings").innerHTML = (items || [])
-    .map(
-      (item) => `<tr>
-        <td>${item.subject || ""}</td>
-        <td>${item.session || ""}</td>
-        <td>${item.task || ""}</td>
-        <td>${item.run || ""}</td>
-        <td>${item.behaviorKind || ""}</td>
-      </tr>`
-    )
-    .join("");
+  const el = $("recordings");
+  clearNode(el);
+  for (const item of items || []) {
+    const tr = document.createElement("tr");
+    for (const key of ["subject", "session", "task", "run", "behaviorKind"]) {
+      const td = document.createElement("td");
+      td.textContent = item[key] || "";
+      tr.appendChild(td);
+    }
+    el.appendChild(tr);
+  }
 }
 
 function setLog(lines) {
@@ -127,7 +146,12 @@ $("discoverBtn").addEventListener("click", () => discover().catch(showError));
 $("runBtn").addEventListener("click", () => runPipeline().catch(showError));
 
 function showError(error) {
-  $("warnings").innerHTML = `<p class="error">${error.message}</p>`;
+  const el = $("warnings");
+  clearNode(el);
+  const p = document.createElement("p");
+  p.className = "error";
+  p.textContent = error.message;
+  el.appendChild(p);
 }
 
 init().catch(showError);

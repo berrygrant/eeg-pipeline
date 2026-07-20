@@ -4,6 +4,30 @@ from pathlib import Path
 import pytest
 
 import eeg_pipeline.cli as cli
+import eeg_pipeline.cli_pipeline as cli_pipeline
+
+
+def test_run_full_pipeline_does_not_alias_conversion_into_recursion(monkeypatch):
+    """Regression: --legacy --convert_to_bids --process_data must not recurse.
+
+    cli.run_full_pipeline previously repointed cli_pipeline's own
+    run_legacy_to_bids_conversion at the cli wrapper, whose body then called
+    that same attribute -> unbounded recursion. Guard that the name resolved
+    inside run_full_pipeline stays the real in-module implementation.
+    """
+    original = cli_pipeline.run_legacy_to_bids_conversion
+    captured = {}
+
+    def fake_run_full_pipeline(args, defaults=None, cfg=None):
+        captured["conversion"] = cli_pipeline.run_legacy_to_bids_conversion
+        return []
+
+    monkeypatch.setattr(cli_pipeline, "run_full_pipeline", fake_run_full_pipeline)
+
+    cli.run_full_pipeline(Namespace(), defaults={}, cfg={})
+
+    assert captured["conversion"] is original
+    assert cli_pipeline.run_legacy_to_bids_conversion is original
 
 
 def test_set_if_default_only_updates_unmodified_arguments():

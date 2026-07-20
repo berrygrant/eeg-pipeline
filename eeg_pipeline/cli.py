@@ -107,7 +107,11 @@ def run_legacy_to_bids_conversion(args, defaults=None, cfg=None):
 def run_full_pipeline(args, defaults=None, cfg=None):
     _sync_module(_pipeline)
     _pipeline.apply_config = apply_config
-    _pipeline.run_legacy_to_bids_conversion = run_legacy_to_bids_conversion
+    # Do NOT rebind _pipeline.run_legacy_to_bids_conversion here: it would point
+    # cli_pipeline's module global at this wrapper, and the wrapper calls that
+    # same attribute -> unbounded recursion on --legacy --convert_to_bids
+    # --process_data. run_full_pipeline already calls the real in-module
+    # implementation directly.
     return _pipeline.run_full_pipeline(args, defaults=defaults, cfg=cfg)
 
 
