@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 import eeg_pipeline.cli as cli
+import eeg_pipeline.cli_common as cli_common
 import eeg_pipeline.cli_pipeline as cli_pipeline
 
 
@@ -33,9 +34,9 @@ def test_run_full_pipeline_does_not_alias_conversion_into_recursion(monkeypatch)
 def test_set_if_default_only_updates_unmodified_arguments():
     args = Namespace(bids_root="default", derivatives_root="custom")
 
-    cli.set_if_default(args, {"bids_root": "default", "derivatives_root": "default"}, "bids_root", "/tmp/bids")
-    cli.set_if_default(args, {"bids_root": "default", "derivatives_root": "default"}, "derivatives_root", "/tmp/derivatives")
-    cli.set_if_default(args, {}, "missing", "ignored")
+    cli_common.set_if_default(args, {"bids_root": "default", "derivatives_root": "default"}, "bids_root", "/tmp/bids")
+    cli_common.set_if_default(args, {"bids_root": "default", "derivatives_root": "default"}, "derivatives_root", "/tmp/derivatives")
+    cli_common.set_if_default(args, {}, "missing", "ignored")
 
     assert args.bids_root == "/tmp/bids"
     assert args.derivatives_root == "custom"
@@ -49,11 +50,11 @@ def test_bv_get_and_brainvision_links_ok_validate_referenced_files(tmp_path: Pat
     eeg.write_text("data", encoding="utf-8")
     vhdr.write_text("MarkerFile=sample.vmrk\nDataFile=sample.eeg\n", encoding="utf-8")
 
-    assert cli._bv_get(vhdr.read_text(encoding="utf-8"), "markerfile") == "sample.vmrk"
-    assert cli.brainvision_links_ok(vhdr) == (True, "")
+    assert cli_common._bv_get(vhdr.read_text(encoding="utf-8"), "markerfile") == "sample.vmrk"
+    assert cli_common.brainvision_links_ok(vhdr) == (True, "")
 
     vmrk.unlink()
-    ok, reason = cli.brainvision_links_ok(vhdr)
+    ok, reason = cli_common.brainvision_links_ok(vhdr)
     assert ok is False
     assert "MarkerFile=sample.vmrk" in reason
 
@@ -68,12 +69,12 @@ def test_bv_get_and_brainvision_links_ok_validate_referenced_files(tmp_path: Pat
     ],
 )
 def test_parse_n_components_handles_common_input_types(raw_value, expected):
-    assert cli._parse_n_components(raw_value) == expected
+    assert cli_common._parse_n_components(raw_value) == expected
 
 
 def test_detect_trigger_bursts_reports_short_iti_and_dense_windows():
-    diag = cli.detect_trigger_bursts(
-        markers_pos=cli.np.array([0, 1, 2, 3, 100], dtype=int),
+    diag = cli_common.detect_trigger_bursts(
+        markers_pos=cli_common.np.array([0, 1, 2, 3, 100], dtype=int),
         sfreq=100.0,
         min_iti_s=0.02,
         burst_win_s=0.05,

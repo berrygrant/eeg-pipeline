@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 import eeg_pipeline.cli as cli
+import eeg_pipeline.cli_metrics as cli_metrics
 
 
 def _base_metrics_args(bids_root: Path, derivatives_root: Path) -> Namespace:
@@ -89,7 +90,7 @@ def test_run_metrics_only_writes_combined_outputs(monkeypatch, tmp_path: Path, s
     bids_root.mkdir()
     (bids_root / "dataset_description.json").write_text('{"Name":"Fixture","BIDSVersion":"1.11.1"}', encoding="utf-8")
     derivatives_root = tmp_path / "derivatives"
-    dataset_root = cli._prepare_derivatives_root(
+    dataset_root = cli_metrics._prepare_derivatives_root(
         Namespace(bids_root=str(bids_root), derivatives_root=str(derivatives_root))
     )
     epoch_path = dataset_root / "sub-001" / "eeg" / "sub-001_task-oddball_epo.fif"
@@ -101,21 +102,21 @@ def test_run_metrics_only_writes_combined_outputs(monkeypatch, tmp_path: Path, s
     args.metrics_channels = None
     args.condition_map = {"Oddball": 1}
 
-    monkeypatch.setattr(cli, "_build_erp_windows", lambda args_obj: [cli.ERP_WINDOWS["MMN"]])
-    monkeypatch.setattr(cli, "load_epochs", lambda path: SimpleNamespace(epochs=synthetic_epochs))
-    monkeypatch.setattr(cli.mne, "pick_types", lambda info, eeg=True, eog=False: [0, 1])
+    monkeypatch.setattr(cli_metrics, "_build_erp_windows", lambda args_obj: [cli_metrics.ERP_WINDOWS["MMN"]])
+    monkeypatch.setattr(cli_metrics, "load_epochs", lambda path: SimpleNamespace(epochs=synthetic_epochs))
+    monkeypatch.setattr(cli_metrics.mne, "pick_types", lambda info, eeg=True, eog=False: [0, 1])
     monkeypatch.setattr(
-        cli,
+        cli_metrics,
         "compute_erp_metrics",
         lambda *args_in, **kwargs: pd.DataFrame([{"subject": kwargs["subject"], "status": "OK"}]),
     )
     monkeypatch.setattr(
-        cli,
+        cli_metrics,
         "compute_erp_timeseries",
         lambda *args_in, **kwargs: pd.DataFrame([{"subject": kwargs["subject"], "status": "OK"}]),
     )
     monkeypatch.setattr(
-        cli,
+        cli_metrics,
         "compute_tfr_metrics",
         lambda *args_in, **kwargs: pd.DataFrame([{"subject": kwargs["subject"], "status": "OK"}]),
     )

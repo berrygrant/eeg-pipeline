@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 import eeg_pipeline.cli as cli
+import eeg_pipeline.cli_config as cli_config
 
 
 def _parser_and_args():
@@ -135,7 +136,7 @@ def _rich_config():
 
 def test_apply_config_maps_rich_config_onto_args(monkeypatch):
     _, args, defaults = _parser_and_args()
-    monkeypatch.setattr(cli, "load_config", lambda path, overrides=None: _rich_config())
+    monkeypatch.setattr(cli_config, "load_config", lambda path, overrides=None: _rich_config())
 
     cfg = cli.apply_config(args, defaults)
 
@@ -172,7 +173,7 @@ def test_apply_config_maps_rich_config_onto_args(monkeypatch):
 def test_apply_config_legacy_flag_overrides_config_mode(monkeypatch):
     _, args, defaults = _parser_and_args()
     args.legacy = True
-    monkeypatch.setattr(cli, "load_config", lambda path, overrides=None: _rich_config())
+    monkeypatch.setattr(cli_config, "load_config", lambda path, overrides=None: _rich_config())
 
     cli.apply_config(args, defaults)
 

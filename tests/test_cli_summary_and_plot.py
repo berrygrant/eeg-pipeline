@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 import eeg_pipeline.cli as cli
+import eeg_pipeline.cli_summary as cli_summary
 
 
 def _summary_args(bids_root: Path) -> Namespace:
@@ -58,9 +59,9 @@ def _patch_summary_dependencies(monkeypatch, synthetic_raw):
         annotations=SimpleNamespace(description=["Stimulus/S1", "Stimulus/S1", "Response/R1"])
     )
 
-    monkeypatch.setattr(cli.mne.io, "read_raw_brainvision", lambda *args, **kwargs: raw0)
-    monkeypatch.setattr(cli.mne.io, "read_raw_eeglab", lambda *args, **kwargs: raw0)
-    monkeypatch.setattr(cli, "read_raw_preprocess", lambda **kwargs: synthetic_raw.copy())
+    monkeypatch.setattr(cli_summary.mne.io, "read_raw_brainvision", lambda *args, **kwargs: raw0)
+    monkeypatch.setattr(cli_summary.mne.io, "read_raw_eeglab", lambda *args, **kwargs: raw0)
+    monkeypatch.setattr(cli_summary, "read_raw_preprocess", lambda **kwargs: synthetic_raw.copy())
     monkeypatch.setattr(
         cli,
         "compute_ica_diagnostics",
@@ -95,13 +96,13 @@ def _patch_summary_dependencies(monkeypatch, synthetic_raw):
             "dt_max": 0.98,
         },
     )
-    monkeypatch.setattr(cli, "keep_by_gap_heuristic", lambda markers_pos, sfreq, gap_s: [0, 3])
+    monkeypatch.setattr(cli_summary, "keep_by_gap_heuristic", lambda markers_pos, sfreq, gap_s: [0, 3])
     monkeypatch.setattr(
         cli,
         "parse_vmrk_markers",
         lambda path: pd.DataFrame({"mtype": ["Stimulus", "Response"], "desc": ["S 1", "R 1"]}),
     )
-    monkeypatch.setattr(cli, "parse_token_map", lambda token_map: {"token1": "A", "token2": "B"})
+    monkeypatch.setattr(cli_summary, "parse_token_map", lambda token_map: {"token1": "A", "token2": "B"})
 
 
 def test_summarize_one_file_reports_bids_events(monkeypatch, tmp_path: Path, synthetic_raw, capsys):
