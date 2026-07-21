@@ -98,9 +98,11 @@ metrics:
     tmax: 0.6
     fmin: 3.0
     fmax: 8.0
-    # NOTE: baseline / baseline_mode are intentionally NOT applied by the
-    # config-driven pipeline (eeg_pipeline.cli --get_metrics), which follows
-    # ERPLAB and keeps power/ITC un-baselined in the TF domain. They only take
-    # effect in the legacy flat-directory runner (eeg_pipeline.analysis_runner).
+    # NOTE: baseline / baseline_mode do NOT affect the TFR *metrics*. Both entry
+    # points -- `eeg_pipeline.cli --get_metrics` and the flat-dir
+    # `eeg_pipeline.analysis_runner` -- call metrics.compute_tfr_metrics, which is
+    # ERPLAB-style and keeps power/ITC un-baselined in the TF domain (the keys are
+    # carried in TFRParams but ignored). A TF-domain baseline is only applied to
+    # TFR *figures* (analysis_runner --make_figures, via its --tfr_baseline flag).
     baseline: [-0.2, 0.0]
     baseline_mode: "logratio"
