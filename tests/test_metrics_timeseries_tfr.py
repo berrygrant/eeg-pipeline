@@ -272,6 +272,45 @@ def test_compute_tfr_metrics_returns_flattened_rows(monkeypatch, synthetic_epoch
     assert first["n_epochs"] == 2
 
 
+def test_compute_tfr_metrics_never_applies_tf_baseline(monkeypatch, synthetic_epochs):
+    # Single-policy guarantee: compute_tfr_metrics is ERPLAB-style and must NOT
+    # apply a TF-domain baseline, even when TFRParams carries one. Both entry
+    # points (cli --get_metrics and analysis_runner) delegate to this function,
+    # so this keeps their TFR metrics identical and baseline-free. A regression
+    # that starts applying the baseline here would silently diverge the outputs.
+    times = np.array([-0.05, 0.0, 0.05])
+    freqs = np.array([2.0, 4.0])
+    calls = {"apply_baseline": 0}
+
+    class SpyTFR(FakeTFR):
+        def copy(self):
+            return SpyTFR(self.data.copy(), self.times.copy(), self.freqs.copy(), list(self.ch_names))
+
+        def apply_baseline(self, *args, **kwargs):
+            calls["apply_baseline"] += 1
+            return self
+
+    def _mk():
+        return SpyTFR([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]], times, freqs, ["Fz"])
+
+    monkeypatch.setattr(tfr_mod, "_compute_tfr_epochs", lambda epochs, freqs_in, params: (_mk(), _mk()))
+    monkeypatch.setattr(tfr_mod, "_compute_tfr_evoked", lambda evoked, freqs_in, params: _mk())
+
+    df = tfr_mod.compute_tfr_metrics(
+        synthetic_epochs,
+        subject="001",
+        channels=["Fz"],
+        tmin=-0.05,
+        tmax=0.05,
+        # A non-None baseline that must be ignored for metrics.
+        params=tfr_mod.TFRParams(fmin=2.0, fmax=4.0, fstep=2.0, baseline=(-0.1, 0.0), mode="logratio"),
+        time_decim=1,
+    )
+
+    assert calls["apply_baseline"] == 0
+    assert set(df["status"]) == {"OK"}
+
+
 def test_compute_tfr_metrics_rejects_axis_mismatch(monkeypatch, synthetic_epochs):
     times = np.array([-0.05, 0.0])
     freqs = np.array([2.0])
