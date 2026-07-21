@@ -1,10 +1,27 @@
-# ruff: noqa: F403,F405
 from __future__ import annotations
 
-from . import cli_common as _common
-from .cli_common import *  # noqa: F403
+from pathlib import Path
 
-globals().update({name: value for name, value in vars(_common).items() if not name.startswith("__") or name == "__version__"})
+import mne
+import pandas as pd
+
+from .cli_common import (
+    ERP_WINDOWS,
+    ERPTimeSeriesParams,
+    ERPWindow,
+    TFRParams,
+    _finalize_runtime_paths,
+    _prepare_derivatives_root,
+    _save_dataframe_with_sidecar,
+    compute_erp_metrics,
+    compute_erp_timeseries,
+    compute_tfr_metrics,
+    dataset_derivative_path,
+    load_epochs,
+    parse_bids_entities_like_name,
+    source_basename_from_derivative_path,
+    subject_derivative_path,
+)
 
 
 def _subject_from_epochs_path(p: Path) -> str:

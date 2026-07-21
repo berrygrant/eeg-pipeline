@@ -1,10 +1,26 @@
-# ruff: noqa: F403,F405
 from __future__ import annotations
 
-from . import cli_common as _common
-from .cli_common import *  # noqa: F403
+from pathlib import Path
 
-globals().update({name: value for name, value in vars(_common).items() if not name.startswith("__") or name == "__version__"})
+import mne
+import pandas as pd
+
+from .cli_common import (
+    _behavior_inputs_for_recording,
+    _finalize_runtime_paths,
+    _recording_from_raw_path,
+    align_marker_positions_to_codes,
+    compute_ica_diagnostics,
+    detect_trigger_bursts,
+    events_from_annotations_positions,
+    keep_by_gap_heuristic,
+    load_behavioral_events,
+    marker_gap_stats,
+    parse_token_map,
+    parse_vmrk_markers,
+    read_raw_preprocess,
+    recommend_ica,
+)
 
 
 def summarize_one_file(args, raw_path: Path):

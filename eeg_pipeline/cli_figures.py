@@ -1,11 +1,18 @@
-# ruff: noqa: F403,F405
 from __future__ import annotations
 
-from . import cli_common as _common
-from .cli_common import *  # noqa: F403
-from .cli_metrics import _resolve_figure_freq_band, _resolve_figure_time_window
+import sys
+from pathlib import Path
 
-globals().update({name: value for name, value in vars(_common).items() if not name.startswith("__") or name == "__version__"})
+from eeg_pipeline import __version__
+
+from .cli_common import (
+    _dataset_metrics_dir,
+    _finalize_runtime_paths,
+    _pipeline_dataset_root,
+    dataset_derivative_path,
+    ensure_derivatives_dataset,
+)
+from .cli_metrics import _resolve_figure_freq_band, _resolve_figure_time_window
 
 
 def _prompt_yes_no(msg: str) -> bool:
