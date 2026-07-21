@@ -112,6 +112,159 @@ def run_legacy_to_bids_conversion(args, defaults=None, cfg=None) -> list[Pipelin
     return converted
 
 
+def _compute_subject_metrics(
+    epochs,
+    recording,
+    args,
+    *,
+    dataset_root,
+    metrics_conditions,
+    subj,
+    behavior_source,
+    erp_metrics_all,
+    tfr_metrics_all,
+    erp_timeseries_all,
+):
+    if int(getattr(args, "metrics", 0)):
+        do_erp = bool(getattr(args, "metrics_erp_enabled", True))
+        do_tfr = bool(getattr(args, "metrics_tfr_enabled", True))
+
+        if do_erp or do_tfr:
+            subject_metrics_dir = _subject_metrics_dir(dataset_root, recording)
+            subject_metrics_dir.mkdir(parents=True, exist_ok=True)
+
+        channels = getattr(args, "metrics_channels", None) or ["Fp1", "Fz", "Cz"]
+        conds = metrics_conditions
+
+        if do_erp:
+            # ERP windows
+            erp_windows = _build_erp_windows(args)
+
+            try:
+                diff_label = getattr(args, "difference_label", None)
+                df_erp = compute_erp_metrics(
+                    epochs,
+                    subject=subj,
+                    channels=channels,
+                    conditions=conds,
+                    windows=erp_windows,
+                    compute_mmn=bool(getattr(args, "compute_mmn", 1)),
+                    mmn_name=diff_label if diff_label else "DEV_MINUS_STD",
+                )
+                df_erp["subject"] = subj
+                df_erp["task"] = recording.task_id or ""
+                df_erp["session"] = recording.session_label or ""
+                df_erp["run"] = recording.run_id or ""
+                _save_dataframe_with_sidecar(
+                    df_erp,
+                    subject_derivative_path(
+                        dataset_root,
+                        recording.entities,
+                        suffix="metrics",
+                        extension=".tsv",
+                        desc="erp",
+                    ),
+                    args,
+                    recording,
+                    behavior_source=behavior_source,
+                    description="Subject-level ERP metrics computed from derivative epochs.",
+                )
+                erp_metrics_all.append(df_erp)
+            except Exception as e:
+                print(f"[WARN] ERP metrics failed for {subj}: {e}")
+
+            if bool(getattr(args, "metrics_erp_timeseries", False)):
+                try:
+                    if args.metrics_channels is None:
+                        eeg_picks = mne.pick_types(epochs.info, eeg=True, eog=False)
+                        ts_channels = [epochs.ch_names[i] for i in eeg_picks]
+                    else:
+                        ts_channels = channels
+
+                    ts_params = ERPTimeSeriesParams(
+                        tmin=float(args.tmin),
+                        tmax=float(args.tmax),
+                        baseline=(float(args.baseline[0]), float(args.baseline[1])),
+                        decim=1,
+                    )
+                    df_ts = compute_erp_timeseries(
+                        epochs,
+                        subject=subj,
+                        channels=ts_channels,
+                        params=ts_params,
+                        conditions=conds,
+                        include_difference_wave=False,
+                    )
+                    df_ts["subject"] = subj
+                    df_ts["task"] = recording.task_id or ""
+                    df_ts["session"] = recording.session_label or ""
+                    df_ts["run"] = recording.run_id or ""
+                    _save_dataframe_with_sidecar(
+                        df_ts,
+                        subject_derivative_path(
+                            dataset_root,
+                            recording.entities,
+                            suffix="timeseries",
+                            extension=".parquet",
+                            desc="erp",
+                        ),
+                        args,
+                        recording,
+                        behavior_source=behavior_source,
+                        description="Subject-level ERP time series metrics.",
+                    )
+                    erp_timeseries_all.append(df_ts)
+                except Exception as e:
+                    print(f"[WARN] ERP timeseries failed for {subj}: {e}")
+
+        if do_tfr:
+            try:
+                tfr_params = TFRParams(
+                    fmin=float(getattr(args, "tfr_fmin", 1.0)),
+                    fmax=float(getattr(args, "tfr_fmax", 30.0)),
+                    fstep=float(getattr(args, "tfr_fstep", 1.0)),
+                    method=str(getattr(args, "tfr_method", "multitaper")),
+                    n_cycles_div=float(getattr(args, "tfr_n_cycles_div", 10.0)),
+                    decim=int(getattr(args, "tfr_decim", 1)),
+                    baseline=(
+                        float(getattr(args, "tfr_baseline", [-0.1, 0.0])[0]),
+                        float(getattr(args, "tfr_baseline", [-0.1, 0.0])[1]),
+                    ),
+                    mode=str(getattr(args, "tfr_baseline_mode", "logratio")),
+                )
+                df_tfr = compute_tfr_metrics(
+                    epochs,
+                    subject=subj,
+                    channels=channels,
+                    conditions=conds,
+                    params=tfr_params,
+                    tmin=float(getattr(args, "tfr_tmin", -0.2)),
+                    tmax=float(getattr(args, "tfr_tmax", 0.6)),
+                    time_decim=int(getattr(args, "tfr_time_decim", 1)),
+                )
+                df_tfr["subject"] = subj
+                df_tfr["task"] = recording.task_id or ""
+                df_tfr["session"] = recording.session_label or ""
+                df_tfr["run"] = recording.run_id or ""
+                _save_dataframe_with_sidecar(
+                    df_tfr,
+                    subject_derivative_path(
+                        dataset_root,
+                        recording.entities,
+                        suffix="metrics",
+                        extension=".tsv",
+                        desc="tfr",
+                    ),
+                    args,
+                    recording,
+                    behavior_source=behavior_source,
+                    description="Subject-level TFR metrics computed from derivative epochs.",
+                )
+                tfr_metrics_all.append(df_tfr)
+            except Exception as e:
+                print(f"[WARN] TFR metrics failed for {subj}: {e}")
+
+
 def _process_recording(
     recording,
     *,
@@ -744,147 +897,19 @@ def _process_recording(
         )
         return
 
-    # ------------------------------------------------------------------
     # Metrics (ERP + TFR)
-    # ------------------------------------------------------------------
-    if int(getattr(args, "metrics", 0)):
-        do_erp = bool(getattr(args, "metrics_erp_enabled", True))
-        do_tfr = bool(getattr(args, "metrics_tfr_enabled", True))
-
-        if do_erp or do_tfr:
-            subject_metrics_dir = _subject_metrics_dir(dataset_root, recording)
-            subject_metrics_dir.mkdir(parents=True, exist_ok=True)
-
-        channels = getattr(args, "metrics_channels", None) or ["Fp1", "Fz", "Cz"]
-        conds = metrics_conditions
-
-        if do_erp:
-            # ERP windows
-            erp_windows = _build_erp_windows(args)
-
-            try:
-                diff_label = getattr(args, "difference_label", None)
-                df_erp = compute_erp_metrics(
-                    epochs,
-                    subject=subj,
-                    channels=channels,
-                    conditions=conds,
-                    windows=erp_windows,
-                    compute_mmn=bool(getattr(args, "compute_mmn", 1)),
-                    mmn_name=diff_label if diff_label else "DEV_MINUS_STD",
-                )
-                df_erp["subject"] = subj
-                df_erp["task"] = recording.task_id or ""
-                df_erp["session"] = recording.session_label or ""
-                df_erp["run"] = recording.run_id or ""
-                _save_dataframe_with_sidecar(
-                    df_erp,
-                    subject_derivative_path(
-                        dataset_root,
-                        recording.entities,
-                        suffix="metrics",
-                        extension=".tsv",
-                        desc="erp",
-                    ),
-                    args,
-                    recording,
-                    behavior_source=behavior_source,
-                    description="Subject-level ERP metrics computed from derivative epochs.",
-                )
-                erp_metrics_all.append(df_erp)
-            except Exception as e:
-                print(f"[WARN] ERP metrics failed for {subj}: {e}")
-
-            if bool(getattr(args, "metrics_erp_timeseries", False)):
-                try:
-                    if args.metrics_channels is None:
-                        eeg_picks = mne.pick_types(epochs.info, eeg=True, eog=False)
-                        ts_channels = [epochs.ch_names[i] for i in eeg_picks]
-                    else:
-                        ts_channels = channels
-
-                    ts_params = ERPTimeSeriesParams(
-                        tmin=float(args.tmin),
-                        tmax=float(args.tmax),
-                        baseline=(float(args.baseline[0]), float(args.baseline[1])),
-                        decim=1,
-                    )
-                    df_ts = compute_erp_timeseries(
-                        epochs,
-                        subject=subj,
-                        channels=ts_channels,
-                        params=ts_params,
-                        conditions=conds,
-                        include_difference_wave=False,
-                    )
-                    df_ts["subject"] = subj
-                    df_ts["task"] = recording.task_id or ""
-                    df_ts["session"] = recording.session_label or ""
-                    df_ts["run"] = recording.run_id or ""
-                    _save_dataframe_with_sidecar(
-                        df_ts,
-                        subject_derivative_path(
-                            dataset_root,
-                            recording.entities,
-                            suffix="timeseries",
-                            extension=".parquet",
-                            desc="erp",
-                        ),
-                        args,
-                        recording,
-                        behavior_source=behavior_source,
-                        description="Subject-level ERP time series metrics.",
-                    )
-                    erp_timeseries_all.append(df_ts)
-                except Exception as e:
-                    print(f"[WARN] ERP timeseries failed for {subj}: {e}")
-
-        if do_tfr:
-            try:
-                tfr_params = TFRParams(
-                    fmin=float(getattr(args, "tfr_fmin", 1.0)),
-                    fmax=float(getattr(args, "tfr_fmax", 30.0)),
-                    fstep=float(getattr(args, "tfr_fstep", 1.0)),
-                    method=str(getattr(args, "tfr_method", "multitaper")),
-                    n_cycles_div=float(getattr(args, "tfr_n_cycles_div", 10.0)),
-                    decim=int(getattr(args, "tfr_decim", 1)),
-                    baseline=(
-                        float(getattr(args, "tfr_baseline", [-0.1, 0.0])[0]),
-                        float(getattr(args, "tfr_baseline", [-0.1, 0.0])[1]),
-                    ),
-                    mode=str(getattr(args, "tfr_baseline_mode", "logratio")),
-                )
-                df_tfr = compute_tfr_metrics(
-                    epochs,
-                    subject=subj,
-                    channels=channels,
-                    conditions=conds,
-                    params=tfr_params,
-                    tmin=float(getattr(args, "tfr_tmin", -0.2)),
-                    tmax=float(getattr(args, "tfr_tmax", 0.6)),
-                    time_decim=int(getattr(args, "tfr_time_decim", 1)),
-                )
-                df_tfr["subject"] = subj
-                df_tfr["task"] = recording.task_id or ""
-                df_tfr["session"] = recording.session_label or ""
-                df_tfr["run"] = recording.run_id or ""
-                _save_dataframe_with_sidecar(
-                    df_tfr,
-                    subject_derivative_path(
-                        dataset_root,
-                        recording.entities,
-                        suffix="metrics",
-                        extension=".tsv",
-                        desc="tfr",
-                    ),
-                    args,
-                    recording,
-                    behavior_source=behavior_source,
-                    description="Subject-level TFR metrics computed from derivative epochs.",
-                )
-                tfr_metrics_all.append(df_tfr)
-            except Exception as e:
-                print(f"[WARN] TFR metrics failed for {subj}: {e}")
+    _compute_subject_metrics(
+        epochs,
+        recording,
+        args,
+        dataset_root=dataset_root,
+        metrics_conditions=metrics_conditions,
+        subj=subj,
+        behavior_source=behavior_source,
+        erp_metrics_all=erp_metrics_all,
+        tfr_metrics_all=tfr_metrics_all,
+        erp_timeseries_all=erp_timeseries_all,
+    )
 
     ica_recommendation = recommend_ica(
         epoch_reject_rate=epoch_reject_rate,
