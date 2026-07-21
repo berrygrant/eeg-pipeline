@@ -108,7 +108,7 @@ eeg_pipeline/
 ├── evoked.py             # Evoked and grand-average helpers
 ├── gpu.py                # Optional GPU (MNE CUDA / CuPy) backend
 ├── qc.py                 # QC summary writer
-├── analysis_runner.py    # Flat-directory post-hoc metrics engine
+├── analysis_runner.py    # Flat-directory post-hoc metrics engine (DEPRECATED; see note below)
 ├── metrics/
 │   ├── erp.py            # ERP windowed metrics
 │   ├── erp_timeseries.py # ERP time-series metrics (Parquet)
@@ -128,9 +128,18 @@ scripts/                          # Thin wrappers / legacy utilities (not instal
 ├── export_eventcodes.py          # Legacy: export event codes
 └── import_manual_rejection_sets.py  # Legacy: import EEGLAB manual rejections
 
-run_analysis.py           # Compatibility shim for analysis_runner (eeg-run-analysis)
-run_metrics.py            # Legacy metrics runner (kept for compatibility)
+run_analysis.py           # Compatibility shim for analysis_runner (eeg-run-analysis) — DEPRECATED
+run_metrics.py            # Legacy metrics runner (kept for compatibility) — DEPRECATED
 ```
+
+> **Deprecated: flat-directory metrics runners.** The `eeg-run-analysis`
+> console script, the root `run_analysis.py` / `run_metrics.py` wrappers, and
+> `python -m eeg_pipeline.analysis_runner` all emit a `DeprecationWarning` and
+> will be removed in a future release. They read loose `*-epo.fif` files from a
+> flat directory; prefer the config-driven, BIDS-based
+> [`python -m eeg_pipeline.cli --get_metrics`](#metrics-only-reruns), which
+> routes through the same `eeg_pipeline.metrics` engine (identical ERP/TFR
+> numerics and a single TFR-baseline policy).
 
 ---
 

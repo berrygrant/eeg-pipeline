@@ -6,6 +6,16 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Deprecated
+- The flat-directory metrics runners now emit a `DeprecationWarning` at runtime.
+  This covers the `eeg-run-analysis` console script, the root `run_analysis.py`
+  and `run_metrics.py` wrappers, and `python -m eeg_pipeline.analysis_runner` —
+  all of which funnel through `analysis_runner.main`. They continue to work
+  unchanged for now; prefer the config-driven, BIDS-based
+  `python -m eeg_pipeline.cli --get_metrics`, which routes through the same
+  `eeg_pipeline.metrics` engine (identical ERP/TFR numerics and one baseline
+  policy). The flat-directory runners will be removed in a future release.
+
 ## [2.1.0] - 2026-07-20
 
 ### Fixed

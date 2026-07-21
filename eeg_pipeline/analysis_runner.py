@@ -15,6 +15,7 @@ Legacy compatibility:
 from __future__ import annotations
 
 import argparse
+import warnings
 from pathlib import Path
 
 import pandas as pd
@@ -393,6 +394,16 @@ def _maybe_make_figures(
 
 
 def main(argv=None):
+    warnings.warn(
+        "The flat-directory metrics runners (eeg-run-analysis / run_analysis.py / "
+        "run_metrics.py / `python -m eeg_pipeline.analysis_runner`) are deprecated and "
+        "will be removed in a future release. Prefer the config-driven, BIDS-based "
+        "`python -m eeg_pipeline.cli --get_metrics` (see the README "
+        "'Metrics-only reruns' section), which routes through the same "
+        "eeg_pipeline.metrics engine.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     ap = build_arg_parser()
     args = ap.parse_args(argv)
 
