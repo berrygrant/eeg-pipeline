@@ -3,8 +3,10 @@ from argparse import Namespace
 import matplotlib
 import mne
 import numpy as np
+import pytest
 
 import run_analysis
+from eeg_pipeline import analysis_runner
 from eeg_pipeline.metrics.erp_timeseries import ERP_TIMESERIES_COLUMNS, compute_erp_timeseries
 
 matplotlib.use("Agg")
@@ -100,3 +102,16 @@ def test_erp_timeseries_empty_epochs_uses_stable_schema():
 
     assert list(df.columns) == ERP_TIMESERIES_COLUMNS
     assert df.loc[0, "status"] == "EMPTY_EPOCHS"
+
+
+@pytest.mark.parametrize("entry", [analysis_runner.main, run_analysis.main])
+def test_flat_dir_runner_emits_deprecation_warning(entry):
+    # The flat-directory runners are deprecated in favor of the config-driven
+    # BIDS CLI. main() must emit a DeprecationWarning before doing any work; the
+    # RuntimeError (no analysis selected) fires afterward and short-circuits
+    # before touching the filesystem, so this asserts both. run_analysis.main is
+    # the installed `eeg-run-analysis` entry point and re-exports
+    # analysis_runner.main, so both must carry the warning.
+    with pytest.warns(DeprecationWarning, match="deprecated"):
+        with pytest.raises(RuntimeError, match="No analysis selected"):
+            entry(["--epochs_dir", "/nonexistent", "--out_dir", "/nonexistent"])
