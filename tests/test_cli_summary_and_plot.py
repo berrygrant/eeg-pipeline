@@ -63,7 +63,7 @@ def _patch_summary_dependencies(monkeypatch, synthetic_raw):
     monkeypatch.setattr(cli_summary.mne.io, "read_raw_eeglab", lambda *args, **kwargs: raw0)
     monkeypatch.setattr(cli_summary, "read_raw_preprocess", lambda **kwargs: synthetic_raw.copy())
     monkeypatch.setattr(
-        cli,
+        cli_summary,
         "compute_ica_diagnostics",
         lambda *args, **kwargs: {
             "eog_corr_max": 0.45,
@@ -73,17 +73,17 @@ def _patch_summary_dependencies(monkeypatch, synthetic_raw):
         },
     )
     monkeypatch.setattr(
-        cli,
+        cli_summary,
         "recommend_ica",
         lambda **kwargs: {"ica_recommended": True, "ica_recommend_reason": "blink_rate"},
     )
     monkeypatch.setattr(
-        cli,
+        cli_summary,
         "events_from_annotations_positions",
         lambda raw: np.array([[0, 0, 1], [1, 0, 1], [2, 0, 1], [100, 0, 1]], dtype=int),
     )
     monkeypatch.setattr(
-        cli,
+        cli_summary,
         "marker_gap_stats",
         lambda markers_pos, sfreq: {
             "dt_min": 0.01,
@@ -98,7 +98,7 @@ def _patch_summary_dependencies(monkeypatch, synthetic_raw):
     )
     monkeypatch.setattr(cli_summary, "keep_by_gap_heuristic", lambda markers_pos, sfreq, gap_s: [0, 3])
     monkeypatch.setattr(
-        cli,
+        cli_summary,
         "parse_vmrk_markers",
         lambda path: pd.DataFrame({"mtype": ["Stimulus", "Response"], "desc": ["S 1", "R 1"]}),
     )
