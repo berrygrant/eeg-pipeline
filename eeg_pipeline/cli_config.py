@@ -1,10 +1,6 @@
-# ruff: noqa: F403,F405
 from __future__ import annotations
 
-from . import cli_common as _common
-from .cli_common import *  # noqa: F403
-
-globals().update({name: value for name, value in vars(_common).items() if not name.startswith("__") or name == "__version__"})
+from .cli_common import _finalize_runtime_paths, load_config, set_if_default
 
 
 def _set_override(overrides: dict, path: tuple[str, ...], value) -> None:

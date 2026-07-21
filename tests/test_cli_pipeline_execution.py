@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 import eeg_pipeline.cli as cli
+import eeg_pipeline.cli_pipeline as cli_pipeline
 
 
 class _LenOnly:
@@ -156,11 +157,11 @@ def _parser_args(tmp_path: Path):
 def _patch_success_dependencies(monkeypatch, *, n_epochs=4, burst_flag=True):
     rows_holder = {"rows": []}
 
-    monkeypatch.setattr(cli, "parse_token_map", lambda token_map: {"token1": "A", "token2": "B"})
-    monkeypatch.setattr(cli, "brainvision_links_ok", lambda path: (True, ""))
-    monkeypatch.setattr(cli, "read_raw_preprocess", lambda **kwargs: FakeRaw())
+    monkeypatch.setattr(cli_pipeline, "parse_token_map", lambda token_map: {"token1": "A", "token2": "B"})
+    monkeypatch.setattr(cli_pipeline, "brainvision_links_ok", lambda path: (True, ""))
+    monkeypatch.setattr(cli_pipeline, "read_raw_preprocess", lambda **kwargs: FakeRaw())
     monkeypatch.setattr(
-        cli,
+        cli_pipeline,
         "compute_ica_diagnostics",
         lambda raw, **kwargs: {
             "eog_corr_max": 0.5,
@@ -170,11 +171,11 @@ def _patch_success_dependencies(monkeypatch, *, n_epochs=4, burst_flag=True):
             "blink_source": "EOG",
         },
     )
-    monkeypatch.setattr(cli, "fit_ica", lambda raw, params: (FakeICA(), {"status": "fit_ok"}))
-    monkeypatch.setattr(cli, "find_ica_excludes", lambda *args, **kwargs: ([0], {"excluded": 1}))
-    monkeypatch.setattr(cli, "apply_ica", lambda raw, ica_obj, exclude: raw)
+    monkeypatch.setattr(cli_pipeline, "fit_ica", lambda raw, params: (FakeICA(), {"status": "fit_ok"}))
+    monkeypatch.setattr(cli_pipeline, "find_ica_excludes", lambda *args, **kwargs: ([0], {"excluded": 1}))
+    monkeypatch.setattr(cli_pipeline, "apply_ica", lambda raw, ica_obj, exclude: raw)
     monkeypatch.setattr(
-        cli,
+        cli_pipeline,
         "events_from_annotations_positions",
         lambda raw: np.array(
             [[0, 0, 1], [100, 0, 2], [200, 0, 1], [300, 0, 2]],
@@ -182,7 +183,7 @@ def _patch_success_dependencies(monkeypatch, *, n_epochs=4, burst_flag=True):
         ),
     )
     monkeypatch.setattr(
-        cli,
+        cli_pipeline,
         "detect_trigger_bursts",
         lambda **kwargs: {
             "burst_flag": bool(burst_flag),
@@ -194,44 +195,44 @@ def _patch_success_dependencies(monkeypatch, *, n_epochs=4, burst_flag=True):
         },
     )
     monkeypatch.setattr(
-        cli,
+        cli_pipeline,
         "make_epochs",
         lambda raw, events, event_id, ep: FakeEpochs(n_epochs=n_epochs, event_codes=events[:, 2]),
     )
     monkeypatch.setattr(
-        cli.mne,
+        cli_pipeline.mne,
         "pick_types",
         lambda info, eeg=False, eog=False: [2] if eog else ([0, 1] if eeg else []),
     )
-    monkeypatch.setattr(cli.mne, "pick_channels", lambda ch_names, include: [0] if include else [])
-    monkeypatch.setattr(cli, "moving_window_ptp_max", lambda *args, **kwargs: np.array([1.0, 2.0, 3.0, 4.0]))
+    monkeypatch.setattr(cli_pipeline.mne, "pick_channels", lambda ch_names, include: [0] if include else [])
+    monkeypatch.setattr(cli_pipeline, "moving_window_ptp_max", lambda *args, **kwargs: np.array([1.0, 2.0, 3.0, 4.0]))
 
     def _ptp_mask(data, **kwargs):
         if data.shape[1] == 1:
             return np.array([False, True, False, False], dtype=bool)
         return np.array([False, False, True, False], dtype=bool)
 
-    monkeypatch.setattr(cli, "moving_window_ptp_mask", _ptp_mask)
+    monkeypatch.setattr(cli_pipeline, "moving_window_ptp_mask", _ptp_mask)
     monkeypatch.setattr(
-        cli, "simple_voltage_threshold_mask", lambda *args, **kwargs: np.zeros(n_epochs, dtype=bool)
+        cli_pipeline, "simple_voltage_threshold_mask", lambda *args, **kwargs: np.zeros(n_epochs, dtype=bool)
     )
     monkeypatch.setattr(
-        cli, "step_threshold_mask", lambda *args, **kwargs: np.array([False, True, False, False], dtype=bool)
+        cli_pipeline, "step_threshold_mask", lambda *args, **kwargs: np.array([False, True, False, False], dtype=bool)
     )
     monkeypatch.setattr(
-        cli, "compute_erp_metrics", lambda *args, **kwargs: pd.DataFrame([{"subject": kwargs["subject"], "ok": 1}])
+        cli_pipeline, "compute_erp_metrics", lambda *args, **kwargs: pd.DataFrame([{"subject": kwargs["subject"], "ok": 1}])
     )
     monkeypatch.setattr(
-        cli, "compute_erp_timeseries", lambda *args, **kwargs: pd.DataFrame([{"subject": kwargs["subject"], "ok": 1}])
+        cli_pipeline, "compute_erp_timeseries", lambda *args, **kwargs: pd.DataFrame([{"subject": kwargs["subject"], "ok": 1}])
     )
     monkeypatch.setattr(
-        cli, "compute_tfr_metrics", lambda *args, **kwargs: pd.DataFrame([{"subject": kwargs["subject"], "ok": 1}])
+        cli_pipeline, "compute_tfr_metrics", lambda *args, **kwargs: pd.DataFrame([{"subject": kwargs["subject"], "ok": 1}])
     )
-    monkeypatch.setattr(cli, "recommend_ica", lambda **kwargs: {"ica_recommended": True, "ica_recommend_reason": "test"})
-    monkeypatch.setattr(cli, "compute_evokeds", lambda epochs, conds: {cond: FakeEvoked() for cond in conds})
-    monkeypatch.setattr(cli, "grand_averages", lambda evokeds_by_cond: {cond: FakeEvoked() for cond in evokeds_by_cond})
+    monkeypatch.setattr(cli_pipeline, "recommend_ica", lambda **kwargs: {"ica_recommended": True, "ica_recommend_reason": "test"})
+    monkeypatch.setattr(cli_pipeline, "compute_evokeds", lambda epochs, conds: {cond: FakeEvoked() for cond in conds})
+    monkeypatch.setattr(cli_pipeline, "grand_averages", lambda evokeds_by_cond: {cond: FakeEvoked() for cond in evokeds_by_cond})
     monkeypatch.setattr(
-        cli,
+        cli_pipeline,
         "write_qc_summary",
         lambda rows, path: rows_holder["rows"].extend(rows) or pd.DataFrame(rows).to_csv(path, sep="\t", index=False),
     )
@@ -286,9 +287,9 @@ def test_run_full_pipeline_skips_missing_bids_events(monkeypatch, tmp_path: Path
     args.bids_root = bids_root
     args.derivatives_root = derivatives_root
 
-    monkeypatch.setattr(cli, "read_raw_preprocess", lambda **kwargs: FakeRaw())
+    monkeypatch.setattr(cli_pipeline, "read_raw_preprocess", lambda **kwargs: FakeRaw())
     monkeypatch.setattr(
-        cli,
+        cli_pipeline,
         "compute_ica_diagnostics",
         lambda raw, **kwargs: {
             "eog_corr_max": 0.1,
@@ -299,12 +300,12 @@ def test_run_full_pipeline_skips_missing_bids_events(monkeypatch, tmp_path: Path
         },
     )
     monkeypatch.setattr(
-        cli,
+        cli_pipeline,
         "events_from_annotations_positions",
         lambda raw: np.array([[0, 0, 1], [100, 0, 2]], dtype=int),
     )
     monkeypatch.setattr(
-        cli,
+        cli_pipeline,
         "detect_trigger_bursts",
         lambda **kwargs: {
             "burst_flag": True,
@@ -317,7 +318,7 @@ def test_run_full_pipeline_skips_missing_bids_events(monkeypatch, tmp_path: Path
     )
     captured = {"rows": []}
     monkeypatch.setattr(
-        cli,
+        cli_pipeline,
         "write_qc_summary",
         lambda rows, path: captured["rows"].extend(rows) or pd.DataFrame(rows).to_csv(path, sep="\t", index=False),
     )
@@ -338,7 +339,7 @@ def test_run_full_pipeline_skips_missing_vmrk_and_writes_qc_only(monkeypatch, tm
 
     captured = {"rows": []}
     monkeypatch.setattr(
-        cli,
+        cli_pipeline,
         "write_qc_summary",
         lambda rows, path: captured["rows"].extend(rows) or pd.DataFrame(rows).to_csv(path, sep="\t", index=False),
     )

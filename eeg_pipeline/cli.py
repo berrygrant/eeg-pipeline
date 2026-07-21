@@ -1,132 +1,52 @@
-# ruff: noqa: F821
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-from . import cli_common as _common
 from . import cli_config as _config
 from . import cli_figures as _figures
 from . import cli_metrics as _metrics
-from . import cli_parser as _parser
 from . import cli_pipeline as _pipeline
 from . import cli_summary as _summary
+from .cli_common import (
+    _finalize_runtime_paths,
+    _pipeline_dataset_root,
+    dataset_derivative_path,
+)
+from .cli_parser import build_arg_parser, build_defaults
 from .gpu import capability_report, format_capability_report
 from .gpu import configure as configure_gpu
 
-globals().update(
-    {
-        name: value
-        for name, value in vars(_common).items()
-        if not name.startswith("__") or name == "__version__"
-    }
-)
-
-build_arg_parser = _parser.build_arg_parser
-build_defaults = _parser.build_defaults
-
-_SYNC_NAMES = (
-    "ERPTimeSeriesParams",
-    "ERP_WINDOWS",
-    "ICAParams",
-    "TFRParams",
-    "align_marker_positions_to_codes",
-    "apply_ica",
-    "brainvision_links_ok",
-    "build_events_from_positions_and_codes",
-    "compute_erp_metrics",
-    "compute_erp_timeseries",
-    "compute_evokeds",
-    "compute_ica_diagnostics",
-    "compute_tfr_metrics",
-    "configure_gpu",
-    "convert_legacy_recordings_to_bids",
-    "detect_trigger_bursts",
-    "discover_pipeline_recordings",
-    "events_from_annotations_positions",
-    "find_ica_excludes",
-    "fit_ica",
-    "grand_averages",
-    "keep_by_gap_heuristic",
-    "load_behavioral_events",
-    "load_config",
-    "load_epochs",
-    "make_epochs",
-    "marker_gap_stats",
-    "mne",
-    "moving_window_ptp_mask",
-    "moving_window_ptp_max",
-    "np",
-    "parse_token_map",
-    "parse_vmrk_markers",
-    "pd",
-    "read_raw_preprocess",
-    "recommend_ica",
-    "select_and_filter_conditions",
-    "select_and_recode_stddev",
-    "simple_voltage_threshold_mask",
-    "step_threshold_mask",
-    "write_qc_summary",
-    "_build_erp_windows",
-)
-
-
-def _sync_module(module) -> None:
-    for name in _SYNC_NAMES:
-        if name in globals():
-            setattr(module, name, globals()[name])
-
-
-def _sync_all() -> None:
-    for module in (_config, _summary, _pipeline, _metrics, _figures):
-        _sync_module(module)
-    _pipeline.apply_config = apply_config
-
 
 def apply_config(args, defaults=None):
-    _sync_module(_config)
     return _config.apply_config(args, defaults)
 
 
 def apply_erp_core_preset(args, defaults):
-    _sync_module(_config)
     return _config.apply_erp_core_preset(args, defaults)
 
 
 def summarize_one_file(args, raw_path: Path):
-    _sync_module(_summary)
     return _summary.summarize_one_file(args, raw_path)
 
 
 def run_legacy_to_bids_conversion(args, defaults=None, cfg=None):
-    _sync_module(_pipeline)
-    _pipeline.apply_config = apply_config
     return _pipeline.run_legacy_to_bids_conversion(args, defaults=defaults, cfg=cfg)
 
 
 def run_full_pipeline(args, defaults=None, cfg=None):
-    _sync_module(_pipeline)
-    _pipeline.apply_config = apply_config
-    # Do NOT rebind _pipeline.run_legacy_to_bids_conversion here: it would point
-    # cli_pipeline's module global at this wrapper, and the wrapper calls that
-    # same attribute -> unbounded recursion on --legacy --convert_to_bids
-    # --process_data. run_full_pipeline already calls the real in-module
-    # implementation directly.
     return _pipeline.run_full_pipeline(args, defaults=defaults, cfg=cfg)
 
 
 def run_metrics_only(args):
-    _sync_module(_metrics)
     return _metrics.run_metrics_only(args)
 
 
 def run_plot_figures(args):
-    _sync_module(_figures)
     return _figures.run_plot_figures(args)
 
 
 def prepare_output_dirs(out_dir: Path):
-    _sync_module(_figures)
     return _figures.prepare_output_dirs(out_dir)
 
 
@@ -151,7 +71,6 @@ def _prompt_yes_no(msg: str) -> bool:
 
 
 def main(argv=None):
-    _sync_all()
     ap = build_arg_parser()
     defaults = build_defaults(ap)
     args = ap.parse_args(argv)

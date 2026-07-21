@@ -1,11 +1,67 @@
-# ruff: noqa: F403,F405
 from __future__ import annotations
 
-from . import cli_common as _common
-from .cli_common import *  # noqa: F403
-from .cli_config import apply_config
+from pathlib import Path
 
-globals().update({name: value for name, value in vars(_common).items() if not name.startswith("__") or name == "__version__"})
+import mne
+import numpy as np
+import pandas as pd
+
+from eeg_pipeline import __version__
+
+from .cli_common import (
+    PIPELINE_NAME,
+    EpochParams,
+    ERPTimeSeriesParams,
+    ICAParams,
+    PipelineRecording,
+    TFRParams,
+    _behavior_inputs_for_recording,
+    _dataset_metrics_dir,
+    _events_json_sidecar,
+    _finalize_runtime_paths,
+    _finalized_events_table,
+    _input_mode,
+    _legacy_task_label,
+    _parse_n_components,
+    _prepare_derivatives_root,
+    _save_dataframe_with_sidecar,
+    _subject_metrics_dir,
+    _write_output_sidecar,
+    align_marker_positions_to_codes,
+    apply_ica,
+    brainvision_links_ok,
+    build_events_from_positions_and_codes,
+    compute_erp_metrics,
+    compute_erp_timeseries,
+    compute_evokeds,
+    compute_ica_diagnostics,
+    compute_tfr_metrics,
+    convert_legacy_recordings_to_bids,
+    dataset_derivative_path,
+    derivative_sidecar_path,
+    detect_trigger_bursts,
+    discover_pipeline_recordings,
+    events_from_annotations_positions,
+    find_ica_excludes,
+    fit_ica,
+    grand_averages,
+    load_behavioral_events,
+    make_epochs,
+    moving_window_ptp_mask,
+    moving_window_ptp_max,
+    parse_token_map,
+    read_raw_preprocess,
+    recommend_ica,
+    select_and_filter_conditions,
+    select_and_recode_stddev,
+    simple_voltage_threshold_mask,
+    step_threshold_mask,
+    subject_derivative_path,
+    write_json,
+    write_qc_summary,
+)
+from .cli_config import apply_config
+from .cli_metrics import _build_erp_windows
 
 
 def run_legacy_to_bids_conversion(args, defaults=None, cfg=None) -> list[PipelineRecording]:
