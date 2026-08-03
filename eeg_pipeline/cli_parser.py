@@ -16,6 +16,15 @@ def build_arg_parser():
     ap.add_argument("--get_metrics", action="store_true", help="Compute ERP/TFR metrics from derivative epochs")
     ap.add_argument("--plot_figures", action="store_true", help="Generate figures from aggregated derivative metrics")
     ap.add_argument(
+        "--aggregate_only",
+        action="store_true",
+        help=(
+            "Rebuild dataset-level QC/metrics tables and grand averages from existing "
+            "per-subject derivatives, without reprocessing. Use as the gather step after "
+            "running subjects independently (e.g. one SLURM array task per subject)."
+        ),
+    )
+    ap.add_argument(
         "--legacy",
         action="store_true",
         help="Use the original lab layout instead of BIDS input discovery. BIDS is the default.",
