@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+import eeg_pipeline.aggregate as aggregate
 import eeg_pipeline.cli as cli
 import eeg_pipeline.cli_pipeline as cli_pipeline
 
@@ -154,6 +155,34 @@ def _parser_args(tmp_path: Path):
     return args, defaults
 
 
+def _capture_qc_rows(monkeypatch, sink: dict):
+    """Capture in-memory QC rows without suppressing the real per-subject write.
+
+    Aggregation now rebuilds the dataset-level QC table by reading the
+    per-subject QC files, so the write must still happen. Capturing the
+    in-memory dicts (rather than the TSV round-trip) also keeps identity
+    assertions like `is True` meaningful -- booleans come back from a TSV as
+    numpy.bool_, which is not the `True` singleton.
+    """
+    real_write = cli_pipeline._write_subject_qc_rows
+
+    def _capturing(dataset_root, recording, rows):
+        sink["rows"].extend(rows)
+        return real_write(dataset_root, recording, rows)
+
+    monkeypatch.setattr(cli_pipeline, "_write_subject_qc_rows", _capturing)
+
+
+def _patch_aggregation_evokeds(monkeypatch):
+    """Let grand-averaging work over FakeEvoked files written by the fixtures."""
+    monkeypatch.setattr(aggregate.mne, "read_evokeds", lambda p, verbose="error": [FakeEvoked()])
+    monkeypatch.setattr(
+        aggregate,
+        "grand_averages",
+        lambda evokeds_by_cond: {cond: FakeEvoked() for cond in evokeds_by_cond},
+    )
+
+
 def _patch_success_dependencies(monkeypatch, *, n_epochs=4, burst_flag=True):
     rows_holder = {"rows": []}
 
@@ -230,12 +259,8 @@ def _patch_success_dependencies(monkeypatch, *, n_epochs=4, burst_flag=True):
     )
     monkeypatch.setattr(cli_pipeline, "recommend_ica", lambda **kwargs: {"ica_recommended": True, "ica_recommend_reason": "test"})
     monkeypatch.setattr(cli_pipeline, "compute_evokeds", lambda epochs, conds: {cond: FakeEvoked() for cond in conds})
-    monkeypatch.setattr(cli_pipeline, "grand_averages", lambda evokeds_by_cond: {cond: FakeEvoked() for cond in evokeds_by_cond})
-    monkeypatch.setattr(
-        cli_pipeline,
-        "write_qc_summary",
-        lambda rows, path: rows_holder["rows"].extend(rows) or pd.DataFrame(rows).to_csv(path, sep="\t", index=False),
-    )
+    _patch_aggregation_evokeds(monkeypatch)
+    _capture_qc_rows(monkeypatch, rows_holder)
 
     return rows_holder
 
@@ -317,11 +342,7 @@ def test_run_full_pipeline_skips_missing_bids_events(monkeypatch, tmp_path: Path
         },
     )
     captured = {"rows": []}
-    monkeypatch.setattr(
-        cli_pipeline,
-        "write_qc_summary",
-        lambda rows, path: captured["rows"].extend(rows) or pd.DataFrame(rows).to_csv(path, sep="\t", index=False),
-    )
+    _capture_qc_rows(monkeypatch, captured)
 
     cli.run_full_pipeline(args, defaults=defaults, cfg={})
 
@@ -338,11 +359,7 @@ def test_run_full_pipeline_skips_missing_vmrk_and_writes_qc_only(monkeypatch, tm
     raw_file.with_suffix(".vmrk").unlink()
 
     captured = {"rows": []}
-    monkeypatch.setattr(
-        cli_pipeline,
-        "write_qc_summary",
-        lambda rows, path: captured["rows"].extend(rows) or pd.DataFrame(rows).to_csv(path, sep="\t", index=False),
-    )
+    _capture_qc_rows(monkeypatch, captured)
 
     cli.run_full_pipeline(args, defaults=defaults, cfg={})
 
