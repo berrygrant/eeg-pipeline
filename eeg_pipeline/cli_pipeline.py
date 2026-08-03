@@ -225,7 +225,7 @@ def _compute_subject_metrics(
                         float(getattr(args, "tfr_baseline", [-0.1, 0.0])[1]),
                     ),
                     mode=str(getattr(args, "tfr_baseline_mode", "logratio")),
-                    n_jobs=int(getattr(args, "n_jobs", 1)),
+                    n_jobs=int(getattr(args, "n_jobs", 1) or 1),
                 )
                 df_tfr = compute_tfr_metrics(
                     epochs,
@@ -432,7 +432,7 @@ def _process_recording_stages(
             l_freq=args.l_freq,
             h_freq=args.h_freq,
             notch=args.notch,
-            n_jobs=int(getattr(args, "n_jobs", 1)),
+            n_jobs=int(getattr(args, "n_jobs", 1) or 1),
         )
 
     with timings.stage("ica"):
@@ -475,7 +475,7 @@ def _process_recording_stages(
             corr_thresh=args.ica_corr_thresh,
             max_exclude=args.ica_max_exclude,
             decim=args.ica_decim,
-            n_jobs=int(getattr(args, "n_jobs", 1)),
+            n_jobs=int(getattr(args, "n_jobs", 1) or 1),
         )
 
         with timings.stage("ica"):

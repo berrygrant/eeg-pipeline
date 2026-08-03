@@ -81,7 +81,13 @@ def build_arg_parser():
     ap.add_argument(
         "--n_jobs",
         type=int,
-        default=1,
+        # Sentinel, not 1: `provided()` detects an explicit flag by comparing
+        # against the argparse default, so a default of 1 would make an explicit
+        # `--n_jobs 1` indistinguishable from omitting it -- and unable to
+        # override a larger compute.n_jobs in the config. That matters because
+        # hpc/slurm_array.sbatch passes exactly 1 when SLURM_CPUS_PER_TASK is
+        # unset, where silently using the config's value would oversubscribe.
+        default=None,
         help=(
             "Worker processes for MNE operations that parallelize across channels "
             "(filtering, notch, TFR). -1 uses all cores. On a cluster keep this equal "

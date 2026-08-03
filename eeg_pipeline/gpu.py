@@ -188,15 +188,35 @@ def filter_n_jobs(n_jobs: int = 1):
     covers FFT-based filtering and resampling only: ICA fitting and time-frequency
     decomposition stay on the CPU regardless.
 
-    Only ``"initialized"`` counts as CUDA-capable. ``"available"`` merely means the
-    ``mne.cuda`` module exists without an ``init_cuda`` to call, which is not proof
-    that CUDA works — claiming it there would hand MNE an ``n_jobs="cuda"`` it
-    cannot honor. Note also that routing to CUDA discards the requested CPU worker
-    count, since CUDA filtering is single-stream.
+    Note that routing to CUDA discards the requested CPU worker count, since CUDA
+    filtering is single-stream — which is why the capability check below has to be
+    strict. Claiming CUDA when MNE cannot honor it is worse than not asking for it
+    at all: MNE coerces ``n_jobs`` to 1 before falling back to the CPU, so the run
+    loses its workers and ends up slower than a plain CPU run.
     """
-    if _GPU_ENABLED and _MNE_CUDA_STATUS == "initialized":
+    if _GPU_ENABLED and _MNE_CUDA_STATUS == "initialized" and _mne_cuda_capable():
         return "cuda"
     return n_jobs
+
+
+def _mne_cuda_capable() -> bool:
+    """Whether MNE will actually filter on the GPU.
+
+    A clean return from ``init_cuda()`` is not evidence. MNE's ``init_cuda``
+    no-ops *without raising* when the ``MNE_USE_CUDA`` config key is not "true"
+    (the default) or when cupy is missing, leaving its ``_cuda_capable`` flag
+    False. Treating "did not raise" as capability is how ``--use_gpu`` on an
+    unconfigured machine ends up discarding ``--n_jobs``.
+
+    Reads MNE's own flag, which is the actual source of truth. Any failure to
+    determine it answers False, so the fallback direction is always the safe one.
+    """
+    try:
+        import mne
+
+        return bool(getattr(mne.cuda, "_cuda_capable", False))
+    except Exception:
+        return False
 
 
 def get_xp():

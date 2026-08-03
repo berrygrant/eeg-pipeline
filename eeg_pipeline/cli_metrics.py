@@ -86,7 +86,7 @@ def run_metrics_only(args):
                 float(getattr(args, "tfr_baseline", [-0.1, 0.0])[1]),
             ),
             mode=str(getattr(args, "tfr_baseline_mode", "logratio")),
-            n_jobs=int(getattr(args, "n_jobs", 1)),
+            n_jobs=int(getattr(args, "n_jobs", 1) or 1),
         )
 
     for p in files:

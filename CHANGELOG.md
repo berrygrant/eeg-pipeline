@@ -48,9 +48,17 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Aggregation read zero-padded BIDS entity labels back as integers (`run` "01" → 1),
   making the combined tables disagree with the filenames and the per-subject tables.
   Entity columns now round-trip as strings.
-- `gpu.filter_n_jobs()` treated an `mne.cuda` module with no `init_cuda` as
-  CUDA-capable, handing MNE an `n_jobs="cuda"` it could not honor. Only a
-  successfully initialized CUDA context now routes to the GPU.
+- `gpu.filter_n_jobs()` treated "init_cuda() did not raise" as CUDA capability.
+  MNE's `init_cuda` no-ops silently when `MNE_USE_CUDA` is not "true" (the
+  default) or cupy is missing, so `--use_gpu` on an unconfigured machine routed
+  filtering to CUDA; MNE then coerced `n_jobs` to 1 before falling back to the
+  CPU, discarding the requested workers and running slower than a plain CPU run.
+  Capability is now read from MNE's own flag, failing safe to the CPU.
+- An explicit `--n_jobs 1` could not override a larger `compute.n_jobs` in the
+  config, because the argparse default was also 1 and provided-flag detection
+  compares against it. This mattered for `hpc/slurm_array.sbatch`, which passes
+  exactly 1 when `SLURM_CPUS_PER_TASK` is unset — the config value would have
+  silently oversubscribed the allocation. The default is now a sentinel.
 - GPU acceleration was inert: `configure()` initialized MNE CUDA, but MNE only
   routes filtering through CUDA when `n_jobs="cuda"` and the package never passed
   `n_jobs` at all, so `use_gpu` had no effect on filtering. New

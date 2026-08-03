@@ -287,3 +287,27 @@ def test_run_full_pipeline_skips_aggregation_with_skip_aggregate(monkeypatch, tm
 
     assert calls == []
     assert "--aggregate_only" in capsys.readouterr().out
+
+
+def test_explicit_n_jobs_one_overrides_config(monkeypatch):
+    """An explicit `--n_jobs 1` must beat a larger compute.n_jobs in the config.
+
+    hpc/slurm_array.sbatch passes exactly 1 when SLURM_CPUS_PER_TASK is unset, so
+    if the config's larger value silently won there, the task would oversubscribe
+    its allocation.
+    """
+    parser = cli.build_arg_parser()
+    defaults = cli.build_defaults(parser)
+
+    cfg = _rich_config()
+    cfg["compute"] = {"use_gpu": False, "gpu_device": None, "n_jobs": 8}
+    monkeypatch.setattr(cli_config, "load_config", lambda path, overrides=None: cfg)
+
+    args = parser.parse_args(["--config", "config.yaml", "--n_jobs", "1"])
+    cli.apply_config(args, defaults)
+    assert args.n_jobs == 1
+
+    # Omitting the flag still lets the config value through.
+    args = parser.parse_args(["--config", "config.yaml"])
+    cli.apply_config(args, defaults)
+    assert args.n_jobs == 8
