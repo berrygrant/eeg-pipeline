@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +27,7 @@ from .bids import (
     dataset_derivative_path,
     derivative_sidecar_path,
     ensure_derivatives_dataset,
+    filter_derivative_paths,
     parse_bids_entities_like_name,
     source_basename_from_derivative_path,
     subject_derivative_path,
@@ -61,6 +64,37 @@ from .metrics.erp_windows import ERP_WINDOWS
 from .metrics.tfr import TFRParams
 from .qc import write_qc_summary
 from .schema import parse_token_map
+
+#: Prefix for the per-stage wall-clock columns added to each QC row.
+STAGE_TIMING_PREFIX = "t_"
+
+
+class StageTimings:
+    """Accumulate wall-clock seconds per pipeline stage for one recording.
+
+    Recorded into the per-subject QC row so a single real run reports where time
+    actually goes (notably the ICA-vs-TFR split), rather than leaving it to be
+    estimated. Re-entering a stage adds to that stage's total, so a stage split
+    across several call sites still reports one figure.
+
+    Timing must never be able to fail a run, so :meth:`stage` records the elapsed
+    time even when the wrapped block raises, and then re-raises unchanged.
+    """
+
+    def __init__(self) -> None:
+        self._elapsed: dict[str, float] = {}
+
+    @contextmanager
+    def stage(self, name: str):
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._elapsed[name] = self._elapsed.get(name, 0.0) + (time.perf_counter() - start)
+
+    def as_qc_columns(self, prefix: str = STAGE_TIMING_PREFIX) -> dict[str, float]:
+        """Return ``{"t_<stage>_s": seconds}`` suitable for merging into a QC row."""
+        return {f"{prefix}{name}_s": round(seconds, 4) for name, seconds in self._elapsed.items()}
 
 
 # Helper for config integration.  When merging configuration values

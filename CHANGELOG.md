@@ -6,6 +6,21 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- `--get_metrics` ignored `--subjects`/`--sessions`/`--tasks`/`--runs`: the metrics
+  stage globbed every `*_epo.fif` in the derivatives tree regardless of the
+  requested filters. A per-subject invocation therefore recomputed every subject.
+  Added `bids.filter_derivative_paths`, which applies the same entity-filter
+  semantics as `discover_bids_eeg_recordings` (bare or `sub-` prefixed) to
+  derivative filenames, and a distinct error when filters match nothing.
+
+### Added
+- Per-stage wall-clock timing (`cli_common.StageTimings`) recorded into each QC
+  row as `t_<stage>_s` columns for `preprocess`, `ica`, `epoching`, `metrics`, and
+  `io`. Timings are merged onto every row a recording produces — including
+  early-skip rows and rows from a recording that raised — so one real run reports
+  where time actually goes instead of leaving it to be estimated.
+
 ### Deprecated
 - The flat-directory metrics runners now emit a `DeprecationWarning` at runtime.
   This covers the `eeg-run-analysis` console script, the root `run_analysis.py`

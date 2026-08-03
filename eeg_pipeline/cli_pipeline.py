@@ -14,6 +14,7 @@ from .cli_common import (
     ERPTimeSeriesParams,
     ICAParams,
     PipelineRecording,
+    StageTimings,
     TFRParams,
     _behavior_inputs_for_recording,
     _dataset_metrics_dir,
@@ -265,9 +266,33 @@ def _compute_subject_metrics(
                 print(f"[WARN] TFR metrics failed for {subj}: {e}")
 
 
-def _process_recording(
+def _process_recording(recording, **kwargs):
+    """Process one recording and stamp per-stage wall-clock onto its QC row(s).
+
+    Thin wrapper around :func:`_process_recording_stages`. The stage work appends
+    one QC row per outcome (success or an early skip), and every one of those rows
+    gets the timings merged in here — so timing lives in a single place instead of
+    being threaded through each append site.
+
+    The merge runs in a ``finally`` so a recording that raises still reports the
+    time it burned before failing, which is exactly the case worth profiling.
+    """
+    rows = kwargs["rows"]
+    timings = StageTimings()
+    start_index = len(rows)
+    try:
+        _process_recording_stages(recording, timings=timings, **kwargs)
+    finally:
+        columns = timings.as_qc_columns()
+        if columns:
+            for row in rows[start_index:]:
+                row.update(columns)
+
+
+def _process_recording_stages(
     recording,
     *,
+    timings,
     args,
     ep,
     token_map,
@@ -371,24 +396,26 @@ def _process_recording(
             )
             return
 
-    raw = read_raw_preprocess(
-        raw_path=raw_path,
-        montage=args.montage,
-        eog_chs=args.eog_chs,
-        aux_chs=args.aux_chs,
-        reref=args.reref,
-        l_freq=args.l_freq,
-        h_freq=args.h_freq,
-        notch=args.notch,
-    )
+    with timings.stage("preprocess"):
+        raw = read_raw_preprocess(
+            raw_path=raw_path,
+            montage=args.montage,
+            eog_chs=args.eog_chs,
+            aux_chs=args.aux_chs,
+            reref=args.reref,
+            l_freq=args.l_freq,
+            h_freq=args.h_freq,
+            notch=args.notch,
+        )
 
-    ica_diag = compute_ica_diagnostics(
-        raw,
-        blink_proxy_chs=args.blink_proxy_chs,
-        blink_threshold_uv=args.blink_threshold_uv,
-        blink_win_ms=args.blink_win_ms,
-        blink_step_ms=args.blink_step_ms,
-    )
+    with timings.stage("ica"):
+        ica_diag = compute_ica_diagnostics(
+            raw,
+            blink_proxy_chs=args.blink_proxy_chs,
+            blink_threshold_uv=args.blink_threshold_uv,
+            blink_win_ms=args.blink_win_ms,
+            blink_step_ms=args.blink_step_ms,
+        )
 
     # ---- ICA: optional fit + apply (before event extraction / epoching) ----
     ica_ran = False
@@ -423,7 +450,8 @@ def _process_recording(
             decim=args.ica_decim,
         )
 
-        ica_obj, ica_fit_diag = fit_ica(raw, ica_params)
+        with timings.stage("ica"):
+            ica_obj, ica_fit_diag = fit_ica(raw, ica_params)
         if ica_obj is None:
             print(f"[WARN] ICA fit failed for {subj}; continuing without ICA.")
         else:
@@ -437,7 +465,8 @@ def _process_recording(
                 max_exclude=args.ica_max_exclude,
             )
             if len(ica_exclude) > 0:
-                raw = apply_ica(raw, ica_obj, ica_exclude)
+                with timings.stage("ica"):
+                    raw = apply_ica(raw, ica_obj, ica_exclude)
                 ica_applied = True
             if bool(args.save_ica):
                 ica_obj.save(ica_path, overwrite=True)
@@ -648,7 +677,8 @@ def _process_recording(
         )
         return
 
-    epochs = make_epochs(raw, events_epo, event_id, ep)
+    with timings.stage("epoching"):
+        epochs = make_epochs(raw, events_epo, event_id, ep)
     md = md_full.loc[keep_mask].reset_index(drop=True)
     # Align metadata with epochs that survive MNE's internal dropping
     if len(md) != len(epochs):
@@ -898,18 +928,19 @@ def _process_recording(
         return
 
     # Metrics (ERP + TFR)
-    _compute_subject_metrics(
-        epochs,
-        recording,
-        args,
-        dataset_root=dataset_root,
-        metrics_conditions=metrics_conditions,
-        subj=subj,
-        behavior_source=behavior_source,
-        erp_metrics_all=erp_metrics_all,
-        tfr_metrics_all=tfr_metrics_all,
-        erp_timeseries_all=erp_timeseries_all,
-    )
+    with timings.stage("metrics"):
+        _compute_subject_metrics(
+            epochs,
+            recording,
+            args,
+            dataset_root=dataset_root,
+            metrics_conditions=metrics_conditions,
+            subj=subj,
+            behavior_source=behavior_source,
+            erp_metrics_all=erp_metrics_all,
+            tfr_metrics_all=tfr_metrics_all,
+            erp_timeseries_all=erp_timeseries_all,
+        )
 
     ica_recommendation = recommend_ica(
         epoch_reject_rate=epoch_reject_rate,
@@ -921,8 +952,9 @@ def _process_recording(
         blink_rate_thresh=args.ica_auto_blink_rate_per_min,
     )
 
-    raw.save(preproc_path, overwrite=True)
-    epochs.save(epochs_path, overwrite=True)
+    with timings.stage("io"):
+        raw.save(preproc_path, overwrite=True)
+        epochs.save(epochs_path, overwrite=True)
     _write_output_sidecar(
         preproc_path,
         args,

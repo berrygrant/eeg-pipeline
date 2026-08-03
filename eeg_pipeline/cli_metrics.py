@@ -17,6 +17,7 @@ from .cli_common import (
     compute_erp_timeseries,
     compute_tfr_metrics,
     dataset_derivative_path,
+    filter_derivative_paths,
     load_epochs,
     parse_bids_entities_like_name,
     source_basename_from_derivative_path,
@@ -32,9 +33,25 @@ def run_metrics_only(args):
     """Compute ERP/TFR metrics from existing derivative epochs."""
     _finalize_runtime_paths(args)
     dataset_root = _prepare_derivatives_root(args)
-    files = sorted(dataset_root.rglob("*_epo.fif"))
-    if not files:
+    discovered = sorted(dataset_root.rglob("*_epo.fif"))
+    if not discovered:
         raise RuntimeError(f"No epochs found in {dataset_root} (expected *_epo.fif).")
+
+    # Honor the same entity filters as --process_data. Without this the metrics
+    # stage silently recomputes every subject, so a per-subject invocation would
+    # duplicate work and race other jobs on the dataset-level outputs.
+    files = filter_derivative_paths(
+        discovered,
+        subjects=getattr(args, "subjects", None),
+        sessions=getattr(args, "sessions", None),
+        tasks=getattr(args, "tasks", None),
+        runs=getattr(args, "runs", None),
+    )
+    if not files:
+        raise RuntimeError(
+            f"No epochs in {dataset_root} matched the requested "
+            f"subjects/sessions/tasks/runs filters ({len(discovered)} found before filtering)."
+        )
 
     do_erp = bool(getattr(args, "metrics_erp_enabled", True))
     do_tfr = bool(getattr(args, "metrics_tfr_enabled", True))

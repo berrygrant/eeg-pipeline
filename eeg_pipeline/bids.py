@@ -157,6 +157,54 @@ def discover_bids_eeg_recordings(
     return recordings
 
 
+def filter_derivative_paths(
+    paths: Iterable[Path],
+    *,
+    subjects: Iterable[str] | None = None,
+    sessions: Iterable[str] | None = None,
+    tasks: Iterable[str] | None = None,
+    runs: Iterable[str] | None = None,
+) -> list[Path]:
+    """Filter derivative files by BIDS entities.
+
+    Applies the same entity-filter semantics as :func:`discover_bids_eeg_recordings`
+    (bare or prefixed values, e.g. ``01`` or ``sub-01``) to files already inside a
+    derivatives tree, whose names carry ``desc-``/``suffix`` tokens rather than the
+    raw ``_eeg`` suffix. With no filters supplied the input order is preserved
+    unchanged.
+
+    This is what lets a single-subject invocation (``--get_metrics --subjects
+    sub-01``) touch only that subject's derivatives, which in turn makes it safe to
+    fan the metrics stage out across concurrent jobs.
+    """
+    subject_filter = _normalize_filter_values(subjects, "sub")
+    session_filter = _normalize_filter_values(sessions, "ses")
+    task_filter = _normalize_filter_values(tasks, "task")
+    run_filter = _normalize_filter_values(runs, "run")
+
+    if not any((subject_filter, session_filter, task_filter, run_filter)):
+        return [Path(p) for p in paths]
+
+    kept: list[Path] = []
+    for path in paths:
+        path = Path(path)
+        try:
+            entities = parse_bids_entities_like_name(path.stem)
+        except ValueError:
+            # Not a BIDS-like derivative name; a filter cannot confirm a match.
+            continue
+        if subject_filter and entities.get("sub") not in subject_filter:
+            continue
+        if session_filter and entities.get("ses") not in session_filter:
+            continue
+        if task_filter and entities.get("task") not in task_filter:
+            continue
+        if run_filter and entities.get("run") not in run_filter:
+            continue
+        kept.append(path)
+    return kept
+
+
 def build_bids_basename(
     entities: Mapping[str, str],
     *,
