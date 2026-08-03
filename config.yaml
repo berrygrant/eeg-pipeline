@@ -75,8 +75,14 @@ labels:
   token_map: ["EH", "IH"]
 
 compute:
+  # GPU accelerates FFT-based filtering/resampling only (MNE CUDA); it does not
+  # cover ICA or TFR.
   use_gpu: false
   gpu_device: null
+  # Workers for MNE ops that parallelize across channels (filter, notch, TFR).
+  # -1 uses all cores. ICA.fit is serial and unaffected. On a cluster keep this
+  # equal to --cpus-per-task and set OMP_NUM_THREADS to match; see README "HPC".
+  n_jobs: 1
 
 conversion:
   enabled: false

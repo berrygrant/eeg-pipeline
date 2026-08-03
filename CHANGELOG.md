@@ -6,7 +6,27 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **HPC/SLURM mode.** Subjects can now be processed by independent jobs and
+  combined afterwards. `--aggregate_only` rebuilds the dataset-level QC/metrics
+  tables and grand averages from per-subject derivatives on disk; `run_full_pipeline`
+  calls the same code as its tail, so serial and array-parallel runs cannot drift.
+  Aggregation overwrites its outputs, so a gather job is safe to re-run after a
+  partial array. Ships `hpc/slurm_array.sbatch`, `hpc/slurm_gather.sbatch`, and
+  `hpc/submit.sh`, plus a README "HPC / SLURM" section.
+- `compute.n_jobs` / `--n_jobs` threads MNE's channel-parallel `n_jobs` into
+  filtering, notch, the ICA pre-fit filter, and `compute_tfr`. `ICA.fit` takes no
+  `n_jobs` and remains serial. Invalid values (0, negatives other than -1,
+  non-integers) are rejected at config load.
+- Per-subject QC rows are now written next to a recording's other derivatives,
+  including when the recording raised — previously QC existed only in memory.
+
 ### Fixed
+- GPU acceleration was inert: `configure()` initialized MNE CUDA, but MNE only
+  routes filtering through CUDA when `n_jobs="cuda"` and the package never passed
+  `n_jobs` at all, so `use_gpu` had no effect on filtering. New
+  `gpu.filter_n_jobs()` routes correctly and falls back to CPU workers otherwise.
+  (Scope is unchanged: MNE CUDA covers FFT filtering/resampling, not ICA or TFR.)
 - `--get_metrics` ignored `--subjects`/`--sessions`/`--tasks`/`--runs`: the metrics
   stage globbed every `*_epo.fif` in the derivatives tree regardless of the
   requested filters. A per-subject invocation therefore recomputed every subject.

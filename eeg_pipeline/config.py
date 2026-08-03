@@ -508,8 +508,15 @@ def _normalize_config(cfg: dict[str, Any]) -> dict[str, Any]:
     gd = compute_cfg.get("gpu_device", None)
     cfg["compute"]["gpu_device"] = None if gd in (None, "null", "None", "") else int(gd)
     n_jobs = compute_cfg.get("n_jobs", 1)
-    # -1 is MNE's "all cores"; anything else must be a positive worker count.
-    cfg["compute"]["n_jobs"] = 1 if n_jobs in (None, "null", "None", "") else int(n_jobs)
+    if n_jobs in (None, "null", "None", ""):
+        cfg["compute"]["n_jobs"] = 1
+    else:
+        try:
+            cfg["compute"]["n_jobs"] = int(n_jobs)
+        except (TypeError, ValueError):
+            # Leave the bad value in place so _validate_config can report it
+            # against its config key rather than raising a bare int() error.
+            cfg["compute"]["n_jobs"] = n_jobs
 
     conv_cfg = cfg.get("conversion", {})
     cfg["conversion"]["enabled"] = bool(conv_cfg.get("enabled", False))
