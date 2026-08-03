@@ -16,6 +16,16 @@ def build_arg_parser():
     ap.add_argument("--get_metrics", action="store_true", help="Compute ERP/TFR metrics from derivative epochs")
     ap.add_argument("--plot_figures", action="store_true", help="Generate figures from aggregated derivative metrics")
     ap.add_argument(
+        "--skip_aggregate",
+        action="store_true",
+        help=(
+            "Process subjects but do not rebuild dataset-level outputs. Required when "
+            "running subjects concurrently (e.g. a SLURM array), where each task must "
+            "write only its own derivatives and a single later --aggregate_only job "
+            "combines them. Without this, concurrent tasks race on the shared tables."
+        ),
+    )
+    ap.add_argument(
         "--aggregate_only",
         action="store_true",
         help=(

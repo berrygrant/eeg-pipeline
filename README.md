@@ -366,13 +366,21 @@ That submits one array task per subject plus a dependent gather job. Equivalentl
 by hand:
 
 ```bash
-# 1. per subject (one array task each)
+# 1. per subject (one array task each) -- --skip_aggregate is REQUIRED when these
+#    run concurrently, so tasks write only their own derivatives
 python -m eeg_pipeline.cli --config config.yaml \
-  --process_data --get_metrics --subjects sub-01 --n_jobs 4
+  --process_data --get_metrics --subjects sub-01 --skip_aggregate --n_jobs 4
 
 # 2. once all subjects finish, gather dataset-level outputs
 python -m eeg_pipeline.cli --config config.yaml --aggregate_only
 ```
+
+> **`--skip_aggregate` is not optional for concurrent runs.** The dataset-level
+> tables and grand averages are shared paths. Without it every task rebuilds them
+> at the end, so N tasks race each other and read files other tasks are still
+> writing — the final state would be whichever task happened to finish last. A
+> single serial run (no `--subjects` fan-out) should omit the flag and aggregate
+> normally.
 
 `--aggregate_only` reads only what is already on disk, never reprocesses, and
 overwrites its outputs — so it is safe to re-run after a partial array. It reports

@@ -12,7 +12,9 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tables and grand averages from per-subject derivatives on disk; `run_full_pipeline`
   calls the same code as its tail, so serial and array-parallel runs cannot drift.
   Aggregation overwrites its outputs, so a gather job is safe to re-run after a
-  partial array. Ships `hpc/slurm_array.sbatch`, `hpc/slurm_gather.sbatch`, and
+  partial array. `--skip_aggregate` suppresses the per-run rebuild and is required
+  for concurrent per-subject jobs, which would otherwise each rebuild the shared
+  dataset-level tables and race one another. Ships `hpc/slurm_array.sbatch`, `hpc/slurm_gather.sbatch`, and
   `hpc/submit.sh`, plus a README "HPC / SLURM" section.
 - `compute.n_jobs` / `--n_jobs` threads MNE's channel-parallel `n_jobs` into
   filtering, notch, the ICA pre-fit filter, and `compute_tfr`. `ICA.fit` takes no

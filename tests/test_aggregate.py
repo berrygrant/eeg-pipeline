@@ -201,3 +201,4 @@ def test_subject_scoped_files_classifies_by_location_not_filename(tmp_path: Path
     found = aggregate._subject_scoped_files(dataset_root, aggregate.ERP_METRICS_PATTERN)
 
     assert [p.parent.parent.name for p in found] == ["sub-01"]
+

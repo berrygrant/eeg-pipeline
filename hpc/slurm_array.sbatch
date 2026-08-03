@@ -41,11 +41,16 @@ fi
 echo "[$(date -Is)] task ${SLURM_ARRAY_TASK_ID}: ${SUBJECT} (cpus=${SLURM_CPUS_PER_TASK:-1})"
 
 # --n_jobs matches --cpus-per-task so MNE's channel-parallel operations use the
-# allocation without exceeding it. Note this stage does NOT write dataset-level
-# outputs; the gather job does that after every task has finished.
+# allocation without exceeding it.
+#
+# --skip_aggregate is REQUIRED here. Dataset-level tables and grand averages are
+# shared paths, so if every task aggregated at the end they would race each other
+# and read files other tasks are still writing. The dependent gather job builds
+# them once, after all tasks finish.
 python -m eeg_pipeline.cli \
     --config "$CONFIG" \
     --process_data \
     --get_metrics \
     --subjects "$SUBJECT" \
+    --skip_aggregate \
     --n_jobs "${SLURM_CPUS_PER_TASK:-1}"

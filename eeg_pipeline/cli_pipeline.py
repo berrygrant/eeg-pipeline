@@ -1173,7 +1173,15 @@ def run_full_pipeline(args, defaults=None, cfg=None):
     # Aggregate from the per-subject files just written rather than from the
     # in-memory accumulators. This is the same code path --aggregate_only runs
     # after a SLURM array, so the serial and array-parallel modes cannot drift.
-    run_aggregation(dataset_root, args)
+    #
+    # Concurrent per-subject jobs MUST pass --skip_aggregate: the dataset-level
+    # outputs are shared paths, so N tasks aggregating at once would race each
+    # other and read files other tasks are still writing. A single later
+    # --aggregate_only job combines them instead.
+    if getattr(args, "skip_aggregate", False):
+        print("\n[SKIP] Dataset-level aggregation skipped (--skip_aggregate). Run --aggregate_only to combine.")
+    else:
+        run_aggregation(dataset_root, args)
 
     print(f"\nSaved derivatives -> {dataset_root}")
 
