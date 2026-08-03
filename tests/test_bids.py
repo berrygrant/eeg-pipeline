@@ -5,6 +5,7 @@ from eeg_pipeline.bids import (
     BIDSRecording,
     discover_bids_eeg_recordings,
     ensure_derivatives_dataset,
+    filter_derivative_paths,
     parse_bids_entities,
     subject_derivative_path,
     validate_bids_dataset,
@@ -71,3 +72,59 @@ def test_ensure_derivatives_dataset_and_validation_cover_sidecars(tmp_path: Path
 
     assert validate_bids_dataset(bids_root) == []
     assert validate_derivatives_dataset(dataset_root) == []
+
+
+def _derivative_epochs_paths() -> list[Path]:
+    return [
+        Path("sub-01_task-oddball_run-01_desc-clean_epo.fif"),
+        Path("sub-01_task-oddball_run-02_desc-clean_epo.fif"),
+        Path("sub-02_task-oddball_run-01_desc-clean_epo.fif"),
+        Path("sub-03_ses-02_task-mmn_run-01_desc-clean_epo.fif"),
+    ]
+
+
+def test_filter_derivative_paths_without_filters_is_identity():
+    paths = _derivative_epochs_paths()
+
+    assert filter_derivative_paths(paths) == paths
+
+
+def test_filter_derivative_paths_selects_single_subject():
+    paths = _derivative_epochs_paths()
+
+    # Bare and prefixed forms must behave identically, matching the semantics of
+    # discover_bids_eeg_recordings, so an array job can pass either.
+    for value in ("01", "sub-01"):
+        kept = filter_derivative_paths(paths, subjects=[value])
+        assert [p.name for p in kept] == [
+            "sub-01_task-oddball_run-01_desc-clean_epo.fif",
+            "sub-01_task-oddball_run-02_desc-clean_epo.fif",
+        ]
+
+
+def test_filter_derivative_paths_applies_session_task_and_run_filters():
+    paths = _derivative_epochs_paths()
+
+    assert [p.name for p in filter_derivative_paths(paths, sessions=["02"])] == [
+        "sub-03_ses-02_task-mmn_run-01_desc-clean_epo.fif"
+    ]
+    assert [p.name for p in filter_derivative_paths(paths, tasks=["mmn"])] == [
+        "sub-03_ses-02_task-mmn_run-01_desc-clean_epo.fif"
+    ]
+    assert [p.name for p in filter_derivative_paths(paths, runs=["02"])] == [
+        "sub-01_task-oddball_run-02_desc-clean_epo.fif"
+    ]
+    # Filters compose (AND), so a subject+run pair narrows to one file.
+    assert [p.name for p in filter_derivative_paths(paths, subjects=["01"], runs=["01"])] == [
+        "sub-01_task-oddball_run-01_desc-clean_epo.fif"
+    ]
+
+
+def test_filter_derivative_paths_drops_non_bids_names_when_filtering():
+    paths = [*_derivative_epochs_paths(), Path("grand-average_epo.fif")]
+
+    # A name carrying no sub- entity cannot be confirmed to match, so it is
+    # excluded rather than silently passed through to a per-subject job.
+    kept = filter_derivative_paths(paths, subjects=["01"])
+    assert all("sub-01" in p.name for p in kept)
+    assert len(kept) == 2

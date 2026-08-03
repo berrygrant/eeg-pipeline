@@ -171,3 +171,68 @@ def test_main_convert_only_runs_conversion_stage(monkeypatch):
     cli.main(["--config", "config.yaml", "--legacy", "--convert_to_bids"])
 
     assert called == {"converted": True}
+
+
+def test_stage_timings_accumulate_and_render_qc_columns():
+    timings = cli_common.StageTimings()
+
+    with timings.stage("preprocess"):
+        pass
+    # Re-entering a stage must sum into one figure, since ICA is timed at three
+    # separate call sites (diagnostics, fit, apply) but reports as one stage.
+    with timings.stage("ica"):
+        pass
+    with timings.stage("ica"):
+        pass
+
+    columns = timings.as_qc_columns()
+    assert set(columns) == {"t_preprocess_s", "t_ica_s"}
+    assert all(isinstance(v, float) and v >= 0.0 for v in columns.values())
+
+
+def test_stage_timings_record_elapsed_even_when_stage_raises():
+    timings = cli_common.StageTimings()
+
+    # Timing must never swallow or mask a failure, and a run that dies partway
+    # is exactly the one worth profiling -- so the elapsed time is still kept.
+    with pytest.raises(ValueError, match="boom"):
+        with timings.stage("metrics"):
+            raise ValueError("boom")
+
+    assert "t_metrics_s" in timings.as_qc_columns()
+
+
+def test_process_recording_stamps_stage_timings_onto_every_qc_row(monkeypatch):
+    """_process_recording merges timings into each row its stage work appended."""
+
+    def fake_stages(recording, *, timings, rows, **kwargs):
+        with timings.stage("preprocess"):
+            pass
+        rows.append({"subject": "sub-01", "status": "OK"})
+        rows.append({"subject": "sub-01", "status": "SKIP_SOMETHING"})
+
+    monkeypatch.setattr(cli_pipeline, "_process_recording_stages", fake_stages)
+
+    rows = [{"subject": "sub-00", "status": "PRE_EXISTING"}]
+    cli_pipeline._process_recording(object(), rows=rows)
+
+    # Rows appended by this call get timings; rows from earlier calls are untouched.
+    assert "t_preprocess_s" not in rows[0]
+    assert "t_preprocess_s" in rows[1]
+    assert "t_preprocess_s" in rows[2]
+
+
+def test_process_recording_stamps_timings_even_when_stages_raise(monkeypatch):
+    def failing_stages(recording, *, timings, rows, **kwargs):
+        with timings.stage("preprocess"):
+            pass
+        rows.append({"subject": "sub-01", "status": "PARTIAL"})
+        raise RuntimeError("stage exploded")
+
+    monkeypatch.setattr(cli_pipeline, "_process_recording_stages", failing_stages)
+
+    rows = []
+    with pytest.raises(RuntimeError, match="stage exploded"):
+        cli_pipeline._process_recording(object(), rows=rows)
+
+    assert rows and "t_preprocess_s" in rows[0]

@@ -131,3 +131,81 @@ def test_run_metrics_only_writes_combined_outputs(monkeypatch, tmp_path: Path, s
     assert (metrics_root / "desc-erp_metrics.tsv").exists()
     assert (metrics_root / "desc-tfr_metrics.tsv").exists()
     assert (metrics_root / "desc-erp_timeseries.parquet").exists()
+
+
+def _make_metrics_fixture(tmp_path: Path, subjects: tuple[str, ...]) -> tuple[Path, Path, Path]:
+    bids_root = tmp_path / "bids"
+    bids_root.mkdir()
+    (bids_root / "dataset_description.json").write_text('{"Name":"Fixture","BIDSVersion":"1.11.1"}', encoding="utf-8")
+    derivatives_root = tmp_path / "derivatives"
+    dataset_root = cli_metrics._prepare_derivatives_root(
+        Namespace(bids_root=str(bids_root), derivatives_root=str(derivatives_root))
+    )
+    for sub in subjects:
+        epoch_path = dataset_root / sub / "eeg" / f"{sub}_task-oddball_epo.fif"
+        epoch_path.parent.mkdir(parents=True, exist_ok=True)
+        epoch_path.write_text("epo", encoding="utf-8")
+    return bids_root, derivatives_root, dataset_root
+
+
+def _patch_metrics_compute(monkeypatch, seen: list[str]):
+    monkeypatch.setattr(cli_metrics, "_build_erp_windows", lambda args_obj: [cli_metrics.ERP_WINDOWS["MMN"]])
+
+    def _record(path):
+        seen.append(Path(path).name)
+        return SimpleNamespace(epochs=object())
+
+    monkeypatch.setattr(cli_metrics, "load_epochs", _record)
+    monkeypatch.setattr(cli_metrics.mne, "pick_types", lambda info, eeg=True, eog=False: [0, 1])
+    for name in ("compute_erp_metrics", "compute_tfr_metrics"):
+        monkeypatch.setattr(
+            cli_metrics,
+            name,
+            lambda *args_in, **kwargs: pd.DataFrame([{"subject": kwargs["subject"], "status": "OK"}]),
+        )
+
+
+def test_run_metrics_only_honors_subject_filter(monkeypatch, tmp_path: Path):
+    """--get_metrics must respect --subjects so a per-subject job stays per-subject.
+
+    Without this the metrics stage rglob'd every *_epo.fif in the derivatives
+    tree, so N concurrent single-subject jobs would each recompute all N
+    subjects and race each other on the dataset-level tables.
+    """
+    bids_root, derivatives_root, _ = _make_metrics_fixture(tmp_path, ("sub-001", "sub-002", "sub-003"))
+    args = _base_metrics_args(bids_root, derivatives_root)
+    args.metrics_channels = None
+    args.condition_map = {"Oddball": 1}
+    args.subjects = ["sub-002"]
+
+    seen: list[str] = []
+    _patch_metrics_compute(monkeypatch, seen)
+
+    cli.run_metrics_only(args)
+
+    assert seen == ["sub-002_task-oddball_epo.fif"]
+
+
+def test_run_metrics_only_without_filters_processes_every_subject(monkeypatch, tmp_path: Path):
+    bids_root, derivatives_root, _ = _make_metrics_fixture(tmp_path, ("sub-001", "sub-002"))
+    args = _base_metrics_args(bids_root, derivatives_root)
+    args.metrics_channels = None
+    args.condition_map = {"Oddball": 1}
+
+    seen: list[str] = []
+    _patch_metrics_compute(monkeypatch, seen)
+
+    cli.run_metrics_only(args)
+
+    assert sorted(seen) == ["sub-001_task-oddball_epo.fif", "sub-002_task-oddball_epo.fif"]
+
+
+def test_run_metrics_only_reports_when_filters_exclude_everything(monkeypatch, tmp_path: Path):
+    bids_root, derivatives_root, _ = _make_metrics_fixture(tmp_path, ("sub-001",))
+    args = _base_metrics_args(bids_root, derivatives_root)
+    args.subjects = ["sub-999"]
+
+    # A filter that matches nothing must be distinguishable from an empty tree,
+    # otherwise a typo'd array-task subject id looks like a missing pipeline run.
+    with pytest.raises(RuntimeError, match="matched the requested"):
+        cli.run_metrics_only(args)
