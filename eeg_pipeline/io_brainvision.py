@@ -6,6 +6,8 @@ from pathlib import Path
 import mne
 import pandas as pd
 
+from .gpu import filter_n_jobs
+
 _BV_KEY_RE = re.compile(r"^(?P<key>\w+)\s*=\s*(?P<val>.+?)\s*$", re.MULTILINE)
 
 
@@ -18,6 +20,7 @@ def read_raw_preprocess(
     l_freq: float,
     h_freq: float,
     notch: list[float] | None,
+    n_jobs: int = 1,
 ):
     suffix = raw_path.suffix.lower()
     if suffix == ".vhdr":
@@ -80,9 +83,13 @@ def read_raw_preprocess(
             f"Unsupported reref mode: {reref!r} (use 'average', 'none', or 'p9_p10'/'tp9_tp10')"
         )
 
+    # Filtering parallelizes across channels, so this is the main within-subject
+    # lever for many-channel data. filter_n_jobs routes to CUDA when GPU support
+    # is active, otherwise it passes the requested CPU worker count straight through.
+    jobs = filter_n_jobs(n_jobs)
     if notch:
-        raw.notch_filter(list(notch))
-    raw.filter(l_freq=l_freq, h_freq=h_freq)
+        raw.notch_filter(list(notch), n_jobs=jobs)
+    raw.filter(l_freq=l_freq, h_freq=h_freq, n_jobs=jobs)
     return raw
 
 

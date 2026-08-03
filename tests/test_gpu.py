@@ -295,3 +295,33 @@ def test_capability_report_covers_non_byte_device_name_and_partial_properties(mo
     assert rep["device_name"] == "Mock GPU"
     assert "compute_capability" not in rep
     assert "total_mem_gb" not in rep
+
+
+def test_filter_n_jobs_passes_through_cpu_workers_when_gpu_disabled():
+    gpu.configure(False)
+
+    # No GPU: the requested CPU worker count must reach MNE unchanged.
+    assert gpu.filter_n_jobs(1) == 1
+    assert gpu.filter_n_jobs(8) == 8
+    assert gpu.filter_n_jobs(-1) == -1
+
+
+def test_filter_n_jobs_routes_to_cuda_when_mne_cuda_is_active(monkeypatch):
+    # MNE only uses CUDA for FFT filtering when n_jobs == "cuda"; initializing
+    # CUDA is not enough on its own. Without this routing --use_gpu had no
+    # effect on filtering at all.
+    monkeypatch.setattr(gpu, "_GPU_ENABLED", True)
+    monkeypatch.setattr(gpu, "_MNE_CUDA_STATUS", "initialized")
+
+    assert gpu.filter_n_jobs(8) == "cuda"
+
+    monkeypatch.setattr(gpu, "_MNE_CUDA_STATUS", "available")
+    assert gpu.filter_n_jobs(1) == "cuda"
+
+
+def test_filter_n_jobs_stays_on_cpu_when_cuda_init_failed(monkeypatch):
+    # A cupy-only backend (or a failed init_cuda) must not claim CUDA filtering.
+    monkeypatch.setattr(gpu, "_GPU_ENABLED", True)
+    monkeypatch.setattr(gpu, "_MNE_CUDA_STATUS", "error: no device")
+
+    assert gpu.filter_n_jobs(4) == 4

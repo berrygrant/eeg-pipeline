@@ -61,6 +61,7 @@ def summarize_one_file(args, raw_path: Path):
         l_freq=args.l_freq,
         h_freq=args.h_freq,
         notch=args.notch,
+        n_jobs=int(getattr(args, "n_jobs", 1)),
     )
 
     # ICA diagnostics (non-destructive)

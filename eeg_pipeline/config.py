@@ -154,6 +154,7 @@ _CONFIG_DEFAULTS: list[tuple[str, Any]] = [
     ("labels.token_map", None),
     ("compute.use_gpu", False),
     ("compute.gpu_device", None),
+    ("compute.n_jobs", 1),
     ("metrics.erp.enabled", True),
     ("metrics.erp.windows", []),
     ("metrics.erp.timeseries", False),
@@ -273,6 +274,16 @@ def _validate_config(cfg: dict[str, Any]) -> None:
     input_mode = str(config_get(cfg, "input.mode", "bids")).lower()
     if input_mode not in {"bids", "legacy"}:
         errors.append("input.mode must be one of: bids | legacy.")
+
+    n_jobs = config_get(cfg, "compute.n_jobs", 1)
+    try:
+        n_jobs_int = int(n_jobs)
+    except (TypeError, ValueError):
+        errors.append(f"compute.n_jobs must be an integer, got {n_jobs!r}.")
+    else:
+        # MNE treats -1 as "all cores"; 0 and other negatives are meaningless.
+        if n_jobs_int == 0 or n_jobs_int < -1:
+            errors.append(f"compute.n_jobs must be -1 (all cores) or >= 1, got {n_jobs_int}.")
 
     bids_root = config_get(cfg, "paths.bids_root", None)
     raw_dir = config_get(cfg, "paths.raw_dir", None)
@@ -491,11 +502,14 @@ def _normalize_config(cfg: dict[str, Any]) -> dict[str, Any]:
         else:
             cfg["metrics"]["erp"]["conditions"] = [str(conds)]
 
-    # Compute (optional GPU acceleration)
+    # Compute (optional GPU acceleration + within-subject parallelism)
     compute_cfg = cfg.get("compute", {})
     cfg["compute"]["use_gpu"] = bool(compute_cfg.get("use_gpu", False))
     gd = compute_cfg.get("gpu_device", None)
     cfg["compute"]["gpu_device"] = None if gd in (None, "null", "None", "") else int(gd)
+    n_jobs = compute_cfg.get("n_jobs", 1)
+    # -1 is MNE's "all cores"; anything else must be a positive worker count.
+    cfg["compute"]["n_jobs"] = 1 if n_jobs in (None, "null", "None", "") else int(n_jobs)
 
     conv_cfg = cfg.get("conversion", {})
     cfg["conversion"]["enabled"] = bool(conv_cfg.get("enabled", False))

@@ -176,6 +176,23 @@ def format_capability_report(rep: dict) -> str:
     return "[GPU] capability: " + ", ".join(parts)
 
 
+def filter_n_jobs(n_jobs: int = 1):
+    """Return the ``n_jobs`` value to pass to MNE FFT filtering/resampling.
+
+    MNE only routes filtering through CUDA when ``n_jobs="cuda"`` — initializing
+    CUDA via :func:`configure` does nothing on its own. Without this indirection
+    ``use_gpu`` had no effect on filtering at all.
+
+    Falls back to the requested CPU worker count whenever CUDA is unavailable, so
+    callers can pass the result straight through. Note that MNE's CUDA support
+    covers FFT-based filtering and resampling only: ICA fitting and time-frequency
+    decomposition stay on the CPU regardless.
+    """
+    if _GPU_ENABLED and _MNE_CUDA_STATUS in {"initialized", "available"}:
+        return "cuda"
+    return n_jobs
+
+
 def get_xp():
     return _XP
 

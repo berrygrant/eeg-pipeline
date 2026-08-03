@@ -53,7 +53,10 @@ def _subject_scoped_files(dataset_root: Path, pattern: str) -> list[Path]:
     for path in dataset_root.rglob(pattern):
         if not path.is_file():
             continue
-        if any(part.startswith("sub-") for part in path.relative_to(dataset_root).parts):
+        # Inspect directory components only: per-subject *filenames* also begin
+        # with "sub-", so including the filename would classify by name rather
+        # than by location and could admit a dataset-level file.
+        if any(part.startswith("sub-") for part in path.relative_to(dataset_root).parent.parts):
             matches.append(path)
     return sorted(matches)
 

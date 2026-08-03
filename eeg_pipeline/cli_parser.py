@@ -68,6 +68,17 @@ def build_arg_parser():
 
     ap.add_argument("--use_gpu", action="store_true", help="Enable GPU acceleration where available (MNE/CuPy).")
     ap.add_argument("--gpu_device", type=int, default=None, help="Optional GPU device index (default: first visible).")
+    ap.add_argument(
+        "--n_jobs",
+        type=int,
+        default=1,
+        help=(
+            "Worker processes for MNE operations that parallelize across channels "
+            "(filtering, notch, TFR). -1 uses all cores. On a cluster keep this equal "
+            "to --cpus-per-task, and set OMP_NUM_THREADS to match, or threaded BLAS "
+            "will oversubscribe the allocation."
+        ),
+    )
 
     ap.add_argument(
         "--subjects",

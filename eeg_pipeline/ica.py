@@ -6,6 +6,8 @@ from typing import Any
 import mne
 import numpy as np
 
+from .gpu import filter_n_jobs
+
 
 @dataclass
 class ICAParams:
@@ -46,6 +48,7 @@ class ICAParams:
     decim: int = 3
     corr_thresh: float = 0.30
     max_exclude: int = 3
+    n_jobs: int = 1
 
 
 def _safe_pick_channels(info: mne.Info, names: list[str]) -> list[int]:
@@ -88,12 +91,16 @@ def fit_ica(raw: mne.io.BaseRaw, params: ICAParams) -> tuple[mne.preprocessing.I
     raw_fit = raw.copy()
 
     # ICA is usually fit with a 1 Hz high-pass to stabilize decomposition
+    # Only the pre-fit filter parallelizes; ICA.fit itself takes no n_jobs and is
+    # effectively serial for fastica/infomax/picard, which is why across-subject
+    # parallelism matters more than n_jobs when ICA dominates the per-subject cost.
     raw_fit.filter(
         l_freq=params.fit_l_freq,
         h_freq=params.fit_h_freq,
         picks="eeg",
         method="fir",
         phase="zero",
+        n_jobs=filter_n_jobs(params.n_jobs),
         verbose=False,
     )
 
