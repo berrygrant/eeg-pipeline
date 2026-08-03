@@ -81,7 +81,7 @@ def test_aggregation_is_idempotent(tmp_path: Path, monkeypatch):
     overwrite from whatever is on disk rather than append to what it wrote before.
     """
     dataset_root = _make_dataset(tmp_path)
-    monkeypatch.setattr(aggregate, "aggregate_grand_averages", lambda root: 0)
+    monkeypatch.setattr(aggregate, "aggregate_grand_averages", lambda root, excluded=None: 0)
 
     aggregate.run_aggregation(dataset_root, _args())
     first = pd.read_csv(dataset_root / "eeg" / "desc-erp_metrics.tsv", sep="\t")
@@ -99,7 +99,7 @@ def test_aggregation_picks_up_subjects_added_between_runs(tmp_path: Path, monkey
     pick all of them up.
     """
     dataset_root = _make_dataset(tmp_path, subjects=("01",))
-    monkeypatch.setattr(aggregate, "aggregate_grand_averages", lambda root: 0)
+    monkeypatch.setattr(aggregate, "aggregate_grand_averages", lambda root, excluded=None: 0)
 
     counts = aggregate.run_aggregation(dataset_root, _args())
     assert counts["qc"] == 1
@@ -115,7 +115,7 @@ def test_aggregation_picks_up_subjects_added_between_runs(tmp_path: Path, monkey
 def test_run_aggregation_reports_nothing_to_do_on_empty_tree(tmp_path: Path, capsys, monkeypatch):
     dataset_root = tmp_path / "derivatives" / "eeg-pipeline"
     dataset_root.mkdir(parents=True)
-    monkeypatch.setattr(aggregate, "aggregate_grand_averages", lambda root: 0)
+    monkeypatch.setattr(aggregate, "aggregate_grand_averages", lambda root, excluded=None: 0)
 
     counts = aggregate.run_aggregation(dataset_root, _args())
 
