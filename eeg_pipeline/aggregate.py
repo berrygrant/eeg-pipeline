@@ -225,6 +225,42 @@ def aggregate_qc_summary(dataset_root: Path) -> int:
     return n_files
 
 
+def _dataset_scoped_files(dataset_root: Path, pattern: str) -> list[Path]:
+    """Return dataset-level files matching ``pattern`` (``<root>/eeg/``).
+
+    The mirror of :func:`_subject_scoped_files`: it deliberately excludes anything
+    under a ``sub-`` directory so cleanup can never reach per-subject data.
+    """
+    dataset_root = Path(dataset_root)
+    matches: list[Path] = []
+    for path in dataset_root.rglob(pattern):
+        if not path.is_file():
+            continue
+        parts = path.relative_to(dataset_root).parent.parts
+        if not any(part.startswith("sub-") for part in parts):
+            matches.append(path)
+    return sorted(matches)
+
+
+def _remove_dataset_output(path: Path) -> None:
+    """Delete a dataset-level output (and its sidecar) that has no inputs.
+
+    Aggregation only writes outputs it can reconstruct, so without this a table or
+    grand average from a previous gather survives one that found nothing to build
+    it from -- and `--plot_figures` then reads it as though it belonged to the
+    current run. Only dataset-level *derived* files are removed; per-subject data
+    is never touched, so anything deleted here is regenerable by re-running the
+    gather with its inputs present.
+    """
+    for candidate in (path, derivative_sidecar_path(path)):
+        try:
+            if candidate.exists():
+                candidate.unlink()
+                print(f"Removed stale dataset output (no inputs): {candidate.name}")
+        except OSError as e:  # pragma: no cover - defensive
+            print(f"[WARN] Could not remove {candidate}: {e}")
+
+
 def aggregate_metric_tables(
     dataset_root: Path,
     args,
@@ -256,11 +292,15 @@ def aggregate_metric_tables(
     for name, pattern, path_kwargs, description in specs:
         df, n_files = _concat_subject_tables(dataset_root, pattern, excluded)
         counts[name] = n_files
+        out_path = dataset_derivative_path(dataset_root, **path_kwargs)
         if df is None:
+            # Nothing to build it from this gather: drop the previous version
+            # rather than leave it looking current.
+            _remove_dataset_output(out_path)
             continue
         _save_dataframe_with_sidecar(
             df,
-            dataset_derivative_path(dataset_root, **path_kwargs),
+            out_path,
             args,
             None,
             behavior_source=None,
@@ -302,6 +342,10 @@ def aggregate_grand_averages(
         display_labels.setdefault(cond_key, condition)
         groups.setdefault(group_key, {}).setdefault(cond_key, []).append(evoked)
 
+    # Track what this gather actually produced so grand averages left by a
+    # previous run -- a condition that no longer appears, or whose evokeds are now
+    # all excluded or unreadable -- do not survive as though they were current.
+    written_paths: set[Path] = set()
     n_written = 0
     for (ses, task), evoked_map in groups.items():
         group_entities: dict[str, str] = {}
@@ -329,7 +373,13 @@ def aggregate_grand_averages(
                     "Condition": cond,
                 },
             )
+            written_paths.add(ga_path)
             n_written += 1
+
+    for stale in _dataset_scoped_files(dataset_root, "*_ave.fif"):
+        if stale not in written_paths:
+            _remove_dataset_output(stale)
+
     return n_written
 
 

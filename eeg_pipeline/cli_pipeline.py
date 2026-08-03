@@ -309,6 +309,26 @@ def _process_recording(recording, **kwargs):
     start_index = len(rows)
     try:
         _process_recording_stages(recording, timings=timings, **kwargs)
+    except Exception as exc:
+        # A failure before any stage appended its own row (raw loading, filtering)
+        # would otherwise leave nothing to write, so the recording would vanish
+        # from QC entirely. That is the worst case to be silent about: aggregation
+        # decides what to exclude from the dataset tables by reading QC status, so
+        # a recording with no row cannot be excluded — and if a previous run left
+        # metrics behind, they would be folded back in as though it had succeeded.
+        if len(rows) == start_index:
+            rows.append(
+                {
+                    "subject": f"sub-{recording.entities.get('sub', '')}",
+                    "session": recording.session_label or "",
+                    "task": recording.task_id or "",
+                    "run": recording.run_id or "",
+                    "raw_file": recording.relative_raw_path,
+                    "status": "ERROR",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+        raise
     finally:
         columns = timings.as_qc_columns()
         new_rows = rows[start_index:]

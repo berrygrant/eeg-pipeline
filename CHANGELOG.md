@@ -34,6 +34,15 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `hpc/slurm_array.sbatch` selected subjects by physical line number. One blank
   line desynchronized them: tasks landed on empty lines, exited non-zero, and the
   `afterok`-chained gather job never ran. Both now index non-blank lines.
+- A recording that failed before any stage recorded an outcome (raw loading,
+  filtering) left no QC row at all, so it vanished from the QC summary — and,
+  because aggregation excludes recordings by QC status, could not be excluded
+  from the dataset tables either. Such failures now write an `ERROR` QC row.
+- Dataset-level outputs from a previous gather survived one that had no inputs to
+  rebuild them from (all subjects excluded, a condition no longer present, or
+  unreadable evokeds), so `--plot_figures` consumed them as current. Aggregation
+  now removes dataset-level outputs it cannot rebuild. Per-subject data is never
+  touched.
 - Aggregation folded stale per-subject files from earlier runs back into the
   dataset-level outputs. Re-running with a stricter setting (e.g. a tighter
   `--max_reject_rate`) rewrote a recording's QC row to a skip status but left its

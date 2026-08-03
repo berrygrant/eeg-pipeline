@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 import eeg_pipeline.aggregate as aggregate
 import eeg_pipeline.cli as cli
@@ -365,3 +366,32 @@ def test_run_full_pipeline_skips_missing_vmrk_and_writes_qc_only(monkeypatch, tm
 
     assert len(captured["rows"]) == 1
     assert captured["rows"][0]["status"] == "SKIP_MISSING_VMRK"
+
+
+def test_recording_that_raises_before_any_stage_still_gets_a_qc_row(monkeypatch, tmp_path: Path):
+    """A hard failure must still leave a QC row on disk.
+
+    Aggregation decides what to exclude from the dataset tables by reading QC
+    status, so a recording with no row cannot be excluded -- and metrics left by
+    a previous successful run would be folded back in as though it had succeeded.
+    """
+    args, defaults = _parser_args(tmp_path)
+    args.ica = "off"
+    bids_root, derivatives_root = _make_bids_fixture(tmp_path / "boom")
+    args.bids_root = bids_root
+    args.derivatives_root = derivatives_root
+
+    def _boom(*a, **kw):
+        raise RuntimeError("raw load exploded")
+
+    monkeypatch.setattr(cli_pipeline, "_process_recording_stages", _boom)
+    monkeypatch.setattr(cli_pipeline, "run_aggregation", lambda root, a: None)
+
+    with pytest.raises(RuntimeError, match="raw load exploded"):
+        cli.run_full_pipeline(args, defaults=defaults, cfg={})
+
+    qc = list((Path(args.derivatives_root) / "eeg-pipeline").rglob("*desc-summary_qc.tsv"))
+    assert qc, "a failing recording must still be reported in QC"
+    row = pd.read_csv(qc[0], sep="\t").iloc[0]
+    assert row["status"] == "ERROR"
+    assert "raw load exploded" in row["error"]

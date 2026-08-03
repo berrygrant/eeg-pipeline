@@ -345,3 +345,68 @@ def test_is_excluded_keeps_unparseable_filenames(tmp_path: Path):
     # silently shrink the outputs.
     assert aggregate._is_excluded(Path("not-a-bids-name.tsv"), {("01", "", "oddball", "01")}) is False
     assert aggregate._is_excluded(Path("sub-01_task-oddball_x.tsv"), None) is False
+
+
+def test_aggregation_removes_dataset_tables_that_have_no_inputs(tmp_path: Path, monkeypatch):
+    """A gather with no inputs must not leave the previous table looking current.
+
+    Aggregation only writes outputs it can reconstruct, so a stale dataset table
+    would otherwise survive a gather that found nothing to build it from, and
+    --plot_figures would consume it as belonging to this run.
+    """
+    dataset_root = tmp_path / "derivatives" / "eeg-pipeline"
+    stale = dataset_root / "eeg" / "desc-erp_metrics.tsv"
+    _write_tsv(stale, [{"subject": "sub-99", "value": 1.0}])
+    stale.with_suffix(".json").write_text("{}", encoding="utf-8")
+    # A QC input exists so aggregation runs, but no ERP metrics files do.
+    _write_tsv(
+        dataset_root / "sub-01" / "eeg" / "sub-01_task-oddball_desc-summary_qc.tsv",
+        [{"subject": "sub-01", "session": "", "task": "oddball", "run": "", "status": "OK"}],
+    )
+
+    monkeypatch.setattr(aggregate, "aggregate_grand_averages", lambda root, excluded=None: 0)
+    aggregate.run_aggregation(dataset_root, _args())
+
+    assert not stale.exists()
+    assert not stale.with_suffix(".json").exists()
+
+
+def test_aggregation_removes_grand_averages_for_vanished_conditions(tmp_path: Path, monkeypatch):
+    dataset_root = tmp_path / "derivatives" / "eeg-pipeline"
+
+    class FakeEvoked:
+        def save(self, path, overwrite=True):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text("ga", encoding="utf-8")
+
+    # A grand average for a condition that no longer has any subject evokeds.
+    stale = dataset_root / "eeg" / "task-oddball_desc-grandaverage-deviant_ave.fif"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("old", encoding="utf-8")
+
+    eeg_dir = dataset_root / "sub-01" / "eeg"
+    eeg_dir.mkdir(parents=True)
+    path = eeg_dir / "sub-01_task-oddball_desc-standard_ave.fif"
+    path.write_text("evoked", encoding="utf-8")
+    path.with_suffix(".json").write_text(json.dumps({"Condition": "Standard"}), encoding="utf-8")
+
+    monkeypatch.setattr(aggregate.mne, "read_evokeds", lambda p, verbose="error": [FakeEvoked()])
+    monkeypatch.setattr(aggregate, "grand_averages", lambda m: {c: FakeEvoked() for c in m})
+
+    aggregate.aggregate_grand_averages(dataset_root)
+
+    assert not stale.exists()
+    assert (dataset_root / "eeg" / "task-oddball_desc-grandaverage-standard_ave.fif").exists()
+    # Per-subject data must never be touched by dataset-level cleanup.
+    assert path.exists()
+
+
+def test_dataset_scoped_files_never_reaches_subject_data(tmp_path: Path):
+    dataset_root = tmp_path / "derivatives" / "eeg-pipeline"
+    (dataset_root / "eeg").mkdir(parents=True)
+    (dataset_root / "sub-01" / "eeg").mkdir(parents=True)
+    ds = dataset_root / "eeg" / "task-oddball_desc-grandaverage-standard_ave.fif"
+    ds.write_text("ga", encoding="utf-8")
+    (dataset_root / "sub-01" / "eeg" / "sub-01_task-oddball_desc-standard_ave.fif").write_text("s", encoding="utf-8")
+
+    assert aggregate._dataset_scoped_files(dataset_root, "*_ave.fif") == [ds]
