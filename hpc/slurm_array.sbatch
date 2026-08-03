@@ -32,9 +32,14 @@ export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 #   module load miniconda && conda activate eeg-pipeline
 #   source /path/to/venv/bin/activate
 
-SUBJECT="$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$SUBJECT_LIST")"
+# Index NON-BLANK lines, matching how submit.sh sizes the array. Selecting by
+# physical line number instead would desynchronize the moment the list contains
+# a blank line (a trailing newline is enough): tasks would land on empty lines,
+# exit non-zero, and the afterok-chained gather job would never run.
+SUBJECT="$(grep -v '^[[:space:]]*$' "$SUBJECT_LIST" | sed -n "$((SLURM_ARRAY_TASK_ID + 1))p")"
 if [[ -z "$SUBJECT" ]]; then
-    echo "No subject at line $((SLURM_ARRAY_TASK_ID + 1)) of $SUBJECT_LIST" >&2
+    echo "No subject at index ${SLURM_ARRAY_TASK_ID} of $SUBJECT_LIST" >&2
+    echo "(the array size must match the number of non-blank lines)" >&2
     exit 1
 fi
 

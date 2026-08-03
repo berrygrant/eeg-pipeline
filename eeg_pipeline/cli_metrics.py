@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import mne
-import pandas as pd
 
+from .aggregate import run_aggregation
 from .cli_common import (
     ERP_WINDOWS,
     ERPTimeSeriesParams,
@@ -16,7 +16,6 @@ from .cli_common import (
     compute_erp_metrics,
     compute_erp_timeseries,
     compute_tfr_metrics,
-    dataset_derivative_path,
     filter_derivative_paths,
     load_epochs,
     parse_bids_entities_like_name,
@@ -90,10 +89,6 @@ def run_metrics_only(args):
             n_jobs=int(getattr(args, "n_jobs", 1)),
         )
 
-    erp_metrics_all: list[pd.DataFrame] = []
-    tfr_metrics_all: list[pd.DataFrame] = []
-    erp_timeseries_all: list[pd.DataFrame] = []
-
     for p in files:
         source_basename = _subject_from_epochs_path(p)
         entities = parse_bids_entities_like_name(source_basename)
@@ -128,7 +123,6 @@ def run_metrics_only(args):
                     behavior_source=None,
                     description="Subject-level ERP metrics computed from derivative epochs.",
                 )
-                erp_metrics_all.append(df_erp)
             except Exception as e:
                 print(f"[WARN] ERP metrics failed for {subj}: {e}")
 
@@ -169,7 +163,6 @@ def run_metrics_only(args):
                     behavior_source=None,
                     description="Subject-level ERP time series metrics.",
                 )
-                erp_timeseries_all.append(df_ts)
             except Exception as e:
                 print(f"[WARN] ERP timeseries failed for {subj}: {e}")
 
@@ -200,37 +193,20 @@ def run_metrics_only(args):
                     behavior_source=None,
                     description="Subject-level TFR metrics computed from derivative epochs.",
                 )
-                tfr_metrics_all.append(df_tfr)
             except Exception as e:
                 print(f"[WARN] TFR metrics failed for {subj}: {e}")
 
-    if erp_metrics_all:
-        _save_dataframe_with_sidecar(
-            pd.concat(erp_metrics_all, ignore_index=True),
-            dataset_derivative_path(dataset_root, suffix="metrics", extension=".tsv", desc="erp"),
-            args,
-            None,
-            behavior_source=None,
-            description="Dataset-level ERP metrics aggregated across processed subjects.",
-        )
-    if erp_timeseries_all:
-        _save_dataframe_with_sidecar(
-            pd.concat(erp_timeseries_all, ignore_index=True),
-            dataset_derivative_path(dataset_root, suffix="timeseries", extension=".parquet", desc="erp"),
-            args,
-            None,
-            behavior_source=None,
-            description="Dataset-level ERP time series aggregated across processed subjects.",
-        )
-    if tfr_metrics_all:
-        _save_dataframe_with_sidecar(
-            pd.concat(tfr_metrics_all, ignore_index=True),
-            dataset_derivative_path(dataset_root, suffix="metrics", extension=".tsv", desc="tfr"),
-            args,
-            None,
-            behavior_source=None,
-            description="Dataset-level TFR metrics aggregated across processed subjects.",
-        )
+    # Dataset-level outputs are rebuilt from the per-subject files on disk, NOT
+    # from what this invocation happened to compute. That distinction matters
+    # once subject filters exist: concatenating only the filtered frames would
+    # overwrite the dataset tables with a subset, silently dropping every
+    # subject this run did not touch. Reading from disk keeps the combined
+    # tables complete regardless of which subjects were requested, and shares
+    # one aggregation implementation with run_full_pipeline.
+    if getattr(args, "skip_aggregate", False):
+        print("\n[SKIP] Dataset-level aggregation skipped (--skip_aggregate). Run --aggregate_only to combine.")
+    else:
+        run_aggregation(dataset_root, args)
 
 
 def _resolve_figure_time_window(args) -> tuple[float, float]:

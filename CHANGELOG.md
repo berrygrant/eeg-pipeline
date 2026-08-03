@@ -24,6 +24,16 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   including when the recording raised — previously QC existed only in memory.
 
 ### Fixed
+- `--get_metrics` with subject filters destroyed other subjects' rows in the
+  dataset-level tables. `run_metrics_only` concatenated only the frames that run
+  computed and wrote them to the dataset-level paths, so once filtering existed a
+  per-subject rerun overwrote the combined table with a single subject. It now
+  rebuilds those tables from the per-subject files on disk (the same aggregation
+  `run_full_pipeline` uses) and honors `--skip_aggregate`.
+- `hpc/submit.sh` sized the array by non-blank line count while
+  `hpc/slurm_array.sbatch` selected subjects by physical line number. One blank
+  line desynchronized them: tasks landed on empty lines, exited non-zero, and the
+  `afterok`-chained gather job never ran. Both now index non-blank lines.
 - GPU acceleration was inert: `configure()` initialized MNE CUDA, but MNE only
   routes filtering through CUDA when `n_jobs="cuda"` and the package never passed
   `n_jobs` at all, so `use_gpu` had no effect on filtering. New
