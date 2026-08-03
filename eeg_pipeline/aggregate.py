@@ -15,7 +15,9 @@ happening to agree.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import mne
 import pandas as pd
@@ -77,6 +79,77 @@ def _desc_from_stem(stem: str) -> str | None:
 ENTITY_COLUMNS = ("subject", "session", "task", "run")
 
 
+def _recording_key(entities: Mapping[str, str]) -> tuple[str, str, str, str]:
+    """Normalize BIDS entities to a comparable per-recording key.
+
+    QC rows carry prefixed labels (``sub-01``, ``ses-02``) while filenames carry
+    bare values, so both sides are stripped to bare form before comparison.
+    """
+
+    def _bare(value: Any, prefix: str) -> str:
+        text = "" if value is None else str(value).strip()
+        if text.lower() in {"", "nan", "none"}:
+            return ""
+        return text[len(prefix) + 1 :] if text.startswith(f"{prefix}-") else text
+
+    return (
+        _bare(entities.get("sub"), "sub"),
+        _bare(entities.get("ses"), "ses"),
+        _bare(entities.get("task"), "task"),
+        _bare(entities.get("run"), "run"),
+    )
+
+
+def _excluded_recording_keys(dataset_root: Path) -> set[tuple[str, str, str, str]]:
+    """Recordings whose most recent QC row reports something other than success.
+
+    Aggregation rebuilds dataset-level outputs from whatever per-subject files are
+    on disk, and a skipped recording's metrics/evokeds from an *earlier* run are
+    not removed. Without this filter, re-running with a stricter setting (say a
+    tighter ``--max_reject_rate``) would rewrite the QC row to a skip status while
+    the stale metrics and evokeds were folded back into the combined tables and
+    grand averages — the dataset would report a subject excluded while still
+    averaging it in.
+
+    QC rows are rewritten on every run, including skips, so they are the
+    authoritative record of what the latest run decided about each recording.
+    """
+    excluded: set[tuple[str, str, str, str]] = set()
+    for path in _subject_scoped_files(dataset_root, QC_PATTERN):
+        df = _read_table(path)
+        if df is None or df.empty or "status" not in df.columns:
+            continue
+        for row in df.to_dict("records"):
+            status = str(row.get("status", "")).strip().upper()
+            if not status or status == "OK":
+                continue
+            excluded.add(
+                _recording_key(
+                    {
+                        "sub": row.get("subject"),
+                        "ses": row.get("session"),
+                        "task": row.get("task"),
+                        "run": row.get("run"),
+                    }
+                )
+            )
+    return excluded
+
+
+def _is_excluded(path: Path, excluded: set[tuple[str, str, str, str]] | None) -> bool:
+    """Whether ``path`` belongs to a recording the latest run skipped.
+
+    A filename that cannot be parsed is never excluded: without a key there is no
+    evidence it was skipped, and dropping it would silently shrink the outputs.
+    """
+    if not excluded:
+        return False
+    try:
+        return _recording_key(parse_bids_entities_like_name(path.stem)) in excluded
+    except ValueError:
+        return False
+
+
 def _read_table(path: Path) -> pd.DataFrame | None:
     try:
         if path.suffix == ".parquet":
@@ -91,15 +164,23 @@ def _read_table(path: Path) -> pd.DataFrame | None:
         return None
 
 
-def _concat_subject_tables(dataset_root: Path, pattern: str) -> tuple[pd.DataFrame | None, int]:
+def _concat_subject_tables(
+    dataset_root: Path,
+    pattern: str,
+    excluded: set[tuple[str, str, str, str]] | None = None,
+) -> tuple[pd.DataFrame | None, int]:
     """Concatenate every per-subject table matching ``pattern``.
 
     Returns the combined frame (or ``None``) and the number of files contributing
     to it, so callers can report coverage instead of silently emitting a table
-    built from fewer subjects than expected.
+    built from fewer subjects than expected. Recordings in ``excluded`` are
+    skipped, so stale files left by an earlier run cannot re-enter the combined
+    tables after a re-run decided to skip that recording.
     """
     frames: list[pd.DataFrame] = []
     for path in _subject_scoped_files(dataset_root, pattern):
+        if _is_excluded(path, excluded):
+            continue
         df = _read_table(path)
         if df is not None and not df.empty:
             frames.append(df)
@@ -144,7 +225,11 @@ def aggregate_qc_summary(dataset_root: Path) -> int:
     return n_files
 
 
-def aggregate_metric_tables(dataset_root: Path, args) -> dict[str, int]:
+def aggregate_metric_tables(
+    dataset_root: Path,
+    args,
+    excluded: set[tuple[str, str, str, str]] | None = None,
+) -> dict[str, int]:
     """Rebuild the combined ERP/TFR/time-series tables from per-subject files."""
     specs = (
         (
@@ -169,7 +254,7 @@ def aggregate_metric_tables(dataset_root: Path, args) -> dict[str, int]:
 
     counts: dict[str, int] = {}
     for name, pattern, path_kwargs, description in specs:
-        df, n_files = _concat_subject_tables(dataset_root, pattern)
+        df, n_files = _concat_subject_tables(dataset_root, pattern, excluded)
         counts[name] = n_files
         if df is None:
             continue
@@ -184,7 +269,10 @@ def aggregate_metric_tables(dataset_root: Path, args) -> dict[str, int]:
     return counts
 
 
-def aggregate_grand_averages(dataset_root: Path) -> int:
+def aggregate_grand_averages(
+    dataset_root: Path,
+    excluded: set[tuple[str, str, str, str]] | None = None,
+) -> int:
     """Rebuild grand averages from per-subject evoked files.
 
     Evokeds are grouped by ``(session, task)`` and condition, matching how the
@@ -198,6 +286,8 @@ def aggregate_grand_averages(dataset_root: Path) -> int:
     # built from only part of the cohort. Display casing is kept for metadata.
     display_labels: dict[str, str] = {}
     for path in _subject_scoped_files(dataset_root, EVOKED_PATTERN):
+        if _is_excluded(path, excluded):
+            continue
         condition = _condition_for_evoked(path)
         if not condition:
             continue
@@ -251,9 +341,14 @@ def run_aggregation(dataset_root: Path, args) -> dict[str, int]:
     run without duplicating rows.
     """
     dataset_root = Path(dataset_root)
+    # Recordings the latest run skipped must not be resurrected from files an
+    # earlier run left behind, or the QC summary would disagree with the tables.
+    excluded = _excluded_recording_keys(dataset_root)
     counts = {"qc": aggregate_qc_summary(dataset_root)}
-    counts.update(aggregate_metric_tables(dataset_root, args))
-    counts["grand_averages"] = aggregate_grand_averages(dataset_root)
+    counts.update(aggregate_metric_tables(dataset_root, args, excluded))
+    counts["grand_averages"] = aggregate_grand_averages(dataset_root, excluded)
+    if excluded:
+        print(f"Excluded {len(excluded)} recording(s) from metrics/grand averages (QC status not OK).")
 
     if not counts["qc"]:
         print(f"[WARN] No per-subject QC rows found under {dataset_root}; nothing to aggregate.")

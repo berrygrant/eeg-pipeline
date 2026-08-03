@@ -270,3 +270,78 @@ def test_aggregate_grand_averages_merges_conditions_differing_only_by_case(tmp_p
     )
     # Original capitalization is retained for metadata.
     assert sidecar["Condition"] == "Standard"
+
+
+def test_aggregation_excludes_recordings_the_latest_run_skipped(tmp_path: Path, monkeypatch):
+    """Stale metrics from an earlier run must not survive a later skip.
+
+    Aggregation reads whatever per-subject files are on disk, and a skipped
+    recording's metrics/evokeds from a previous run are not deleted. Re-running
+    with a stricter setting (a tighter --max_reject_rate, say) rewrites the QC row
+    to a skip status; without filtering on that status the stale metrics would be
+    folded back in, so the dataset would report a subject excluded while still
+    averaging it into the combined tables and grand averages.
+    """
+    dataset_root = tmp_path / "derivatives" / "eeg-pipeline"
+    for sub, status in (("01", "OK"), ("02", "SKIP_REJECT_RATE")):
+        eeg_dir = dataset_root / f"sub-{sub}" / "eeg"
+        base = f"sub-{sub}_task-oddball_run-01"
+        _write_tsv(
+            eeg_dir / f"{base}_desc-summary_qc.tsv",
+            [{"subject": f"sub-{sub}", "session": "", "task": "oddball", "run": "01", "status": status}],
+        )
+        # BOTH subjects have metrics on disk: sub-02's are stale, left by the
+        # earlier run that had not yet excluded it.
+        _write_tsv(eeg_dir / f"{base}_desc-erp_metrics.tsv", [{"subject": f"sub-{sub}", "value": 1.0}])
+
+    monkeypatch.setattr(aggregate, "aggregate_grand_averages", lambda root, excluded=None: 0)
+    aggregate.run_aggregation(dataset_root, _args())
+
+    combined = pd.read_csv(dataset_root / "eeg" / "desc-erp_metrics.tsv", sep="\t")
+    assert sorted(combined["subject"]) == ["sub-01"]
+    # The QC summary still reports both, including the skip -- that is the record.
+    qc = pd.read_csv(dataset_root / "eeg" / "desc-summary_qc.tsv", sep="\t")
+    assert sorted(qc["subject"]) == ["sub-01", "sub-02"]
+
+
+def test_aggregation_excludes_skipped_recordings_from_grand_averages(tmp_path: Path, monkeypatch):
+    dataset_root = tmp_path / "derivatives" / "eeg-pipeline"
+    averaged: list[int] = []
+
+    class FakeEvoked:
+        def save(self, path, overwrite=True):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text("ga", encoding="utf-8")
+
+    for sub, status in (("01", "OK"), ("02", "SKIP_REJECT_RATE")):
+        eeg_dir = dataset_root / f"sub-{sub}" / "eeg"
+        eeg_dir.mkdir(parents=True)
+        base = f"sub-{sub}_task-oddball_run-01"
+        _write_tsv(
+            eeg_dir / f"{base}_desc-summary_qc.tsv",
+            [{"subject": f"sub-{sub}", "session": "", "task": "oddball", "run": "01", "status": status}],
+        )
+        path = eeg_dir / f"{base}_desc-standard_ave.fif"
+        path.write_text("evoked", encoding="utf-8")
+        path.with_suffix(".json").write_text(json.dumps({"Condition": "Standard"}), encoding="utf-8")
+
+    monkeypatch.setattr(aggregate.mne, "read_evokeds", lambda p, verbose="error": [FakeEvoked()])
+
+    def _grand_averages(evoked_map):
+        for evokeds in evoked_map.values():
+            averaged.append(len(evokeds))
+        return {cond: FakeEvoked() for cond in evoked_map}
+
+    monkeypatch.setattr(aggregate, "grand_averages", _grand_averages)
+
+    aggregate.aggregate_grand_averages(dataset_root, aggregate._excluded_recording_keys(dataset_root))
+
+    # Only sub-01 contributes; the skipped sub-02's stale evoked is left out.
+    assert averaged == [1]
+
+
+def test_is_excluded_keeps_unparseable_filenames(tmp_path: Path):
+    # No key means no evidence the recording was skipped; dropping it would
+    # silently shrink the outputs.
+    assert aggregate._is_excluded(Path("not-a-bids-name.tsv"), {("01", "", "oddball", "01")}) is False
+    assert aggregate._is_excluded(Path("sub-01_task-oddball_x.tsv"), None) is False

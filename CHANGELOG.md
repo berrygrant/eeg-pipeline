@@ -34,6 +34,13 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `hpc/slurm_array.sbatch` selected subjects by physical line number. One blank
   line desynchronized them: tasks landed on empty lines, exited non-zero, and the
   `afterok`-chained gather job never ran. Both now index non-blank lines.
+- Aggregation folded stale per-subject files from earlier runs back into the
+  dataset-level outputs. Re-running with a stricter setting (e.g. a tighter
+  `--max_reject_rate`) rewrote a recording's QC row to a skip status but left its
+  previous metrics and evokeds on disk, so the dataset reported a subject excluded
+  while still averaging it into the combined tables and grand averages.
+  Aggregation now treats the QC status as authoritative and excludes recordings
+  the latest run did not process successfully.
 - Grand averages grouped conditions by raw label while the output path lower-cases
   them, so "Standard" (sidecar) and "standard" (filename fallback) produced two
   groups writing to the same path — one silently overwriting the other, each built
