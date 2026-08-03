@@ -187,8 +187,14 @@ def filter_n_jobs(n_jobs: int = 1):
     callers can pass the result straight through. Note that MNE's CUDA support
     covers FFT-based filtering and resampling only: ICA fitting and time-frequency
     decomposition stay on the CPU regardless.
+
+    Only ``"initialized"`` counts as CUDA-capable. ``"available"`` merely means the
+    ``mne.cuda`` module exists without an ``init_cuda`` to call, which is not proof
+    that CUDA works — claiming it there would hand MNE an ``n_jobs="cuda"`` it
+    cannot honor. Note also that routing to CUDA discards the requested CPU worker
+    count, since CUDA filtering is single-stream.
     """
-    if _GPU_ENABLED and _MNE_CUDA_STATUS in {"initialized", "available"}:
+    if _GPU_ENABLED and _MNE_CUDA_STATUS == "initialized":
         return "cuda"
     return n_jobs
 

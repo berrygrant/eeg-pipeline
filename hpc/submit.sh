@@ -26,7 +26,9 @@ fi
 
 # Count non-blank lines; slurm_array.sbatch indexes non-blank lines too, so the
 # two stay in step even if the list has blank or trailing lines.
-N_SUBJECTS="$(grep -c '[^[:space:]]' "$SUBJECT_LIST")"
+# `|| true` because grep -c exits 1 when the count is zero, which under
+# `set -e` would abort here and skip the explicit empty-list message below.
+N_SUBJECTS="$(grep -c '[^[:space:]]' "$SUBJECT_LIST" || true)"
 if [[ "$N_SUBJECTS" -eq 0 ]]; then
     echo "Subject list is empty: $SUBJECT_LIST" >&2
     exit 1

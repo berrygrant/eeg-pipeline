@@ -202,3 +202,71 @@ def test_subject_scoped_files_classifies_by_location_not_filename(tmp_path: Path
 
     assert [p.parent.parent.name for p in found] == ["sub-01"]
 
+
+
+def test_aggregate_preserves_zero_padded_entity_labels(tmp_path: Path):
+    """BIDS entity labels must survive the TSV round-trip as written.
+
+    pandas infers a zero-padded run like "01" as the integer 1, which would make
+    the combined tables disagree with both the filenames and the per-subject
+    tables they were built from.
+    """
+    dataset_root = tmp_path / "derivatives" / "eeg-pipeline"
+    _write_tsv(
+        dataset_root / "sub-01" / "eeg" / "sub-01_task-oddball_run-01_desc-summary_qc.tsv",
+        [{"subject": "sub-01", "session": "", "task": "oddball", "run": "01", "n_epochs": 40}],
+    )
+
+    aggregate.aggregate_qc_summary(dataset_root)
+
+    combined = pd.read_csv(
+        dataset_root / "eeg" / "desc-summary_qc.tsv", sep="\t", dtype={"run": str}
+    )
+    assert combined.loc[0, "run"] == "01"
+    # Genuinely numeric columns must still be numeric.
+    assert int(combined.loc[0, "n_epochs"]) == 40
+
+
+def test_aggregate_grand_averages_merges_conditions_differing_only_by_case(tmp_path: Path, monkeypatch):
+    """Condition labels differing only in case must form ONE grand average.
+
+    The output path lower-cases the condition, so grouping by raw label would let
+    "Standard" and "standard" produce two groups writing to the same path -- one
+    silently overwriting the other, each built from part of the cohort.
+    """
+    dataset_root = tmp_path / "derivatives" / "eeg-pipeline"
+    group_sizes: list[int] = []
+
+    class FakeEvoked:
+        def save(self, path, overwrite=True):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text("ga", encoding="utf-8")
+
+    # sub-01 carries a sidecar (original case); sub-02 has none, so its condition
+    # falls back to the lower-cased desc- token in the filename.
+    for sub, with_sidecar in (("01", True), ("02", False)):
+        eeg_dir = dataset_root / f"sub-{sub}" / "eeg"
+        eeg_dir.mkdir(parents=True)
+        path = eeg_dir / f"sub-{sub}_task-oddball_desc-standard_ave.fif"
+        path.write_text("evoked", encoding="utf-8")
+        if with_sidecar:
+            path.with_suffix(".json").write_text(json.dumps({"Condition": "Standard"}), encoding="utf-8")
+
+    monkeypatch.setattr(aggregate.mne, "read_evokeds", lambda p, verbose="error": [FakeEvoked()])
+
+    def _grand_averages(evoked_map):
+        for evokeds in evoked_map.values():
+            group_sizes.append(len(evokeds))
+        return {cond: FakeEvoked() for cond in evoked_map}
+
+    monkeypatch.setattr(aggregate, "grand_averages", _grand_averages)
+
+    n_written = aggregate.aggregate_grand_averages(dataset_root)
+
+    assert n_written == 1
+    assert group_sizes == [2]  # both subjects in one group, not 1+1
+    sidecar = json.loads(
+        (dataset_root / "eeg" / "task-oddball_desc-grandaverage-standard_ave.json").read_text(encoding="utf-8")
+    )
+    # Original capitalization is retained for metadata.
+    assert sidecar["Condition"] == "Standard"

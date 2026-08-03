@@ -70,11 +70,22 @@ def _desc_from_stem(stem: str) -> str | None:
     return None
 
 
+#: Columns holding BIDS entity labels, which must survive a text round-trip as
+#: written. Without this pandas infers a zero-padded run like "01" as the integer
+#: 1, so the combined tables would disagree with the filenames and with the
+#: per-subject tables they were built from.
+ENTITY_COLUMNS = ("subject", "session", "task", "run")
+
+
 def _read_table(path: Path) -> pd.DataFrame | None:
     try:
         if path.suffix == ".parquet":
+            # Parquet stores dtypes, so entity labels round-trip as written.
             return pd.read_parquet(path)
-        return pd.read_csv(path, sep="\t" if path.suffix == ".tsv" else ",")
+        sep = "\t" if path.suffix == ".tsv" else ","
+        header = pd.read_csv(path, sep=sep, nrows=0)
+        entity_dtypes = {col: str for col in ENTITY_COLUMNS if col in header.columns}
+        return pd.read_csv(path, sep=sep, dtype=entity_dtypes)
     except Exception as e:  # pragma: no cover - defensive
         print(f"[WARN] Could not read {path}: {e}")
         return None
@@ -180,6 +191,12 @@ def aggregate_grand_averages(dataset_root: Path) -> int:
     serial path grouped its in-memory evokeds.
     """
     groups: dict[tuple[str | None, str | None], dict[str, list]] = {}
+    # Conditions are keyed case-insensitively. The output path lower-cases the
+    # condition, so grouping by raw label would let "Standard" (from a sidecar)
+    # and "standard" (from a filename fallback) form two groups that then write
+    # to the SAME path -- one grand average silently overwriting the other, each
+    # built from only part of the cohort. Display casing is kept for metadata.
+    display_labels: dict[str, str] = {}
     for path in _subject_scoped_files(dataset_root, EVOKED_PATTERN):
         condition = _condition_for_evoked(path)
         if not condition:
@@ -191,7 +208,9 @@ def aggregate_grand_averages(dataset_root: Path) -> int:
             print(f"[WARN] Could not read evoked {path}: {e}")
             continue
         group_key = (entities.get("ses"), entities.get("task"))
-        groups.setdefault(group_key, {}).setdefault(condition, []).append(evoked)
+        cond_key = condition.lower()
+        display_labels.setdefault(cond_key, condition)
+        groups.setdefault(group_key, {}).setdefault(cond_key, []).append(evoked)
 
     n_written = 0
     for (ses, task), evoked_map in groups.items():
@@ -200,13 +219,14 @@ def aggregate_grand_averages(dataset_root: Path) -> int:
             group_entities["ses"] = ses
         if task:
             group_entities["task"] = task
-        for cond, ga in grand_averages(evoked_map).items():
+        for cond_key, ga in grand_averages(evoked_map).items():
+            cond = display_labels.get(cond_key, cond_key)
             ga_path = dataset_derivative_path(
                 dataset_root,
                 entities=group_entities,
                 suffix="ave",
                 extension=".fif",
-                desc=f"grandaverage-{cond.lower()}",
+                desc=f"grandaverage-{cond_key}",
             )
             ga.save(ga_path, overwrite=True)
             write_json(

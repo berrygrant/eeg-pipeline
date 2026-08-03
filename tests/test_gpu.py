@@ -313,9 +313,9 @@ def test_filter_n_jobs_routes_to_cuda_when_mne_cuda_is_active(monkeypatch):
     monkeypatch.setattr(gpu, "_GPU_ENABLED", True)
     monkeypatch.setattr(gpu, "_MNE_CUDA_STATUS", "initialized")
 
+    # Routing to CUDA also discards the CPU worker count: CUDA filtering is
+    # single-stream, so n_jobs has no meaning once "cuda" is selected.
     assert gpu.filter_n_jobs(8) == "cuda"
-
-    monkeypatch.setattr(gpu, "_MNE_CUDA_STATUS", "available")
     assert gpu.filter_n_jobs(1) == "cuda"
 
 
@@ -323,5 +323,16 @@ def test_filter_n_jobs_stays_on_cpu_when_cuda_init_failed(monkeypatch):
     # A cupy-only backend (or a failed init_cuda) must not claim CUDA filtering.
     monkeypatch.setattr(gpu, "_GPU_ENABLED", True)
     monkeypatch.setattr(gpu, "_MNE_CUDA_STATUS", "error: no device")
+
+    assert gpu.filter_n_jobs(4) == 4
+
+
+def test_filter_n_jobs_requires_initialized_cuda_not_merely_available(monkeypatch):
+    """"available" means the mne.cuda module exists, not that CUDA initialized.
+
+    Claiming CUDA there would hand MNE an n_jobs="cuda" it cannot honor.
+    """
+    monkeypatch.setattr(gpu, "_GPU_ENABLED", True)
+    monkeypatch.setattr(gpu, "_MNE_CUDA_STATUS", "available")
 
     assert gpu.filter_n_jobs(4) == 4

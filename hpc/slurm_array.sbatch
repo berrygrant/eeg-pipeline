@@ -1,7 +1,11 @@
 #!/bin/bash
 # Per-subject processing as a SLURM array: one task per subject.
 #
-#   sbatch --array=0-$(($(wc -l < subjects.txt) - 1))%10 hpc/slurm_array.sbatch
+#   sbatch --array=0-$(($(grep -c '[^[:space:]]' subjects.txt) - 1))%10 hpc/slurm_array.sbatch
+#
+# Size the array by NON-BLANK line count (as above), matching how this script
+# resolves each task. `wc -l` counts newlines, so it would drop the last subject
+# when the file has no trailing newline and would over-count blank lines.
 #
 # Then gather the dataset-level outputs once the array finishes:
 #

@@ -34,6 +34,16 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `hpc/slurm_array.sbatch` selected subjects by physical line number. One blank
   line desynchronized them: tasks landed on empty lines, exited non-zero, and the
   `afterok`-chained gather job never ran. Both now index non-blank lines.
+- Grand averages grouped conditions by raw label while the output path lower-cases
+  them, so "Standard" (sidecar) and "standard" (filename fallback) produced two
+  groups writing to the same path — one silently overwriting the other, each built
+  from part of the cohort. Conditions are now grouped case-insensitively.
+- Aggregation read zero-padded BIDS entity labels back as integers (`run` "01" → 1),
+  making the combined tables disagree with the filenames and the per-subject tables.
+  Entity columns now round-trip as strings.
+- `gpu.filter_n_jobs()` treated an `mne.cuda` module with no `init_cuda` as
+  CUDA-capable, handing MNE an `n_jobs="cuda"` it could not honor. Only a
+  successfully initialized CUDA context now routes to the GPU.
 - GPU acceleration was inert: `configure()` initialized MNE CUDA, but MNE only
   routes filtering through CUDA when `n_jobs="cuda"` and the package never passed
   `n_jobs` at all, so `use_gpu` had no effect on filtering. New
