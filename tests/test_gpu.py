@@ -312,6 +312,9 @@ def test_filter_n_jobs_routes_to_cuda_when_mne_cuda_is_active(monkeypatch):
     # effect on filtering at all.
     monkeypatch.setattr(gpu, "_GPU_ENABLED", True)
     monkeypatch.setattr(gpu, "_MNE_CUDA_STATUS", "initialized")
+    # Genuine capability, not just a clean init_cuda() return -- CI runners have
+    # no GPU, so MNE's real flag is False there.
+    monkeypatch.setattr(gpu, "_mne_cuda_capable", lambda: True)
 
     # Routing to CUDA also discards the CPU worker count: CUDA filtering is
     # single-stream, so n_jobs has no meaning once "cuda" is selected.
