@@ -176,6 +176,49 @@ def format_capability_report(rep: dict) -> str:
     return "[GPU] capability: " + ", ".join(parts)
 
 
+def filter_n_jobs(n_jobs: int = 1):
+    """Return the ``n_jobs`` value to pass to MNE FFT filtering/resampling.
+
+    MNE only routes filtering through CUDA when ``n_jobs="cuda"`` — initializing
+    CUDA via :func:`configure` does nothing on its own. Without this indirection
+    ``use_gpu`` had no effect on filtering at all.
+
+    Falls back to the requested CPU worker count whenever CUDA is unavailable, so
+    callers can pass the result straight through. Note that MNE's CUDA support
+    covers FFT-based filtering and resampling only: ICA fitting and time-frequency
+    decomposition stay on the CPU regardless.
+
+    Note that routing to CUDA discards the requested CPU worker count, since CUDA
+    filtering is single-stream — which is why the capability check below has to be
+    strict. Claiming CUDA when MNE cannot honor it is worse than not asking for it
+    at all: MNE coerces ``n_jobs`` to 1 before falling back to the CPU, so the run
+    loses its workers and ends up slower than a plain CPU run.
+    """
+    if _GPU_ENABLED and _MNE_CUDA_STATUS == "initialized" and _mne_cuda_capable():
+        return "cuda"
+    return n_jobs
+
+
+def _mne_cuda_capable() -> bool:
+    """Whether MNE will actually filter on the GPU.
+
+    A clean return from ``init_cuda()`` is not evidence. MNE's ``init_cuda``
+    no-ops *without raising* when the ``MNE_USE_CUDA`` config key is not "true"
+    (the default) or when cupy is missing, leaving its ``_cuda_capable`` flag
+    False. Treating "did not raise" as capability is how ``--use_gpu`` on an
+    unconfigured machine ends up discarding ``--n_jobs``.
+
+    Reads MNE's own flag, which is the actual source of truth. Any failure to
+    determine it answers False, so the fallback direction is always the safe one.
+    """
+    try:
+        import mne
+
+        return bool(getattr(mne.cuda, "_cuda_capable", False))
+    except Exception:
+        return False
+
+
 def get_xp():
     return _XP
 

@@ -16,6 +16,25 @@ def build_arg_parser():
     ap.add_argument("--get_metrics", action="store_true", help="Compute ERP/TFR metrics from derivative epochs")
     ap.add_argument("--plot_figures", action="store_true", help="Generate figures from aggregated derivative metrics")
     ap.add_argument(
+        "--skip_aggregate",
+        action="store_true",
+        help=(
+            "Process subjects but do not rebuild dataset-level outputs. Required when "
+            "running subjects concurrently (e.g. a SLURM array), where each task must "
+            "write only its own derivatives and a single later --aggregate_only job "
+            "combines them. Without this, concurrent tasks race on the shared tables."
+        ),
+    )
+    ap.add_argument(
+        "--aggregate_only",
+        action="store_true",
+        help=(
+            "Rebuild dataset-level QC/metrics tables and grand averages from existing "
+            "per-subject derivatives, without reprocessing. Use as the gather step after "
+            "running subjects independently (e.g. one SLURM array task per subject)."
+        ),
+    )
+    ap.add_argument(
         "--legacy",
         action="store_true",
         help="Use the original lab layout instead of BIDS input discovery. BIDS is the default.",
@@ -59,6 +78,23 @@ def build_arg_parser():
 
     ap.add_argument("--use_gpu", action="store_true", help="Enable GPU acceleration where available (MNE/CuPy).")
     ap.add_argument("--gpu_device", type=int, default=None, help="Optional GPU device index (default: first visible).")
+    ap.add_argument(
+        "--n_jobs",
+        type=int,
+        # Sentinel, not 1: `provided()` detects an explicit flag by comparing
+        # against the argparse default, so a default of 1 would make an explicit
+        # `--n_jobs 1` indistinguishable from omitting it -- and unable to
+        # override a larger compute.n_jobs in the config. That matters because
+        # hpc/slurm_array.sbatch passes exactly 1 when SLURM_CPUS_PER_TASK is
+        # unset, where silently using the config's value would oversubscribe.
+        default=None,
+        help=(
+            "Worker processes for MNE operations that parallelize across channels "
+            "(filtering, notch, TFR). -1 uses all cores. On a cluster keep this equal "
+            "to --cpus-per-task, and set OMP_NUM_THREADS to match, or threaded BLAS "
+            "will oversubscribe the allocation."
+        ),
+    )
 
     ap.add_argument(
         "--subjects",

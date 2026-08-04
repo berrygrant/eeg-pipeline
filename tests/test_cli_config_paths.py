@@ -4,6 +4,7 @@ import pytest
 
 import eeg_pipeline.cli as cli
 import eeg_pipeline.cli_config as cli_config
+import eeg_pipeline.cli_pipeline as cli_pipeline
 
 
 def _parser_and_args():
@@ -234,3 +235,79 @@ def test_run_full_pipeline_respects_subject_filters(tmp_path: Path):
 
     with pytest.raises(RuntimeError, match="No BIDS EEG recordings found"):
         cli.run_full_pipeline(args, defaults=defaults, cfg={})
+
+
+def _bids_fixture_with_one_recording(tmp_path: Path):
+    parser = cli.build_arg_parser()
+    args = parser.parse_args(["--config", "config.yaml"])
+    defaults = cli.build_defaults(parser)
+    args.bids_root = tmp_path / "bids"
+    args.derivatives_root = tmp_path / "derivatives"
+    eeg_dir = args.bids_root / "sub-01" / "eeg"
+    eeg_dir.mkdir(parents=True)
+    (args.bids_root / "dataset_description.json").write_text(
+        '{"Name":"Fixture","BIDSVersion":"1.11.1"}', encoding="utf-8"
+    )
+    (eeg_dir / "sub-01_task-oddball_run-01_eeg.vhdr").write_text(
+        "MarkerFile=sub.vmrk\nDataFile=sub.eeg\n", encoding="utf-8"
+    )
+    (eeg_dir / "sub-01_task-oddball_run-01_events.tsv").write_text(
+        "onset\tduration\tsample\ttrial_type\tvalue\n0.0\t0.1\t100\tStandard\t1\n",
+        encoding="utf-8",
+    )
+    return args, defaults
+
+
+def test_run_full_pipeline_aggregates_by_default(monkeypatch, tmp_path: Path):
+    args, defaults = _bids_fixture_with_one_recording(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(cli_pipeline, "_process_recording", lambda rec, **kw: None)
+    monkeypatch.setattr(cli_pipeline, "run_aggregation", lambda root, a: calls.append("ran"))
+
+    cli.run_full_pipeline(args, defaults=defaults, cfg={})
+
+    assert calls == ["ran"]
+
+
+def test_run_full_pipeline_skips_aggregation_with_skip_aggregate(monkeypatch, tmp_path: Path, capsys):
+    """--skip_aggregate must suppress the dataset-level rebuild.
+
+    Per-subject outputs go to distinct paths, but the dataset-level tables and
+    grand averages are shared. If every concurrent task aggregated at the end,
+    N array tasks would race on those shared paths and read files other tasks
+    were still writing -- the final state would be whichever finished last.
+    """
+    args, defaults = _bids_fixture_with_one_recording(tmp_path)
+    args.skip_aggregate = True
+    calls: list[str] = []
+    monkeypatch.setattr(cli_pipeline, "_process_recording", lambda rec, **kw: None)
+    monkeypatch.setattr(cli_pipeline, "run_aggregation", lambda root, a: calls.append("ran"))
+
+    cli.run_full_pipeline(args, defaults=defaults, cfg={})
+
+    assert calls == []
+    assert "--aggregate_only" in capsys.readouterr().out
+
+
+def test_explicit_n_jobs_one_overrides_config(monkeypatch):
+    """An explicit `--n_jobs 1` must beat a larger compute.n_jobs in the config.
+
+    hpc/slurm_array.sbatch passes exactly 1 when SLURM_CPUS_PER_TASK is unset, so
+    if the config's larger value silently won there, the task would oversubscribe
+    its allocation.
+    """
+    parser = cli.build_arg_parser()
+    defaults = cli.build_defaults(parser)
+
+    cfg = _rich_config()
+    cfg["compute"] = {"use_gpu": False, "gpu_device": None, "n_jobs": 8}
+    monkeypatch.setattr(cli_config, "load_config", lambda path, overrides=None: cfg)
+
+    args = parser.parse_args(["--config", "config.yaml", "--n_jobs", "1"])
+    cli.apply_config(args, defaults)
+    assert args.n_jobs == 1
+
+    # Omitting the flag still lets the config value through.
+    args = parser.parse_args(["--config", "config.yaml"])
+    cli.apply_config(args, defaults)
+    assert args.n_jobs == 8

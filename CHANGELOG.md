@@ -6,7 +6,73 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **HPC/SLURM mode.** Subjects can now be processed by independent jobs and
+  combined afterwards. `--aggregate_only` rebuilds the dataset-level QC/metrics
+  tables and grand averages from per-subject derivatives on disk; `run_full_pipeline`
+  calls the same code as its tail, so serial and array-parallel runs cannot drift.
+  Aggregation overwrites its outputs, so a gather job is safe to re-run after a
+  partial array. `--skip_aggregate` suppresses the per-run rebuild and is required
+  for concurrent per-subject jobs, which would otherwise each rebuild the shared
+  dataset-level tables and race one another. Ships `hpc/slurm_array.sbatch`, `hpc/slurm_gather.sbatch`, and
+  `hpc/submit.sh`, plus a README "HPC / SLURM" section.
+- `compute.n_jobs` / `--n_jobs` threads MNE's channel-parallel `n_jobs` into
+  filtering, notch, the ICA pre-fit filter, and `compute_tfr`. `ICA.fit` takes no
+  `n_jobs` and remains serial. Invalid values (0, negatives other than -1,
+  non-integers) are rejected at config load.
+- Per-subject QC rows are now written next to a recording's other derivatives,
+  including when the recording raised — previously QC existed only in memory.
+
 ### Fixed
+- `--get_metrics` with subject filters destroyed other subjects' rows in the
+  dataset-level tables. `run_metrics_only` concatenated only the frames that run
+  computed and wrote them to the dataset-level paths, so once filtering existed a
+  per-subject rerun overwrote the combined table with a single subject. It now
+  rebuilds those tables from the per-subject files on disk (the same aggregation
+  `run_full_pipeline` uses) and honors `--skip_aggregate`.
+- `hpc/submit.sh` sized the array by non-blank line count while
+  `hpc/slurm_array.sbatch` selected subjects by physical line number. One blank
+  line desynchronized them: tasks landed on empty lines, exited non-zero, and the
+  `afterok`-chained gather job never ran. Both now index non-blank lines.
+- A recording that failed before any stage recorded an outcome (raw loading,
+  filtering) left no QC row at all, so it vanished from the QC summary — and,
+  because aggregation excludes recordings by QC status, could not be excluded
+  from the dataset tables either. Such failures now write an `ERROR` QC row.
+- Dataset-level outputs from a previous gather survived one that had no inputs to
+  rebuild them from (all subjects excluded, a condition no longer present, or
+  unreadable evokeds), so `--plot_figures` consumed them as current. Aggregation
+  now removes dataset-level outputs it cannot rebuild. Per-subject data is never
+  touched.
+- Aggregation folded stale per-subject files from earlier runs back into the
+  dataset-level outputs. Re-running with a stricter setting (e.g. a tighter
+  `--max_reject_rate`) rewrote a recording's QC row to a skip status but left its
+  previous metrics and evokeds on disk, so the dataset reported a subject excluded
+  while still averaging it into the combined tables and grand averages.
+  Aggregation now treats the QC status as authoritative and excludes recordings
+  the latest run did not process successfully.
+- Grand averages grouped conditions by raw label while the output path lower-cases
+  them, so "Standard" (sidecar) and "standard" (filename fallback) produced two
+  groups writing to the same path — one silently overwriting the other, each built
+  from part of the cohort. Conditions are now grouped case-insensitively.
+- Aggregation read zero-padded BIDS entity labels back as integers (`run` "01" → 1),
+  making the combined tables disagree with the filenames and the per-subject tables.
+  Entity columns now round-trip as strings.
+- `gpu.filter_n_jobs()` treated "init_cuda() did not raise" as CUDA capability.
+  MNE's `init_cuda` no-ops silently when `MNE_USE_CUDA` is not "true" (the
+  default) or cupy is missing, so `--use_gpu` on an unconfigured machine routed
+  filtering to CUDA; MNE then coerced `n_jobs` to 1 before falling back to the
+  CPU, discarding the requested workers and running slower than a plain CPU run.
+  Capability is now read from MNE's own flag, failing safe to the CPU.
+- An explicit `--n_jobs 1` could not override a larger `compute.n_jobs` in the
+  config, because the argparse default was also 1 and provided-flag detection
+  compares against it. This mattered for `hpc/slurm_array.sbatch`, which passes
+  exactly 1 when `SLURM_CPUS_PER_TASK` is unset — the config value would have
+  silently oversubscribed the allocation. The default is now a sentinel.
+- GPU acceleration was inert: `configure()` initialized MNE CUDA, but MNE only
+  routes filtering through CUDA when `n_jobs="cuda"` and the package never passed
+  `n_jobs` at all, so `use_gpu` had no effect on filtering. New
+  `gpu.filter_n_jobs()` routes correctly and falls back to CPU workers otherwise.
+  (Scope is unchanged: MNE CUDA covers FFT filtering/resampling, not ICA or TFR.)
 - `--get_metrics` ignored `--subjects`/`--sessions`/`--tasks`/`--runs`: the metrics
   stage globbed every `*_epo.fif` in the derivatives tree regardless of the
   requested filters. A per-subject invocation therefore recomputed every subject.

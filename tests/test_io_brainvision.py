@@ -34,11 +34,14 @@ class DummyRaw:
     def set_eeg_reference(self, ref_channels="average", projection=False):
         self.reference_calls.append((ref_channels, projection))
 
-    def notch_filter(self, freqs):
-        self.notch_calls.append(list(freqs))
+    def notch_filter(self, freqs, n_jobs=1):
+        # Record n_jobs so tests can assert it is actually forwarded: filtering
+        # is the main within-subject parallelism lever, and silently dropping
+        # n_jobs here would leave many-channel runs single-threaded.
+        self.notch_calls.append((list(freqs), n_jobs))
 
-    def filter(self, l_freq, h_freq):
-        self.filter_calls.append((l_freq, h_freq))
+    def filter(self, l_freq, h_freq, n_jobs=1):
+        self.filter_calls.append((l_freq, h_freq, n_jobs))
         return self
 
 
@@ -76,8 +79,8 @@ def test_read_raw_preprocess_brainvision_loader_renames_drops_and_average_refere
     assert raw.drop_calls == [["AUX"]]
     assert raw.montage_calls == [("standard_1020", "warn")]
     assert raw.reference_calls == [("average", False)]
-    assert raw.notch_calls == [[60.0]]
-    assert raw.filter_calls == [(0.1, 30.0)]
+    assert raw.notch_calls == [([60.0], 1)]
+    assert raw.filter_calls == [(0.1, 30.0, 1)]
     assert "Fp1" in raw.ch_names
     assert "Pz" in raw.ch_names
     assert "AUX" not in raw.ch_names
@@ -103,7 +106,7 @@ def test_read_raw_preprocess_set_loader_supports_mastoid_reference(monkeypatch, 
     assert result is raw
     assert raw.reference_calls == [(["TP9", "TP10"], False)]
     assert raw.notch_calls == []
-    assert raw.filter_calls == [(1.0, 20.0)]
+    assert raw.filter_calls == [(1.0, 20.0, 1)]
 
 
 def test_read_raw_preprocess_rejects_missing_mastoid_channels(monkeypatch, tmp_path: Path):
@@ -198,3 +201,31 @@ def test_parse_vmrk_markers_parses_supported_marker_lines(tmp_path: Path):
         "chan": 0,
     }
     assert df.iloc[2]["desc"] == "Boundary"
+
+
+def test_read_raw_preprocess_forwards_n_jobs_to_filters(monkeypatch, tmp_path: Path):
+    """n_jobs must reach both filter calls.
+
+    Filtering parallelizes across channels and is the main within-subject lever
+    for many-channel data; dropping n_jobs here would silently leave it serial.
+    """
+    raw = DummyRaw(["Fz", "Cz"])
+    monkeypatch.setattr(io_mod.mne.io, "read_raw_brainvision", lambda *a, **k: raw)
+
+    path = tmp_path / "sub-01_task-oddball_eeg.vhdr"
+    path.write_text("dummy", encoding="utf-8")
+
+    io_mod.read_raw_preprocess(
+        raw_path=path,
+        montage="standard_1020",
+        eog_chs=[],
+        aux_chs=[],
+        reref="none",
+        l_freq=0.1,
+        h_freq=30.0,
+        notch=[60.0],
+        n_jobs=8,
+    )
+
+    assert raw.notch_calls == [([60.0], 8)]
+    assert raw.filter_calls == [(0.1, 30.0, 8)]

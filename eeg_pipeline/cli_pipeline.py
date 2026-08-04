@@ -8,6 +8,7 @@ import pandas as pd
 
 from eeg_pipeline import __version__
 
+from .aggregate import run_aggregation
 from .cli_common import (
     PIPELINE_NAME,
     EpochParams,
@@ -38,14 +39,12 @@ from .cli_common import (
     compute_ica_diagnostics,
     compute_tfr_metrics,
     convert_legacy_recordings_to_bids,
-    dataset_derivative_path,
     derivative_sidecar_path,
     detect_trigger_bursts,
     discover_pipeline_recordings,
     events_from_annotations_positions,
     find_ica_excludes,
     fit_ica,
-    grand_averages,
     load_behavioral_events,
     make_epochs,
     moving_window_ptp_mask,
@@ -59,7 +58,6 @@ from .cli_common import (
     step_threshold_mask,
     subject_derivative_path,
     write_json,
-    write_qc_summary,
 )
 from .cli_config import apply_config
 from .cli_metrics import _build_erp_windows
@@ -122,9 +120,6 @@ def _compute_subject_metrics(
     metrics_conditions,
     subj,
     behavior_source,
-    erp_metrics_all,
-    tfr_metrics_all,
-    erp_timeseries_all,
 ):
     if int(getattr(args, "metrics", 0)):
         do_erp = bool(getattr(args, "metrics_erp_enabled", True))
@@ -170,7 +165,6 @@ def _compute_subject_metrics(
                     behavior_source=behavior_source,
                     description="Subject-level ERP metrics computed from derivative epochs.",
                 )
-                erp_metrics_all.append(df_erp)
             except Exception as e:
                 print(f"[WARN] ERP metrics failed for {subj}: {e}")
 
@@ -214,7 +208,6 @@ def _compute_subject_metrics(
                         behavior_source=behavior_source,
                         description="Subject-level ERP time series metrics.",
                     )
-                    erp_timeseries_all.append(df_ts)
                 except Exception as e:
                     print(f"[WARN] ERP timeseries failed for {subj}: {e}")
 
@@ -232,6 +225,7 @@ def _compute_subject_metrics(
                         float(getattr(args, "tfr_baseline", [-0.1, 0.0])[1]),
                     ),
                     mode=str(getattr(args, "tfr_baseline_mode", "logratio")),
+                    n_jobs=int(getattr(args, "n_jobs", 1) or 1),
                 )
                 df_tfr = compute_tfr_metrics(
                     epochs,
@@ -261,32 +255,88 @@ def _compute_subject_metrics(
                     behavior_source=behavior_source,
                     description="Subject-level TFR metrics computed from derivative epochs.",
                 )
-                tfr_metrics_all.append(df_tfr)
             except Exception as e:
                 print(f"[WARN] TFR metrics failed for {subj}: {e}")
 
 
+def _write_subject_qc_rows(dataset_root, recording, rows) -> None:
+    """Persist this recording's QC row(s) beside its other derivatives.
+
+    QC rows are the only aggregation input with no on-disk per-subject copy —
+    everything else (metrics tables, evokeds) is already written per subject.
+    Without this file a gather step could not rebuild the QC summary, so
+    independent per-subject jobs could not be combined afterwards.
+
+    A QC write failure must not fail an otherwise-successful recording, so this
+    warns rather than raising; the gather step reports how many QC files it found
+    so a missing subject stays visible.
+    """
+    try:
+        qc_path = subject_derivative_path(
+            dataset_root,
+            recording.entities,
+            suffix="qc",
+            extension=".tsv",
+            desc="summary",
+        )
+        pd.DataFrame(list(rows)).to_csv(qc_path, sep="\t", index=False)
+        write_json(
+            derivative_sidecar_path(qc_path),
+            {
+                "Description": "Subject-level QC row(s) for eeg-pipeline derivatives.",
+                "GeneratedBy": [{"Name": PIPELINE_NAME, "Version": __version__}],
+            },
+        )
+    except Exception as e:
+        print(f"[WARN] Could not write per-subject QC for {getattr(recording, 'subject_label', '?')}: {e}")
+
+
 def _process_recording(recording, **kwargs):
-    """Process one recording and stamp per-stage wall-clock onto its QC row(s).
+    """Process one recording, then stamp timings and persist its QC row(s).
 
     Thin wrapper around :func:`_process_recording_stages`. The stage work appends
     one QC row per outcome (success or an early skip), and every one of those rows
     gets the timings merged in here — so timing lives in a single place instead of
     being threaded through each append site.
 
-    The merge runs in a ``finally`` so a recording that raises still reports the
-    time it burned before failing, which is exactly the case worth profiling.
+    Both steps run in a ``finally`` so a recording that raises still reports the
+    time it burned and still leaves a QC row on disk, which is exactly the case
+    worth inspecting after a failed array task.
     """
     rows = kwargs["rows"]
+    dataset_root = kwargs.get("dataset_root")
     timings = StageTimings()
     start_index = len(rows)
     try:
         _process_recording_stages(recording, timings=timings, **kwargs)
+    except Exception as exc:
+        # A failure before any stage appended its own row (raw loading, filtering)
+        # would otherwise leave nothing to write, so the recording would vanish
+        # from QC entirely. That is the worst case to be silent about: aggregation
+        # decides what to exclude from the dataset tables by reading QC status, so
+        # a recording with no row cannot be excluded — and if a previous run left
+        # metrics behind, they would be folded back in as though it had succeeded.
+        if len(rows) == start_index:
+            rows.append(
+                {
+                    "subject": f"sub-{recording.entities.get('sub', '')}",
+                    "session": recording.session_label or "",
+                    "task": recording.task_id or "",
+                    "run": recording.run_id or "",
+                    "raw_file": recording.relative_raw_path,
+                    "status": "ERROR",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+        raise
     finally:
         columns = timings.as_qc_columns()
+        new_rows = rows[start_index:]
         if columns:
-            for row in rows[start_index:]:
+            for row in new_rows:
                 row.update(columns)
+        if dataset_root is not None and new_rows:
+            _write_subject_qc_rows(dataset_root, recording, new_rows)
 
 
 def _process_recording_stages(
@@ -304,10 +354,6 @@ def _process_recording_stages(
     condition_map,
     metrics_conditions,
     rows,
-    evokeds_by_group,
-    erp_metrics_all,
-    tfr_metrics_all,
-    erp_timeseries_all,
 ):
     raw_path = recording.raw_path
     subj = recording.subject_label
@@ -406,6 +452,7 @@ def _process_recording_stages(
             l_freq=args.l_freq,
             h_freq=args.h_freq,
             notch=args.notch,
+            n_jobs=int(getattr(args, "n_jobs", 1) or 1),
         )
 
     with timings.stage("ica"):
@@ -448,6 +495,7 @@ def _process_recording_stages(
             corr_thresh=args.ica_corr_thresh,
             max_exclude=args.ica_max_exclude,
             decim=args.ica_decim,
+            n_jobs=int(getattr(args, "n_jobs", 1) or 1),
         )
 
         with timings.stage("ica"):
@@ -937,9 +985,6 @@ def _process_recording_stages(
             metrics_conditions=metrics_conditions,
             subj=subj,
             behavior_source=behavior_source,
-            erp_metrics_all=erp_metrics_all,
-            tfr_metrics_all=tfr_metrics_all,
-            erp_timeseries_all=erp_timeseries_all,
         )
 
     ica_recommendation = recommend_ica(
@@ -999,8 +1044,6 @@ def _process_recording_stages(
                 "Nave": getattr(ev, "nave", None),
             },
         )
-        group_key = (recording.session_id, recording.task_id)
-        evokeds_by_group.setdefault(group_key, {}).setdefault(cond, []).append(ev)
 
     rows.append(
         {
@@ -1092,12 +1135,6 @@ def run_full_pipeline(args, defaults=None, cfg=None):
     token_map = parse_token_map(args.token_map)
 
     rows: list[dict] = []
-    evokeds_by_group: dict[tuple[str | None, str | None], dict[str, list[mne.Evoked]]] = {}
-
-    # Metrics outputs collected across subjects
-    erp_metrics_all: list[pd.DataFrame] = []
-    tfr_metrics_all: list[pd.DataFrame] = []
-    erp_timeseries_all: list[pd.DataFrame] = []
 
     input_mode = _input_mode(args, cfg)
     task_label = _legacy_task_label(args, cfg)
@@ -1151,87 +1188,20 @@ def run_full_pipeline(args, defaults=None, cfg=None):
             condition_map=condition_map,
             metrics_conditions=metrics_conditions,
             rows=rows,
-            evokeds_by_group=evokeds_by_group,
-            erp_metrics_all=erp_metrics_all,
-            tfr_metrics_all=tfr_metrics_all,
-            erp_timeseries_all=erp_timeseries_all,
         )
 
-    qc_path = dataset_derivative_path(
-        dataset_root,
-        suffix="qc",
-        extension=".tsv",
-        desc="summary",
-    )
-    write_qc_summary(rows, qc_path)
-    write_json(
-        derivative_sidecar_path(qc_path),
-        {
-            "Description": "Dataset-level QC summary for eeg-pipeline derivatives.",
-            "GeneratedBy": [{"Name": PIPELINE_NAME, "Version": __version__}],
-        },
-    )
+    # Aggregate from the per-subject files just written rather than from the
+    # in-memory accumulators. This is the same code path --aggregate_only runs
+    # after a SLURM array, so the serial and array-parallel modes cannot drift.
+    #
+    # Concurrent per-subject jobs MUST pass --skip_aggregate: the dataset-level
+    # outputs are shared paths, so N tasks aggregating at once would race each
+    # other and read files other tasks are still writing. A single later
+    # --aggregate_only job combines them instead.
+    if getattr(args, "skip_aggregate", False):
+        print("\n[SKIP] Dataset-level aggregation skipped (--skip_aggregate). Run --aggregate_only to combine.")
+    else:
+        run_aggregation(dataset_root, args)
 
-    if erp_metrics_all:
-        _save_dataframe_with_sidecar(
-            pd.concat(erp_metrics_all, ignore_index=True),
-            dataset_derivative_path(dataset_root, suffix="metrics", extension=".tsv", desc="erp"),
-            args,
-            None,
-            behavior_source=None,
-            description="Dataset-level ERP metrics aggregated across processed subjects.",
-        )
-    if erp_timeseries_all:
-        _save_dataframe_with_sidecar(
-            pd.concat(erp_timeseries_all, ignore_index=True),
-            dataset_derivative_path(dataset_root, suffix="timeseries", extension=".parquet", desc="erp"),
-            args,
-            None,
-            behavior_source=None,
-            description="Dataset-level ERP time series aggregated across processed subjects.",
-        )
-    if tfr_metrics_all:
-        _save_dataframe_with_sidecar(
-            pd.concat(tfr_metrics_all, ignore_index=True),
-            dataset_derivative_path(dataset_root, suffix="metrics", extension=".tsv", desc="tfr"),
-            args,
-            None,
-            behavior_source=None,
-            description="Dataset-level TFR metrics aggregated across processed subjects.",
-        )
-
-    if not any(evokeds_by_group.values()):
-        print("\n[WARN] No successful subjects to grand-average. Writing QC summary only.")
-        print(f"Saved QC summary -> {qc_path}")
-        return
-
-    for (ses, task), evoked_map in evokeds_by_group.items():
-        ga_by_cond = grand_averages(evoked_map)
-        group_entities = {}
-        if ses:
-            group_entities["ses"] = ses
-        if task:
-            group_entities["task"] = task
-        for cond, ga in ga_by_cond.items():
-            ga_path = dataset_derivative_path(
-                dataset_root,
-                entities=group_entities,
-                suffix="ave",
-                extension=".fif",
-                desc=f"grandaverage-{cond.lower()}",
-            )
-            ga.save(ga_path, overwrite=True)
-            write_json(
-                derivative_sidecar_path(ga_path),
-                {
-                    "Description": f"Grand-average evoked response for {cond}.",
-                    "GeneratedBy": [{"Name": PIPELINE_NAME, "Version": __version__}],
-                    "Session": ses,
-                    "Task": task,
-                    "Condition": cond,
-                },
-            )
-
-    print(f"\nSaved QC summary -> {qc_path}")
-    print(f"Saved derivatives -> {dataset_root}")
+    print(f"\nSaved derivatives -> {dataset_root}")
 

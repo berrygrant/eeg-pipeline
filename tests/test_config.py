@@ -399,3 +399,27 @@ def test_validate_config_accepts_alias_keys_and_condition_map_names():
 
     # Must not raise: every key above is part of the known schema.
     _validate_config(cfg)
+
+
+def test_validate_config_accepts_valid_n_jobs_values():
+    for value in (1, 4, -1):
+        cfg = _valid_min_cfg()
+        cfg["compute"] = {"n_jobs": value}
+        _validate_config(_apply_defaults(cfg))
+
+
+def test_validate_config_rejects_meaningless_n_jobs_values():
+    # -1 means "all cores" to MNE; 0 and other negatives have no meaning and
+    # would otherwise reach MNE and fail far from the config that caused it.
+    for value in (0, -2):
+        cfg = _valid_min_cfg()
+        cfg["compute"] = {"n_jobs": value}
+        with pytest.raises(ValueError, match="compute.n_jobs must be -1"):
+            _validate_config(_apply_defaults(cfg))
+
+
+def test_validate_config_rejects_non_integer_n_jobs():
+    cfg = _valid_min_cfg()
+    cfg["compute"] = {"n_jobs": "many"}
+    with pytest.raises(ValueError, match="compute.n_jobs must be an integer"):
+        _validate_config(_apply_defaults(cfg))

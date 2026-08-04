@@ -209,3 +209,68 @@ def test_run_metrics_only_reports_when_filters_exclude_everything(monkeypatch, t
     # otherwise a typo'd array-task subject id looks like a missing pipeline run.
     with pytest.raises(RuntimeError, match="matched the requested"):
         cli.run_metrics_only(args)
+
+
+def test_run_metrics_only_filtered_run_preserves_other_subjects(monkeypatch, tmp_path: Path):
+    """A per-subject metrics rerun must not shrink the dataset-level tables.
+
+    Regression: run_metrics_only used to concatenate only the frames THIS run
+    computed and write them to the dataset-level paths. Once subject filtering
+    was added, `--get_metrics --subjects sub-002` therefore overwrote the
+    combined table with a single subject, silently destroying every other
+    subject's rows. Aggregation now reads the per-subject files from disk, so
+    the combined table stays complete regardless of which subjects were run.
+    """
+    bids_root, derivatives_root, dataset_root = _make_metrics_fixture(tmp_path, ("sub-001", "sub-002"))
+
+    # Pre-existing per-subject ERP metrics for BOTH subjects, as a prior full run
+    # would have left behind.
+    for sub in ("sub-001", "sub-002"):
+        pd.DataFrame([{"subject": sub, "value": 1.0}]).to_csv(
+            dataset_root / sub / "eeg" / f"{sub}_task-oddball_desc-erp_metrics.tsv",
+            sep="\t",
+            index=False,
+        )
+
+    args = _base_metrics_args(bids_root, derivatives_root)
+    args.metrics_channels = None
+    args.condition_map = {"Oddball": 1}
+    args.metrics_tfr_enabled = False
+    args.subjects = ["sub-002"]
+
+    seen: list[str] = []
+    _patch_metrics_compute(monkeypatch, seen)
+    monkeypatch.setattr(
+        cli_metrics,
+        "compute_erp_metrics",
+        lambda *a, **kw: pd.DataFrame([{"subject": kw["subject"], "value": 2.0}]),
+    )
+
+    cli.run_metrics_only(args)
+
+    # Only sub-002 was recomputed...
+    assert seen == ["sub-002_task-oddball_epo.fif"]
+    # ...but the dataset-level table still contains both subjects.
+    combined = pd.read_csv(dataset_root / "eeg" / "desc-erp_metrics.tsv", sep="\t")
+    assert sorted(combined["subject"]) == ["sub-001", "sub-002"]
+
+
+def test_run_metrics_only_honors_skip_aggregate(monkeypatch, tmp_path: Path, capsys):
+    """--skip_aggregate must suppress dataset-level writes on the metrics path too.
+
+    Concurrent metrics-only array tasks would otherwise each rebuild the shared
+    combined tables and race one another.
+    """
+    bids_root, derivatives_root, dataset_root = _make_metrics_fixture(tmp_path, ("sub-001",))
+    args = _base_metrics_args(bids_root, derivatives_root)
+    args.metrics_channels = None
+    args.condition_map = {"Oddball": 1}
+    args.skip_aggregate = True
+
+    seen: list[str] = []
+    _patch_metrics_compute(monkeypatch, seen)
+
+    cli.run_metrics_only(args)
+
+    assert not (dataset_root / "eeg" / "desc-erp_metrics.tsv").exists()
+    assert "--aggregate_only" in capsys.readouterr().out

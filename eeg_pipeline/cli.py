@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from . import aggregate as _aggregate
 from . import cli_config as _config
 from . import cli_figures as _figures
 from . import cli_metrics as _metrics
@@ -36,6 +37,10 @@ def run_legacy_to_bids_conversion(args, defaults=None, cfg=None):
 
 def run_full_pipeline(args, defaults=None, cfg=None):
     return _pipeline.run_full_pipeline(args, defaults=defaults, cfg=cfg)
+
+
+def run_aggregate_only(args):
+    return _aggregate.run_aggregate_only(args)
 
 
 def run_metrics_only(args):
@@ -74,7 +79,9 @@ def main(argv=None):
     ap = build_arg_parser()
     defaults = build_defaults(ap)
     args = ap.parse_args(argv)
-    stages_requested = bool(args.process_data or args.get_metrics or args.plot_figures)
+    stages_requested = bool(
+        args.process_data or args.get_metrics or args.plot_figures or args.aggregate_only
+    )
 
     if args.summarize_one_file:
         apply_erp_core_preset(args, defaults)
@@ -143,7 +150,12 @@ def main(argv=None):
         run_legacy_to_bids_conversion(args, defaults=defaults, cfg=cfg)
         return
 
-    if args.process_data:
+    if args.aggregate_only:
+        # Gather-only: rebuild dataset-level outputs from per-subject derivatives
+        # that independent jobs already wrote. Never reprocesses recordings, so it
+        # takes precedence over the processing stages rather than combining.
+        run_aggregate_only(args)
+    elif args.process_data:
         args.metrics = 1 if args.get_metrics else 0
         run_full_pipeline(args, defaults=defaults, cfg=cfg)
     elif args.get_metrics:

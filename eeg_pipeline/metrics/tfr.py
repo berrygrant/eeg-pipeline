@@ -19,6 +19,7 @@ class TFRParams:
     decim: int = 1
     baseline: tuple[float, float] | None = (-0.1, 0.0)
     mode: str = "logratio"  # apply_baseline mode
+    n_jobs: int = 1  # MNE parallelism across channels for compute_tfr
 
 
 def _safe_pick_channels(inst, channels: Sequence[str]) -> list[str]:
@@ -32,6 +33,8 @@ def _compute_tfr_epochs(epochs: mne.Epochs, freqs: np.ndarray, params: TFRParams
     n_cycles = freqs / float(params.n_cycles_div)
 
     # Epochs.compute_tfr supports return_itc and average
+    # compute_tfr parallelizes across channels, so this is the dominant
+    # within-subject lever when channel and frequency counts are high.
     power, itc = epochs.compute_tfr(
         method=params.method,
         freqs=freqs,
@@ -40,6 +43,7 @@ def _compute_tfr_epochs(epochs: mne.Epochs, freqs: np.ndarray, params: TFRParams
         return_itc=True,
         decim=params.decim,
         average=True,
+        n_jobs=params.n_jobs,
     )
     return power, itc
 
@@ -58,6 +62,7 @@ def _compute_tfr_evoked(evoked: mne.Evoked, freqs: np.ndarray, params: TFRParams
         n_cycles=n_cycles,
         use_fft=True,
         decim=params.decim,
+        n_jobs=params.n_jobs,
     )
     return tfr
 

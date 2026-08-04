@@ -350,6 +350,75 @@ python -m eeg_pipeline.cli \
   --get_metrics
 ```
 
+## HPC / SLURM (parallel processing)
+
+Subjects are processed independently, so the largest speedup comes from running
+them concurrently rather than from more cores per subject. Each recording writes
+self-contained per-subject derivatives, and a separate **gather** step rebuilds
+the dataset-level tables and grand averages from those files.
+
+```bash
+ls -d /data/bids_eeg/sub-* | xargs -n1 basename > subjects.txt
+./hpc/submit.sh config.yaml subjects.txt 10
+```
+
+That submits one array task per subject plus a dependent gather job. Equivalently,
+by hand:
+
+```bash
+# 1. per subject (one array task each) -- --skip_aggregate is REQUIRED when these
+#    run concurrently, so tasks write only their own derivatives
+python -m eeg_pipeline.cli --config config.yaml \
+  --process_data --get_metrics --subjects sub-01 --skip_aggregate --n_jobs 4
+
+# 2. once all subjects finish, gather dataset-level outputs
+python -m eeg_pipeline.cli --config config.yaml --aggregate_only
+```
+
+> **`--skip_aggregate` is not optional for concurrent runs.** The dataset-level
+> tables and grand averages are shared paths. Without it every task rebuilds them
+> at the end, so N tasks race each other and read files other tasks are still
+> writing — the final state would be whichever task happened to finish last. A
+> single serial run (no `--subjects` fan-out) should omit the flag and aggregate
+> normally.
+
+`--aggregate_only` reads only what is already on disk, never reprocesses, and
+overwrites its outputs — so it is safe to re-run after a partial array. It reports
+how many per-subject files it found; compare that against your expected subject
+count to catch tasks that failed.
+
+### Two axes of parallelism
+
+| Axis | Mechanism | Speedup |
+| --- | --- | --- |
+| **Across participants** | SLURM array, one task per subject | Near-linear — bounded by concurrent slots |
+| **Within subject** (many channels) | `--n_jobs` / `compute.n_jobs` | Sublinear — see below |
+
+`--n_jobs` parallelizes the MNE operations that split across channels: filtering,
+notch, and `compute_tfr`. It does **not** speed up `ICA.fit`, which takes no
+`n_jobs` and is effectively serial for fastica/infomax/picard. When ICA dominates
+per-subject time, `n_jobs` yields well under linear returns while array
+parallelism stays near-linear — so on a fixed core budget, prefer **more array
+tasks over more cores per task**.
+
+The QC summary records per-stage wall clock (`t_preprocess_s`, `t_ica_s`,
+`t_epoching_s`, `t_metrics_s`, `t_io_s`), so one real run tells you your actual
+ICA-vs-TFR split and therefore whether raising `--n_jobs` is worth it.
+
+### Two ways to lose the speedup
+
+- **BLAS oversubscription.** NumPy/MNE spawn threaded BLAS by default. Many
+  concurrent tasks each spawning one thread per core will thrash and can run
+  *slower* than serial. Set `OMP_NUM_THREADS` / `MKL_NUM_THREADS` /
+  `OPENBLAS_NUM_THREADS` to `$SLURM_CPUS_PER_TASK` — the shipped templates do this.
+- **Memory, not cores, is usually the binding constraint.** Each task holds its
+  raw and epochs in RAM, so concurrency is typically capped by `--mem` before
+  cores run out. Throttle with `%N` on `--array` if tasks are being OOM-killed.
+
+GPU (`compute.use_gpu`) accelerates FFT-based filtering and resampling only —
+MNE's CUDA support does not cover ICA or time-frequency decomposition, so a
+`--gres=gpu:1` request buys comparatively little here.
+
 ## Visualization (paper_figures)
 
 ```bash

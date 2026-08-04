@@ -68,6 +68,7 @@ def _build_config_overrides(args, defaults: dict | None) -> dict:
         "token_map": ("labels", "token_map"),
         "use_gpu": ("compute", "use_gpu"),
         "gpu_device": ("compute", "gpu_device"),
+        "n_jobs": ("compute", "n_jobs"),
         "convert_to_bids": ("conversion", "enabled"),
         "conversion_bids_root": ("conversion", "bids_output_root"),
         "conversion_overwrite": ("conversion", "overwrite"),
@@ -349,6 +350,7 @@ def apply_config(args, defaults=None):
     compute_cfg = cfg.get("compute", {})
     set_if_default(args, defaults, "use_gpu", bool(compute_cfg.get("use_gpu", args.use_gpu)))
     set_if_default(args, defaults, "gpu_device", compute_cfg.get("gpu_device", args.gpu_device))
+    set_if_default(args, defaults, "n_jobs", compute_cfg.get("n_jobs", args.n_jobs))
 
     # Token map
     if args.token_map is None:

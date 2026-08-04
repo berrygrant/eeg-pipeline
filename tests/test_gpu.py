@@ -295,3 +295,79 @@ def test_capability_report_covers_non_byte_device_name_and_partial_properties(mo
     assert rep["device_name"] == "Mock GPU"
     assert "compute_capability" not in rep
     assert "total_mem_gb" not in rep
+
+
+def test_filter_n_jobs_passes_through_cpu_workers_when_gpu_disabled():
+    gpu.configure(False)
+
+    # No GPU: the requested CPU worker count must reach MNE unchanged.
+    assert gpu.filter_n_jobs(1) == 1
+    assert gpu.filter_n_jobs(8) == 8
+    assert gpu.filter_n_jobs(-1) == -1
+
+
+def test_filter_n_jobs_routes_to_cuda_when_mne_cuda_is_active(monkeypatch):
+    # MNE only uses CUDA for FFT filtering when n_jobs == "cuda"; initializing
+    # CUDA is not enough on its own. Without this routing --use_gpu had no
+    # effect on filtering at all.
+    monkeypatch.setattr(gpu, "_GPU_ENABLED", True)
+    monkeypatch.setattr(gpu, "_MNE_CUDA_STATUS", "initialized")
+    # Genuine capability, not just a clean init_cuda() return -- CI runners have
+    # no GPU, so MNE's real flag is False there.
+    monkeypatch.setattr(gpu, "_mne_cuda_capable", lambda: True)
+
+    # Routing to CUDA also discards the CPU worker count: CUDA filtering is
+    # single-stream, so n_jobs has no meaning once "cuda" is selected.
+    assert gpu.filter_n_jobs(8) == "cuda"
+    assert gpu.filter_n_jobs(1) == "cuda"
+
+
+def test_filter_n_jobs_stays_on_cpu_when_cuda_init_failed(monkeypatch):
+    # A cupy-only backend (or a failed init_cuda) must not claim CUDA filtering.
+    monkeypatch.setattr(gpu, "_GPU_ENABLED", True)
+    monkeypatch.setattr(gpu, "_MNE_CUDA_STATUS", "error: no device")
+
+    assert gpu.filter_n_jobs(4) == 4
+
+
+def test_filter_n_jobs_requires_initialized_cuda_not_merely_available(monkeypatch):
+    """"available" means the mne.cuda module exists, not that CUDA initialized.
+
+    Claiming CUDA there would hand MNE an n_jobs="cuda" it cannot honor.
+    """
+    monkeypatch.setattr(gpu, "_GPU_ENABLED", True)
+    monkeypatch.setattr(gpu, "_MNE_CUDA_STATUS", "available")
+
+    assert gpu.filter_n_jobs(4) == 4
+
+
+def test_filter_n_jobs_requires_mne_to_report_actual_cuda_capability(monkeypatch):
+    """"initialized" only means init_cuda() did not raise.
+
+    MNE's init_cuda no-ops WITHOUT raising when the MNE_USE_CUDA config key is
+    not "true" (the default) or cupy is missing, leaving _cuda_capable False.
+    Passing n_jobs="cuda" in that state makes MNE coerce n_jobs to 1 before
+    falling back to the CPU -- so the run loses its workers and ends up slower
+    than never asking for the GPU.
+    """
+    monkeypatch.setattr(gpu, "_GPU_ENABLED", True)
+    monkeypatch.setattr(gpu, "_MNE_CUDA_STATUS", "initialized")
+
+    monkeypatch.setattr(gpu, "_mne_cuda_capable", lambda: False)
+    assert gpu.filter_n_jobs(16) == 16
+
+    monkeypatch.setattr(gpu, "_mne_cuda_capable", lambda: True)
+    assert gpu.filter_n_jobs(16) == "cuda"
+
+
+def test_mne_cuda_capable_reads_mne_flag_and_fails_safe(monkeypatch):
+    fake_mne = SimpleNamespace(cuda=SimpleNamespace(_cuda_capable=True))
+    monkeypatch.setitem(sys.modules, "mne", fake_mne)
+    assert gpu._mne_cuda_capable() is True
+
+    fake_mne.cuda._cuda_capable = False
+    assert gpu._mne_cuda_capable() is False
+
+    # A future MNE that drops the flag must degrade to CPU, not claim CUDA.
+    monkeypatch.setitem(sys.modules, "mne", SimpleNamespace(cuda=SimpleNamespace()))
+    assert gpu._mne_cuda_capable() is False
