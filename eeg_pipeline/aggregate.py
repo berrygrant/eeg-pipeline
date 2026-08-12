@@ -76,10 +76,10 @@ def _desc_from_stem(stem: str) -> str | None:
 #: written. Without this pandas infers a zero-padded run like "01" as the integer
 #: 1, so the combined tables would disagree with the filenames and with the
 #: per-subject tables they were built from.
-ENTITY_COLUMNS = ("subject", "session", "task", "run")
+ENTITY_COLUMNS = ("subject", "session", "task", "acq", "run", "recording")
 
 
-def _recording_key(entities: Mapping[str, str]) -> tuple[str, str, str, str]:
+def _recording_key(entities: Mapping[str, str]) -> tuple[str, str, str, str, str, str]:
     """Normalize BIDS entities to a comparable per-recording key.
 
     QC rows carry prefixed labels (``sub-01``, ``ses-02``) while filenames carry
@@ -96,11 +96,13 @@ def _recording_key(entities: Mapping[str, str]) -> tuple[str, str, str, str]:
         _bare(entities.get("sub"), "sub"),
         _bare(entities.get("ses"), "ses"),
         _bare(entities.get("task"), "task"),
+        _bare(entities.get("acq"), "acq"),
         _bare(entities.get("run"), "run"),
+        _bare(entities.get("recording"), "recording"),
     )
 
 
-def _excluded_recording_keys(dataset_root: Path) -> set[tuple[str, str, str, str]]:
+def _excluded_recording_keys(dataset_root: Path) -> set[tuple[str, str, str, str, str, str]]:
     """Recordings whose most recent QC row reports something other than success.
 
     Aggregation rebuilds dataset-level outputs from whatever per-subject files are
@@ -114,7 +116,7 @@ def _excluded_recording_keys(dataset_root: Path) -> set[tuple[str, str, str, str
     QC rows are rewritten on every run, including skips, so they are the
     authoritative record of what the latest run decided about each recording.
     """
-    excluded: set[tuple[str, str, str, str]] = set()
+    excluded: set[tuple[str, str, str, str, str, str]] = set()
     for path in _subject_scoped_files(dataset_root, QC_PATTERN):
         df = _read_table(path)
         if df is None or df.empty or "status" not in df.columns:
@@ -129,14 +131,21 @@ def _excluded_recording_keys(dataset_root: Path) -> set[tuple[str, str, str, str
                         "sub": row.get("subject"),
                         "ses": row.get("session"),
                         "task": row.get("task"),
+                        # Absent from QC files written before these columns
+                        # existed; .get gives "" there, which matches a filename
+                        # carrying no acq/recording. A dataset that does use them
+                        # simply fails to match, i.e. fails OPEN rather than
+                        # excluding a recording on a partial key.
+                        "acq": row.get("acq"),
                         "run": row.get("run"),
+                        "recording": row.get("recording"),
                     }
                 )
             )
     return excluded
 
 
-def _is_excluded(path: Path, excluded: set[tuple[str, str, str, str]] | None) -> bool:
+def _is_excluded(path: Path, excluded: set[tuple[str, str, str, str, str, str]] | None) -> bool:
     """Whether ``path`` belongs to a recording the latest run skipped.
 
     A filename that cannot be parsed is never excluded: without a key there is no
@@ -167,7 +176,7 @@ def _read_table(path: Path) -> pd.DataFrame | None:
 def _concat_subject_tables(
     dataset_root: Path,
     pattern: str,
-    excluded: set[tuple[str, str, str, str]] | None = None,
+    excluded: set[tuple[str, str, str, str, str, str]] | None = None,
 ) -> tuple[pd.DataFrame | None, int]:
     """Concatenate every per-subject table matching ``pattern``.
 
@@ -264,7 +273,7 @@ def _remove_dataset_output(path: Path) -> None:
 def aggregate_metric_tables(
     dataset_root: Path,
     args,
-    excluded: set[tuple[str, str, str, str]] | None = None,
+    excluded: set[tuple[str, str, str, str, str, str]] | None = None,
 ) -> dict[str, int]:
     """Rebuild the combined ERP/TFR/time-series tables from per-subject files."""
     specs = (
@@ -311,7 +320,7 @@ def aggregate_metric_tables(
 
 def aggregate_grand_averages(
     dataset_root: Path,
-    excluded: set[tuple[str, str, str, str]] | None = None,
+    excluded: set[tuple[str, str, str, str, str, str]] | None = None,
 ) -> int:
     """Rebuild grand averages from per-subject evoked files.
 

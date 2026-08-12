@@ -147,6 +147,18 @@ def _compute_subject_metrics(
                     compute_mmn=bool(getattr(args, "compute_mmn", 1)),
                     mmn_name=diff_label if diff_label else "DEV_MINUS_STD",
                 )
+                if df_erp is None or df_erp.empty:
+                    # Otherwise this writes a header-only TSV: the file exists,
+                    # passes every presence check, and is then dropped by the
+                    # aggregator's df.empty test with nothing logged anywhere. The
+                    # subject silently leaves the metrics table while its QC row
+                    # still reads OK, which is exactly the coverage gap that
+                    # cannot be attributed afterwards.
+                    print(
+                        f"[WARN] ERP metrics produced no rows for {subj} "
+                        f"(conditions={conds}, channels={channels}); "
+                        "subject will be absent from the ERP metrics table."
+                    )
                 df_erp["subject"] = subj
                 df_erp["task"] = recording.task_id or ""
                 df_erp["session"] = recording.session_label or ""
@@ -363,6 +375,14 @@ def _process_recording_stages(
         "subject": subj,
         "session": recording.session_label or "",
         "task": recording.task_id or "",
+        # acq and recording are part of the derivative filename (see
+        # bids.ENTITY_ORDER), so they have to be in the QC row too. Aggregation
+        # matches QC rows against filenames to decide what to exclude, and
+        # without these two, sibling recordings differing only by acq collapse
+        # to one key -- letting an excluded sibling drop a good recording's
+        # metrics while its own QC row still reads OK.
+        "acq": (recording.entities.get("acq") or ""),
+        "recording": (recording.entities.get("recording") or ""),
         "run": recording.run_id or "",
         "raw_file": recording.relative_raw_path,
     }

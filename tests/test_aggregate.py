@@ -410,3 +410,31 @@ def test_dataset_scoped_files_never_reaches_subject_data(tmp_path: Path):
     (dataset_root / "sub-01" / "eeg" / "sub-01_task-oddball_desc-standard_ave.fif").write_text("s", encoding="utf-8")
 
     assert aggregate._dataset_scoped_files(dataset_root, "*_ave.fif") == [ds]
+
+
+def test_recording_key_distinguishes_siblings_differing_only_by_acq():
+    """acq and recording are in the filename, so they must be in the key.
+
+    Derivative filenames carry all six BIDS entities (bids.ENTITY_ORDER). A key
+    built from only four collapses two sibling recordings that differ solely by
+    acq into one entry -- so excluding the bad sibling silently dropped the good
+    one's metrics while its own QC row still read OK.
+    """
+    pre = aggregate._recording_key({"sub": "01", "task": "oddball", "acq": "pre", "run": "01"})
+    post = aggregate._recording_key({"sub": "01", "task": "oddball", "acq": "post", "run": "01"})
+    assert pre != post
+
+    excluded = {pre}
+    assert aggregate._is_excluded(Path("sub-01_task-oddball_acq-pre_run-01_desc-erp_metrics.tsv"), excluded)
+    assert not aggregate._is_excluded(Path("sub-01_task-oddball_acq-post_run-01_desc-erp_metrics.tsv"), excluded)
+
+
+def test_recording_key_matches_when_acq_absent_on_both_sides():
+    """QC files written before the acq/recording columns existed must still match."""
+    from_qc = aggregate._recording_key(
+        {"sub": "sub-01", "ses": "", "task": "oddball", "acq": None, "run": "01", "recording": None}
+    )
+    from_name = aggregate._recording_key(
+        aggregate.parse_bids_entities_like_name("sub-01_task-oddball_run-01_desc-erp_metrics")
+    )
+    assert from_qc == from_name

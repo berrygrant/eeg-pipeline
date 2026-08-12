@@ -7,6 +7,19 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- Aggregation keyed recordings on only four of the six BIDS entities that appear
+  in derivative filenames, omitting `acq` and `recording`. Two sibling recordings
+  differing solely by `acq` therefore shared one key, so excluding the bad sibling
+  silently dropped the good one's metrics while its QC row still read OK. QC rows
+  now carry `acq`/`recording`, and the key uses all six. QC files written before
+  those columns existed still match, and a dataset that uses `acq` fails open
+  rather than excluding on a partial key.
+- `compute_erp_metrics` returning zero rows wrote a header-only TSV, which passed
+  every presence check and was then discarded by the aggregator's empty-frame
+  test with nothing logged. The subject vanished from the metrics table while its
+  QC row read OK. This case is now reported. (Its sibling
+  `compute_erp_timeseries` already emitted an `EMPTY_EPOCHS` sentinel row for the
+  same situation.)
 - Config values that collide with YAML 1.1 booleans were mishandled in two
   opposite directions, and the two compounded into a trap.
   - `ica.mode: on` and `ica.mode: off` — two of the three documented modes — were
