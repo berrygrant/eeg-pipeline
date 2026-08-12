@@ -409,9 +409,62 @@ def _validate_config(cfg: dict[str, Any]) -> None:
 # ----------------------------
 # Normalization (types + conveniences)
 # ----------------------------
+def _word_for_yaml_bool(value: Any, *, true_word: str | None, false_word: str | None) -> Any:
+    """Recover the word the user typed when YAML resolved it to a boolean.
+
+    PyYAML implements YAML 1.1, which resolves bare ``on``/``off``/``yes``/``no``
+    to booleans. So a config written exactly as the docs describe —
+    ``ica: {mode: on}`` — arrives here as ``True``, stringifies to "true", and is
+    rejected by a message that lists the very value the user wrote. Quoting was
+    the only way through, and nothing in the error said so.
+
+    Only substitutes where the option has a real word for that boolean; anything
+    else is left alone to be rejected on its merits.
+    """
+    if isinstance(value, bool):
+        word = true_word if value else false_word
+        if word is not None:
+            return word
+    return value
+
+
+_TRUE_WORDS = frozenset({"true", "yes", "on", "1"})
+_FALSE_WORDS = frozenset({"false", "no", "off", "0"})
+
+
+def _coerce_bool(value: Any, *, key: str) -> bool:
+    """Coerce a config value to bool without Python's truthiness trap.
+
+    ``bool("off")`` is ``True`` — every non-empty string is — so a quoted
+    ``use_gpu: "off"`` would silently enable the GPU, the exact opposite of what
+    was asked for. That path is well travelled precisely because YAML's bare
+    ``on``/``off`` surprises people into quoting things.
+
+    Unrecognized values raise rather than defaulting, so a typo like ``"offf"``
+    cannot quietly become True.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in _TRUE_WORDS:
+        return True
+    if text in _FALSE_WORDS:
+        return False
+    raise ValueError(f"{key} must be a boolean (true/false, yes/no, on/off); got {value!r}.")
+
+
 def _normalize_config(cfg: dict[str, Any]) -> dict[str, Any]:
     cfg = dict(cfg)  # shallow copy; mutate nested dicts
     cfg["input"]["mode"] = str(cfg["input"].get("mode", "bids")).lower()
+
+    # "no" is an accepted reref alias and another YAML boolean. Normalizing here
+    # rather than only at validation also keeps the downstream reref dispatch in
+    # io_brainvision from seeing the stringified "false".
+    cfg["preprocess"]["reref"] = str(
+        _word_for_yaml_bool(cfg["preprocess"].get("reref", "average"), true_word=None, false_word="no")
+    ).lower()
 
     # Paths -> Path objects (IMPORTANT: do NOT convert back to str)
     for k in ("raw_dir", "subject_csv_dir", "bids_root", "derivatives_root", "sourcedata_root"):
@@ -478,8 +531,11 @@ def _normalize_config(cfg: dict[str, Any]) -> dict[str, Any]:
         None if volt_auto in (None, "null", "None") else float(volt_auto)
     )
 
-    # ICA
-    cfg["ica"]["mode"] = str(cfg["ica"]["mode"]).lower()
+    # ICA. "on" and "off" are two of the three documented modes and both are YAML
+    # booleans, so the word has to be recovered before stringifying.
+    cfg["ica"]["mode"] = str(
+        _word_for_yaml_bool(cfg["ica"]["mode"], true_word="on", false_word="off")
+    ).lower()
     cfg["ica"]["auto_blink_rate_per_min"] = float(cfg["ica"]["auto_blink_rate_per_min"])
     cfg["ica"]["n_components"] = _parse_n_components(cfg["ica"]["n_components"])
     cfg["ica"]["random_state"] = int(cfg["ica"]["random_state"])
@@ -489,7 +545,7 @@ def _normalize_config(cfg: dict[str, Any]) -> dict[str, Any]:
     cfg["ica"]["decim"] = int(cfg["ica"]["decim"])
     cfg["ica"]["corr_thresh"] = float(cfg["ica"]["corr_thresh"])
     cfg["ica"]["max_exclude"] = int(cfg["ica"]["max_exclude"])
-    cfg["ica"]["save_ica"] = bool(cfg["ica"]["save_ica"])
+    cfg["ica"]["save_ica"] = _coerce_bool(cfg["ica"]["save_ica"], key="ica.save_ica")
 
     # Token map convenience normalization -> {"token1": "...", "token2": "..."} or None
     cfg["labels"]["token_map"] = _normalize_token_map(cfg["labels"].get("token_map"))
@@ -504,7 +560,7 @@ def _normalize_config(cfg: dict[str, Any]) -> dict[str, Any]:
 
     # Compute (optional GPU acceleration + within-subject parallelism)
     compute_cfg = cfg.get("compute", {})
-    cfg["compute"]["use_gpu"] = bool(compute_cfg.get("use_gpu", False))
+    cfg["compute"]["use_gpu"] = _coerce_bool(compute_cfg.get("use_gpu", False), key="compute.use_gpu")
     gd = compute_cfg.get("gpu_device", None)
     cfg["compute"]["gpu_device"] = None if gd in (None, "null", "None", "") else int(gd)
     n_jobs = compute_cfg.get("n_jobs", 1)
@@ -518,9 +574,24 @@ def _normalize_config(cfg: dict[str, Any]) -> dict[str, Any]:
             # against its config key rather than raising a bare int() error.
             cfg["compute"]["n_jobs"] = n_jobs
 
+    # Schema booleans that previously passed through uncoerced, so a quoted
+    # "false" reached consumers as a truthy string.
+    cfg["events"]["auto_drop_to_count"] = _coerce_bool(
+        cfg["events"].get("auto_drop_to_count", True), key="events.auto_drop_to_count"
+    )
+    cfg["metrics"]["erp"]["enabled"] = _coerce_bool(
+        cfg["metrics"]["erp"].get("enabled", True), key="metrics.erp.enabled"
+    )
+    cfg["metrics"]["erp"]["timeseries"] = _coerce_bool(
+        cfg["metrics"]["erp"].get("timeseries", False), key="metrics.erp.timeseries"
+    )
+    cfg["metrics"]["tfr"]["enabled"] = _coerce_bool(
+        cfg["metrics"]["tfr"].get("enabled", False), key="metrics.tfr.enabled"
+    )
+
     conv_cfg = cfg.get("conversion", {})
-    cfg["conversion"]["enabled"] = bool(conv_cfg.get("enabled", False))
-    cfg["conversion"]["overwrite"] = bool(conv_cfg.get("overwrite", True))
+    cfg["conversion"]["enabled"] = _coerce_bool(conv_cfg.get("enabled", False), key="conversion.enabled")
+    cfg["conversion"]["overwrite"] = _coerce_bool(conv_cfg.get("overwrite", True), key="conversion.overwrite")
 
     return cfg
 

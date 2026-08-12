@@ -6,6 +6,22 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- Config values that collide with YAML 1.1 booleans were mishandled in two
+  opposite directions, and the two compounded into a trap.
+  - `ica.mode: on` and `ica.mode: off` — two of the three documented modes — were
+    rejected, because PyYAML resolves bare `on`/`off` to `True`/`False` and the
+    loader stringified those to `"true"`/`"false"`. The error then reported that
+    the value "must be one of: off | auto | on", listing the very word the user
+    had written. Quoting was the only way through and nothing said so. The same
+    applied to `preprocess.reref: no`, an accepted alias.
+  - Boolean options were decided by Python truthiness, so a quoted
+    `compute.use_gpu: "off"` **enabled** the GPU — `bool("off")` is `True`. A user
+    who hit the first problem and learned to quote values would land directly on
+    this one. All eight schema booleans are now parsed by word, and an
+    unrecognized value raises instead of defaulting to `True`.
+
+
 ## [2.2.0] - 2026-08-12
 
 ### Added

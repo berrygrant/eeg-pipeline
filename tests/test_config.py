@@ -423,3 +423,80 @@ def test_validate_config_rejects_non_integer_n_jobs():
     cfg["compute"] = {"n_jobs": "many"}
     with pytest.raises(ValueError, match="compute.n_jobs must be an integer"):
         _validate_config(_apply_defaults(cfg))
+
+
+# ---------------------------------------------------------------------------
+# YAML 1.1 boolean collisions
+# ---------------------------------------------------------------------------
+_BOOL_CFG_TEMPLATE = """
+input: {mode: bids}
+paths: {bids_root: /tmp/b, derivatives_root: /tmp/d}
+task: oddball
+events: {standard_codes: [110], deviant_codes: [111]}
+%s
+"""
+
+
+def _load_yaml_cfg(tmp_path: Path, fragment: str):
+    path = tmp_path / "cfg.yaml"
+    path.write_text(_BOOL_CFG_TEMPLATE % fragment, encoding="utf-8")
+    return load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("written", "expected"),
+    [("on", "on"), ("off", "off"), ("auto", "auto"), ("On", "on"), ("'on'", "on"), ('"off"', "off")],
+)
+def test_ica_mode_accepts_documented_values_written_bare(tmp_path: Path, written, expected):
+    """`on` and `off` are documented ICA modes and are also YAML 1.1 booleans.
+
+    PyYAML resolves bare `on`/`off` to True/False, which used to stringify to
+    "true"/"false" and be rejected by a message listing the very value the user
+    had written. Quoting was the only way through and the error never said so.
+    """
+    cfg = _load_yaml_cfg(tmp_path, f"ica:\n  mode: {written}")
+    assert cfg["ica"]["mode"] == expected
+
+
+@pytest.mark.parametrize(("written", "expected"), [("no", "no"), ("none", "none"), ("average", "average")])
+def test_reref_accepts_no_alias_written_bare(tmp_path: Path, written, expected):
+    """`no` is an accepted reref alias and another YAML boolean."""
+    cfg = _load_yaml_cfg(tmp_path, f"preprocess:\n  reref: {written}")
+    assert cfg["preprocess"]["reref"] == expected
+
+
+@pytest.mark.parametrize(
+    ("written", "expected"),
+    [
+        ("false", False), ("off", False), ("no", False), ("0", False),
+        ('"off"', False), ("'no'", False), ('"false"', False),
+        ("true", True), ('"on"', True), ("1", True),
+    ],
+)
+def test_boolean_options_are_not_decided_by_python_truthiness(tmp_path: Path, written, expected):
+    """A quoted "off" must not enable a flag.
+
+    `bool("off")` is True — every non-empty string is — so `use_gpu: "off"` used
+    to turn the GPU ON. Users reach for quotes precisely because bare on/off
+    surprises them, so the two hazards compounded.
+    """
+    cfg = _load_yaml_cfg(tmp_path, f"compute:\n  use_gpu: {written}")
+    assert cfg["compute"]["use_gpu"] is expected
+
+
+def test_previously_uncoerced_booleans_are_coerced(tmp_path: Path):
+    cfg = _load_yaml_cfg(tmp_path, 'metrics:\n  tfr:\n    enabled: "false"\n  erp:\n    timeseries: "off"')
+    assert cfg["metrics"]["tfr"]["enabled"] is False
+    assert cfg["metrics"]["erp"]["timeseries"] is False
+
+
+@pytest.mark.parametrize("written", ['"offf"', "maybe", "'truthy'"])
+def test_unparseable_boolean_raises_rather_than_defaulting_true(tmp_path: Path, written):
+    """A typo must not quietly become True."""
+    with pytest.raises(ValueError, match="must be a boolean"):
+        _load_yaml_cfg(tmp_path, f"compute:\n  use_gpu: {written}")
+
+
+def test_invalid_ica_mode_string_still_rejected(tmp_path: Path):
+    with pytest.raises(ValueError, match="ica.mode must be one of"):
+        _load_yaml_cfg(tmp_path, "ica:\n  mode: banana")
