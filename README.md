@@ -143,6 +143,33 @@ run_metrics.py            # Legacy metrics runner (kept for compatibility) — D
 
 ---
 
+## Validation runs (evidence packaging)
+
+`scripts/validate_dataset.py` wraps a run and produces the provenance and
+reconciliation artifacts the pipeline does not emit on its own — a run manifest
+(code commit, environment versions, OS, config hash, timestamps), a dataset
+integrity report, a captured log, and a participant-flow table reconciling
+attempted / excluded-by-reason / successful / metric-bearing.
+
+```bash
+python scripts/validate_dataset.py \
+    --config config.yaml \
+    --bids-root /path/to/ds003620 \
+    --out-dir   /path/to/runs/ds003620_$(date +%F) \
+    --dataset-id ds003620 --dataset-version 1.1.1 --retrieved $(date +%F)
+```
+
+It refuses to run into a non-empty directory, and stops on dataset-integrity
+errors (broken BrainVision links, participants.tsv disagreeing with the subject
+directories) unless `--allow-integrity-warnings` is passed. Exit codes: `0` clean,
+`1` integrity failure, `2` non-empty destination.
+
+Where counts do not reconcile, the flow step names the specific subjects rather
+than leaving a count difference to chase. Choosing contrasts, outlier rules and
+the claim level stays manual — `validation_statement.md` is written as a stub.
+
+---
+
 ## Configuration-driven workflow
 
 All pipeline behavior is controlled via a **single YAML (or JSON) config file**.
