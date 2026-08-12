@@ -234,6 +234,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--skip-run", action="store_true", help="Re-package an existing run.")
     args = ap.parse_args(argv)
 
+    # Resolve before anything else: the pipeline subprocess runs with cwd set to
+    # the repo root, so a relative path given on the command line would quietly
+    # resolve somewhere other than where the caller meant.
+    args.config = args.config.expanduser().resolve()
+    args.bids_root = args.bids_root.expanduser().resolve()
+    args.out_dir = args.out_dir.expanduser().resolve()
+    if not args.config.is_file():
+        print(f"[FAIL] config not found: {args.config}", file=sys.stderr)
+        return 2
+
     started_at = datetime.now(timezone.utc).isoformat()
     out = args.out_dir
     derivatives = out / "derivatives"
