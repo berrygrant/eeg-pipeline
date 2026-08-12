@@ -7,4 +7,4 @@ Invoke CLI with:
 
 # Single source of truth for the package version. pyproject.toml reads this
 # via [tool.setuptools.dynamic] (dynamic = ["version"]).
-__version__ = "2.1.0"
+__version__ = "2.2.0"

@@ -8,7 +8,7 @@ type: software
 authors:
   - family-names: Berry
     given-names: Grant M.
-version: 2.1.0
+version: 2.2.0
 doi: 10.5281/zenodo.18704504
 license: MIT
 repository-code: https://github.com/berrygrant/eeg-pipeline
