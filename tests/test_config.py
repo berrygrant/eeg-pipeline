@@ -184,7 +184,15 @@ def test_read_config_file_supports_yaml_and_rejects_unknown_extensions(monkeypat
     yaml_path.write_text("ignored", encoding="utf-8")
 
     fake_yaml = ModuleType("yaml")
-    fake_yaml.safe_load = lambda fh: {"task": "yaml"}
+
+    # The loader is subclassed to reject duplicate keys, so the double has to
+    # expose SafeLoader and load(), not just safe_load().
+    class _FakeSafeLoader:
+        def __init__(self, stream):
+            self.stream = stream
+
+    fake_yaml.SafeLoader = _FakeSafeLoader
+    fake_yaml.load = lambda fh, Loader=None: {"task": "yaml"}
     monkeypatch.setitem(sys.modules, "yaml", fake_yaml)
 
     assert _read_config_file(yaml_path) == {"task": "yaml"}
@@ -500,3 +508,31 @@ def test_unparseable_boolean_raises_rather_than_defaulting_true(tmp_path: Path, 
 def test_invalid_ica_mode_string_still_rejected(tmp_path: Path):
     with pytest.raises(ValueError, match="ica.mode must be one of"):
         _load_yaml_cfg(tmp_path, "ica:\n  mode: banana")
+
+
+def test_malformed_section_is_rejected_not_silently_replaced(tmp_path: Path):
+    """A non-mapping section must not be overwritten with defaults.
+
+    `ica: on` (missing the `mode:` nesting) used to have the user's value thrown
+    away and `ica.mode` back-filled to "off" — so the run completed with ICA
+    quietly disabled and nothing in the output said so.
+    """
+    path = tmp_path / "cfg.yaml"
+    path.write_text(_BOOL_CFG_TEMPLATE % "ica: on", encoding="utf-8")
+    with pytest.raises(ValueError, match="must be a mapping of options"):
+        load_config(path)
+
+
+def test_duplicate_keys_are_rejected(tmp_path: Path):
+    """YAML keeps only the last occurrence, silently.
+
+    A file whose visible text still reads `mode: "on"` would otherwise run with a
+    value from a later block — evidence and behavior disagreeing, with nothing to
+    flag it.
+    """
+    path = tmp_path / "cfg.yaml"
+    path.write_text(
+        _BOOL_CFG_TEMPLATE % "ica:\n  mode: 'on'\nica:\n  max_iter: 512", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="Duplicate key"):
+        load_config(path)

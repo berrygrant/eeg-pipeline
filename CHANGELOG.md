@@ -7,6 +7,17 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- A config section written as a non-mapping had the user's value silently
+  discarded and defaults back-filled over it. `ica: on` — the `mode:` nesting
+  omitted — became `ica.mode = "off"`, so the run completed with ICA quietly
+  disabled, every subject recording `ica_ran=False`, and no ICA files written.
+  Unknown-key detection could not catch it either, since it inspects the config
+  only after defaults have rewritten the node into a valid shape. Malformed
+  sections are now rejected with the correct nesting shown.
+- Duplicate YAML keys are now rejected. YAML keeps only the last occurrence and
+  says nothing, so appending a second `ica:` block left a file whose visible text
+  still read `mode: "on"` while the run used the later block — evidence and
+  behavior disagreeing with nothing to flag it.
 - Aggregation keyed recordings on only four of the six BIDS entities that appear
   in derivative filenames, omitting `acq` and `recording`. Two sibling recordings
   differing solely by `acq` therefore shared one key, so excluding the bad sibling

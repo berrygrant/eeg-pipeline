@@ -77,8 +77,34 @@ def _read_config_file(path: Path) -> dict[str, Any]:
             raise ImportError(
                 "YAML config requires PyYAML. Install with: pip install pyyaml"
             ) from e
+
+        class _StrictLoader(yaml.SafeLoader):
+            """SafeLoader that refuses duplicate keys.
+
+            YAML is last-wins and silent about repeats, so appending a second
+            ``ica:`` block leaves a file that still visibly reads ``mode: "on"``
+            near the top while the effective value comes from the later block.
+            Someone reading that file would truthfully report a setting the run
+            never used — the worst kind of provenance failure, because the
+            evidence and the behavior disagree with nothing to flag it.
+            """
+
+            def construct_mapping(self, node, deep=False):  # type: ignore[override]
+                seen: set = set()
+                for key_node, _ in node.value:
+                    key = self.construct_object(key_node, deep=deep)
+                    if key in seen:
+                        raise ValueError(
+                            f"Duplicate key {key!r} in {path} at line "
+                            f"{key_node.start_mark.line + 1}. YAML silently keeps "
+                            "only the last occurrence, so the earlier value would "
+                            "be ignored."
+                        )
+                    seen.add(key)
+                return super().construct_mapping(node, deep=deep)
+
         with path.open("r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            data = yaml.load(f, Loader=_StrictLoader)  # noqa: S506 - subclass of SafeLoader
         return data or {}
 
     if suffix == ".json":
@@ -226,7 +252,19 @@ def _apply_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
         parts = path.split(".")
         cur = d
         for p in parts[:-1]:
-            if p not in cur or not isinstance(cur[p], dict):
+            if p in cur and not isinstance(cur[p], dict):
+                # Silently replacing the node here discards whatever the user
+                # wrote and back-fills defaults over it, so `ica: on` (missing the
+                # `mode:` nesting) became `ica.mode = "off"` with no error — the
+                # run then completed with ICA quietly disabled. Unknown-key
+                # detection cannot catch it either, since it inspects the config
+                # only after defaults have rewritten the node into a valid shape.
+                raise ValueError(
+                    f"Config section '{p}' must be a mapping of options, got "
+                    f"{type(cur[p]).__name__} ({cur[p]!r}). Did you mean:\n"
+                    f"  {p}:\n    {parts[-1]}: {cur[p]!r}"
+                )
+            if p not in cur:
                 cur[p] = {}
             cur = cur[p]
         # deepcopy so shared module-level mutable defaults are never aliased
