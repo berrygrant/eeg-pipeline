@@ -164,6 +164,27 @@ errors (broken BrainVision links, participants.tsv disagreeing with the subject
 directories) unless `--allow-integrity-warnings` is passed. Exit codes: `0` clean,
 `1` integrity failure, `2` non-empty destination.
 
+### On a SLURM cluster
+
+The serial form above processes subjects one at a time. On a cluster, run the
+same gates as three stages — precheck on the login node, one array task per
+subject, then a dependent gather:
+
+```bash
+./hpc/submit_validation.sh config.yaml \
+    /scratch/$USER/ds003620 \
+    /scratch/$USER/runs/ds003620_$(date +%F) \
+    ds003620 1.1.1 20          # last arg = max concurrent tasks
+```
+
+Set `SLURM_ACCOUNT`, `SLURM_PARTITION` and optionally `SLURM_MAIL_USER` for your
+site; they are empty by default so a wrong value fails at submit time with a
+clearer message than a guessed one. The precheck runs before anything is queued,
+so a bad path or a failed integrity gate costs no queue time.
+
+Array tasks pass `--skip_aggregate`, so only the gather writes the shared
+dataset-level tables. Serial and array-parallel runs produce identical metrics.
+
 Where counts do not reconcile, the flow step names the specific subjects rather
 than leaving a count difference to chase. Choosing contrasts, outlier rules and
 the claim level stays manual — `validation_statement.md` is written as a stub.

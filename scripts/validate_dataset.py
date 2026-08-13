@@ -232,6 +232,25 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--n-jobs", type=int, default=1)
     ap.add_argument("--allow-integrity-warnings", action="store_true")
     ap.add_argument("--skip-run", action="store_true", help="Re-package an existing run.")
+    ap.add_argument(
+        "--stage",
+        choices=("all", "precheck", "package"),
+        default="all",
+        help=(
+            "all: gates 0-5 in one serial process (a workstation run). "
+            "precheck: gates 0-2 guard only -- writes the manifest, the integrity "
+            "report and subjects.txt, then stops, so a SLURM array can process "
+            "subjects independently. "
+            "package: gates 3-5 -- runs --aggregate_only over whatever the array "
+            "produced, then reconciles and packages."
+        ),
+    )
+    ap.add_argument(
+        "--subject-list",
+        type=Path,
+        default=None,
+        help="Where precheck writes the subject labels (default: <out-dir>/subjects.txt).",
+    )
     args = ap.parse_args(argv)
 
     # Resolve before anything else: the pipeline subprocess runs with cwd set to
@@ -249,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
     derivatives = out / "derivatives"
 
     # Gate 2: an empty destination, checked before anything is written.
-    if out.exists() and any(out.iterdir()) and not args.skip_run:
+    if out.exists() and any(out.iterdir()) and not args.skip_run and args.stage in ("all", "precheck"):
         print(f"[FAIL] Gate 2: output directory is not empty: {out}", file=sys.stderr)
         print("       Rerun into a new directory, or pass --skip-run to re-package.", file=sys.stderr)
         return 2
@@ -276,8 +295,43 @@ def main(argv: list[str] | None = None) -> int:
         (out / "run_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         return 1
 
+    if args.stage == "precheck":
+        subject_list = args.subject_list or (out / "subjects.txt")
+        subject_list.parent.mkdir(parents=True, exist_ok=True)
+        subjects = sorted(p.name for p in args.bids_root.glob("sub-*") if p.is_dir())
+        # No trailing blank line: hpc/submit.sh sizes the array by non-blank line
+        # count and slurm_array.sbatch indexes non-blank lines, so the two agree
+        # either way, but an exact file is easier to eyeball.
+        subject_list.write_text("\n".join(subjects) + "\n", encoding="utf-8")
+        manifest["Execution"]["ended_at"] = datetime.now(timezone.utc).isoformat()
+        manifest["Execution"]["stage"] = "precheck"
+        (out / "run_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        print(f"  wrote {len(subjects)} subject label(s) -> {subject_list}")
+        print("\nPrecheck passed. Submit the array, then run --stage package.")
+        return 0
+
     log_path = out / "pipeline_run.log"
-    if not args.skip_run:
+    if args.stage == "package":
+        # The array already processed every subject with --skip_aggregate, so the
+        # dataset-level tables do not exist yet. Build them from what landed.
+        print("== gather: --aggregate_only ==")
+        cmd = [
+            sys.executable, "-m", "eeg_pipeline.cli",
+            "--config", str(args.config),
+            "--bids_root", str(args.bids_root),
+            "--derivatives_root", str(derivatives),
+            "--aggregate_only",
+        ]
+        print("  " + " ".join(cmd))
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"\n# gather: {' '.join(cmd)}\n")
+            fh.flush()
+            proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT, cwd=REPO_ROOT)
+        print(f"  exit code: {proc.returncode}")
+        manifest["Execution"]["gather_exit_code"] = proc.returncode
+        if proc.returncode != 0:
+            print("[WARN] gather exited non-zero; the tables below may be incomplete.")
+    elif not args.skip_run:
         print("== Gate 2: run ==")
         cmd = [
             sys.executable, "-m", "eeg_pipeline.cli",
@@ -301,6 +355,7 @@ def main(argv: list[str] | None = None) -> int:
         if proc.returncode != 0:
             print("[WARN] the pipeline exited non-zero; one recording's error aborts "
                   "the whole run, so later participants may never have been attempted.")
+    manifest["Execution"]["stage"] = args.stage
 
     manifest["Execution"]["ended_at"] = datetime.now(timezone.utc).isoformat()
     (out / "run_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
