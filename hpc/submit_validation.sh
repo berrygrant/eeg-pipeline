@@ -38,6 +38,14 @@ EXTRA_SBATCH=()
 
 command -v sbatch >/dev/null || { echo "sbatch not found -- run this on the cluster, not your laptop." >&2; exit 1; }
 
+# Expand a leading ~ ourselves. Bash expands it on the command line only when
+# unquoted, so a quoted "~/scratch/ds003620" -- the natural way to write a path
+# that might contain spaces -- would otherwise arrive here as a literal tilde and
+# fail as a missing directory.
+CONFIG="${CONFIG/#\~/$HOME}"
+BIDS_ROOT="${BIDS_ROOT/#\~/$HOME}"
+OUT_DIR="${OUT_DIR/#\~/$HOME}"
+
 # Check the inputs before resolving them. Bare `cd` under `set -e` aborts with a
 # terse "cd: ...: No such file or directory" that names the line number rather
 # than the problem, which is a poor first thing to hit on a cluster.
