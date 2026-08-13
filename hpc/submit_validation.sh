@@ -38,9 +38,36 @@ EXTRA_SBATCH=()
 
 command -v sbatch >/dev/null || { echo "sbatch not found -- run this on the cluster, not your laptop." >&2; exit 1; }
 
+# Check the inputs before resolving them. Bare `cd` under `set -e` aborts with a
+# terse "cd: ...: No such file or directory" that names the line number rather
+# than the problem, which is a poor first thing to hit on a cluster.
+if [[ ! -f "$CONFIG" ]]; then
+    echo "Config file not found: $CONFIG" >&2
+    echo "  (paths are resolved from $(pwd))" >&2
+    exit 1
+fi
+if [[ ! -d "$BIDS_ROOT" ]]; then
+    echo "BIDS root not found: $BIDS_ROOT" >&2
+    echo "  The dataset has to exist on the cluster before submitting. If you have" >&2
+    echo "  not staged it yet, copy it up or fetch it directly onto \$SCRATCH." >&2
+    exit 1
+fi
+if ! compgen -G "${BIDS_ROOT}/sub-*" >/dev/null; then
+    echo "No sub-* directories under: $BIDS_ROOT" >&2
+    echo "  --bids-root must be the directory CONTAINING sub-01/, sub-02/, ..." >&2
+    echo "  Found instead:" >&2
+    ls -1 "$BIDS_ROOT" 2>/dev/null | head -5 | sed 's/^/    /' >&2
+    echo "  If the dataset is nested, point at the inner directory." >&2
+    exit 1
+fi
+if ! mkdir -p "$OUT_DIR" logs 2>/dev/null; then
+    echo "Cannot create output directory: $OUT_DIR" >&2
+    echo "  Check the path exists up to its parent and that you can write there." >&2
+    exit 1
+fi
+
 CONFIG="$(cd "$(dirname "$CONFIG")" && pwd)/$(basename "$CONFIG")"
 BIDS_ROOT="$(cd "$BIDS_ROOT" && pwd)"
-mkdir -p "$OUT_DIR" logs
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 
 SUBJECT_LIST="${OUT_DIR}/subjects.txt"
