@@ -59,12 +59,17 @@ preprocess:
   notch_hz: []             # ASR/cleanline not implemented; no notch specified
 
 events:
-  # Oddball standard vs deviant. Confirm these codes against the dataset's own
-  # events.tsv before trusting any contrast -- they are the handoff's values,
-  # not something read from the data.
-  standard_codes: [1]
-  deviant_codes: [2]
-  behavioral_keep_codes: []
+  # Codes from the dataset's own derivatives/erp/**/desc-window_epochs.json
+  # "code" Levels: nt/t = non-target/target (Standard/Deviant), Dontcount/count
+  # = Ignore/Count, and lab/oval/campus = environment.
+  #
+  # These are NOT in the published events.tsv, whose trial_type is the single
+  # value "S  1" for all 4503 events -- nor in the original .vmrk. Run
+  # scripts/reconstruct_ds003620_events.py first to produce events files that
+  # carry them (and that express onsets in seconds rather than samples).
+  standard_codes: [111, 112, 113, 121, 122, 123]
+  deviant_codes: [211, 212, 213, 221, 222, 223]
+  behavioral_keep_codes: [111, 112, 113, 121, 122, 123, 211, 212, 213, 221, 222, 223]
   auto_drop_to_count: true
 
 epoching:
@@ -96,6 +101,10 @@ metrics:
   erp:
     enabled: true
     channels: [Fp1, Fz, Cz, Pz]
+    # Standard/Deviant pools across the 2x3 instruction x environment design.
+    # The benchmark analysis is per cell, so to reproduce it the conditions have
+    # to be split -- see events.condition_map in the README. Pooled first is
+    # deliberate: it is the simplest contrast that either works or does not.
     conditions: [Standard, Deviant]
     difference_label: DEV_MINUS_STD
     windows:
