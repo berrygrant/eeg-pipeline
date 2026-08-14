@@ -1,0 +1,111 @@
+# ds003620 - Runabout mobile EEG (MMN / P300 auditory oddball)
+# OpenNeuro ds003620 v1.1.1 - 44 adults, oddball blocks in lab, field/oval and
+# campus settings, under count and ignore instructions.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS CONFIG CANNOT DO
+#
+# The source paper's processing includes five steps this pipeline does not
+# implement. They are listed here rather than silently omitted, because the gap
+# is what decides the claim level: with these missing, a run over ds003620
+# supports "technical feasibility" and NOT "exact replication".
+#
+#   1. Resampling to 250 Hz      - no resample option exists; data is processed
+#                                  at its native rate.
+#   2. ASR (Artifact Subspace     - not implemented. Artifact handling here is
+#      Reconstruction)              the moving-window peak-to-peak rule below.
+#   3. -200 ms trigger correction - no trigger-offset option. If the dataset's
+#                                  events.tsv onsets are uncorrected, EVERY
+#                                  latency below is shifted by that amount.
+#                                  Verify against the dataset's own events
+#                                  before interpreting P300 latencies.
+#   4. ICLabel ocular/cardiac 0.9 - component selection uses EOG / frontal-proxy
+#                                  correlation instead, so which components are
+#                                  removed will differ from the paper.
+#   5. Missing-channel interpolation - not implemented.
+#
+# Steps 1 and 3 change the numbers; 2, 4 and 5 change which data survives.
+# ---------------------------------------------------------------------------
+
+input:
+  mode: bids
+
+paths:
+  # Supplied on the command line by scripts/validate_dataset.py; left null so
+  # this file is not tied to one machine.
+  bids_root: null
+  derivatives_root: null
+
+task: oddball
+
+bids:
+  # The dataset has several task labels (lab / oval / campus x count / ignore).
+  # Leave unset to process everything discovered, or narrow it here.
+  tasks: null
+
+channels:
+  eog_chs: []
+  # No EOG in this montage, so blink detection falls back to a frontal proxy.
+  # If Fp1 is absent under the dataset's naming, blink rejection silently does
+  # nothing -- check n_blink_bad in the QC table is not uniformly zero.
+  blink_proxy_chs: [Fp1]
+  drop_aux_chs: []
+
+preprocess:
+  montage: standard_1020
+  reref: tp9_tp10          # mastoid pair, per the handoff
+  l_freq: 0.5
+  h_freq: 40.0
+  notch_hz: []             # ASR/cleanline not implemented; no notch specified
+
+events:
+  # Oddball standard vs deviant. Confirm these codes against the dataset's own
+  # events.tsv before trusting any contrast -- they are the handoff's values,
+  # not something read from the data.
+  standard_codes: [1]
+  deviant_codes: [2]
+  behavioral_keep_codes: []
+  auto_drop_to_count: true
+
+epoching:
+  tmin: -0.2
+  tmax: 0.8
+  baseline: [-0.2, 0.0]
+
+artifacts:
+  test_window: [-0.2, 0.8]
+  # The handoff's 50% ceiling. 11 of 44 subjects previously exceeded it, which
+  # is a high loss rate -- inspect the rejection distribution before accepting
+  # it rather than treating the threshold as settled.
+  max_reject_rate: 0.5
+  voltage:
+    method: window_ptp     # moving-window peak-to-peak, per the handoff
+    threshold_uv: 125.0
+    win_ms: 200.0
+    step_ms: 100.0
+  blink:
+    threshold_uv: 75.0
+
+ica:
+  mode: on                 # bare `on` is fine: YAML booleans are handled
+  method: infomax
+  n_components: 0.99
+  save_ica: true
+
+metrics:
+  erp:
+    enabled: true
+    channels: [Fp1, Fz, Cz, Pz]
+    conditions: [Standard, Deviant]
+    difference_label: DEV_MINUS_STD
+    windows:
+      - {name: MMN,  tmin: 0.10, tmax: 0.25}
+      - {name: P300, tmin: 0.25, tmax: 0.50}
+    timeseries: true
+  tfr:
+    enabled: false         # no TFR benchmark has been packaged; leave off until
+                           # there is a result to report
+
+compute:
+  n_jobs: 1                # overridden per-task by the SLURM template
+  use_gpu: false

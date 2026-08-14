@@ -1,0 +1,98 @@
+# ds007052 - PURSUE N400 (semantic priming)
+# OpenNeuro ds007052 v1.1.2 - 288 participants.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS CONFIG CANNOT DO
+#
+# Better covered than ds003620, but three ERP CORE steps are still absent. They
+# are the difference between "strongly consistent with the expected N400 effect"
+# and "exact replication", so the claim in the manuscript has to match:
+#
+#   1. Resampling to 256 Hz     - no resample option exists.
+#   2. 26 ms display-delay      - no trigger-offset option, so every latency
+#      correction                 below is 26 ms late relative to ERP CORE.
+#                                 This matters directly: the N400 window is
+#                                 defined by latency.
+#   3. Behavioral RT/accuracy   - no behavioral exclusion stage; all trials with
+#      exclusions                 a usable EEG epoch are kept.
+#
+# ERP CORE's ocular criteria also differ from the EOG/proxy correlation used
+# here.
+# ---------------------------------------------------------------------------
+
+input:
+  mode: bids
+
+paths:
+  bids_root: null          # supplied on the command line
+  derivatives_root: null
+
+task: pursue
+
+bids:
+  tasks: null
+
+channels:
+  eog_chs: []
+  blink_proxy_chs: [Fp1]
+  drop_aux_chs: []
+
+preprocess:
+  montage: standard_1020
+  reref: tp9_tp10
+  l_freq: 0.1
+  h_freq: 20.0
+  notch_hz: []             # no notch, per the handoff
+
+events:
+  # Related probes vs unrelated probes.
+  standard_codes: [211, 212]     # related
+  deviant_codes: [221, 222]      # unrelated
+  behavioral_keep_codes: [211, 212, 221, 222]
+  auto_drop_to_count: true
+
+epoching:
+  tmin: -0.2
+  tmax: 0.8
+  baseline: [-0.2, 0.0]
+
+artifacts:
+  test_window: [-0.2, 0.8]
+  max_reject_rate: null
+  blink:
+    threshold_uv: 75.0
+    # Per-subject thresholds, as specified: the percentile is computed within
+    # each participant rather than applying one fixed microvolt cutoff.
+    auto_percentile: 99.0
+  voltage:
+    method: simple
+    threshold_uv: 150.0
+    auto_percentile: 97.5
+
+ica:
+  # The previous run recorded ica_ran=False for all 285 OK subjects with an
+  # empty ICA directory. The most likely cause was a malformed `ica:` section
+  # silently defaulting to "off" -- confirm by checking the ica_mode column of
+  # the OLD run's QC table BEFORE rerunning, since a rerun overwrites it.
+  mode: on
+  method: infomax
+  n_components: 0.99
+  save_ica: true
+
+metrics:
+  erp:
+    enabled: true
+    # The N400 metric is defined at CPz. Fz/Pz are included as neighbours so the
+    # distribution can be checked rather than assumed.
+    channels: [CPz, Cz, Pz, Fz]
+    conditions: [Standard, Deviant]
+    difference_label: UNREL_MINUS_REL
+    windows:
+      - {name: N400, tmin: 0.30, tmax: 0.50}
+    timeseries: true
+  tfr:
+    enabled: false
+
+compute:
+  n_jobs: 1
+  use_gpu: false
