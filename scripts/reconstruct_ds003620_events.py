@@ -80,6 +80,53 @@ def epoch_codes(epochs_tsv: Path) -> dict[int, int]:
     return out
 
 
+def check_alignment(coded: list[tuple[int, float, int]], all_onsets_s: list[float]) -> tuple[bool, str]:
+    """Test whether the codes are aligned to the right triggers, via timing.
+
+    Block structure alone proves nothing: the codes arrive in epoch order, so they
+    look blocked whether or not they landed on the correct triggers. What does
+    discriminate is *when* the blocks change. The design runs six blocks
+    (3 environments x 2 instructions) separated by instructions and by physically
+    relocating, so the trigger stream carries long gaps at those seams. If the
+    mapping is right, every change of (task, environment) must coincide with one
+    of those gaps. Under a shift -- the failure mode if the authors deleted
+    spurious triggers before epoching -- transitions drift into the middle of a
+    block and land on an ordinary inter-stimulus interval.
+
+    Returns (passed, human-readable detail).
+    """
+    if len(coded) < 50 or len(all_onsets_s) < 50:
+        return True, "too few events to test"
+
+    isis = [b - a for a, b in zip(sorted(all_onsets_s), sorted(all_onsets_s)[1:], strict=False) if b > a]
+    if not isis:
+        return True, "no usable intervals"
+    isis_sorted = sorted(isis)
+    median_isi = isis_sorted[len(isis_sorted) // 2]
+
+    transitions = []
+    for (_, t_prev, c_prev), (_, t_now, c_now) in zip(coded, coded[1:], strict=False):
+        # Codes are stim*100 + task*10 + environ, so the block identity is the
+        # low two digits. Using the high digit instead would count every
+        # Standard->Deviant switch as a block change.
+        if (c_prev % 100) != (c_now % 100):
+            transitions.append(t_now - t_prev)
+
+    if not transitions:
+        return False, "no block transitions found — expected 5 for a 6-block design"
+
+    # A seam should be conspicuous: an order of magnitude beyond a normal ISI is
+    # a deliberately loose bar, so this flags real misalignment rather than noise.
+    threshold = max(median_isi * 10, median_isi + 5.0)
+    on_seam = sum(1 for gap in transitions if gap >= threshold)
+    passed = on_seam >= len(transitions) - 1  # tolerate one ambiguous seam
+    detail = (
+        f"{on_seam}/{len(transitions)} block transitions on a long gap "
+        f"(median ISI {median_isi:.2f}s, threshold {threshold:.1f}s)"
+    )
+    return passed, detail
+
+
 def rebuild(bids_root: Path, out_dir: Path, dry_run: bool) -> int:
     subjects = sorted(p for p in bids_root.glob("sub-*") if p.is_dir())
     if not subjects:
@@ -87,8 +134,9 @@ def rebuild(bids_root: Path, out_dir: Path, dry_run: bool) -> int:
         return 1
 
     total_written = 0
-    print(f"{'subject':10} {'triggers':>9} {'coded':>7} {'coverage':>9}  conditions")
-    print("-" * 72)
+    skipped_alignment: list[str] = []
+    print(f"{'subject':10} {'triggers':>9} {'coded':>7} {'coverage':>9}  cells      alignment")
+    print("-" * 104)
     for sub_dir in subjects:
         sub = sub_dir.name
         events = sorted(sub_dir.glob("eeg/*_events.tsv"))
@@ -111,7 +159,7 @@ def rebuild(bids_root: Path, out_dir: Path, dry_run: bool) -> int:
         oi = head.index("onset")
         rows = [ln.split("\t") for ln in lines[1:] if ln.strip()]
 
-        out_rows, seen = [], set()
+        out_rows, seen, coded, all_onsets = [], set(), [], []
         trigger_index = 0
         for parts in rows:
             raw_onset = parts[oi].strip()
@@ -120,20 +168,31 @@ def rebuild(bids_root: Path, out_dir: Path, dry_run: bool) -> int:
             except ValueError:
                 continue
             trigger_index += 1
+            onset_s = sample * dt
+            all_onsets.append(onset_s)
             code = codes.get(trigger_index)
             if code is None:
                 continue  # epoch rejected upstream; no condition is known for it
             stim, task, env = CODE_LEVELS.get(code, ("n/a", "n/a", "n/a"))
             seen.add(code)
+            coded.append((trigger_index, onset_s, code))
             out_rows.append(
                 # onset in SECONDS, as BIDS requires; sample retained so the
                 # original index stays auditable.
-                f"{sample * dt:.6f}\t0.0\t{sample}\t{stim}\t{code}\t{task}\t{env}"
+                f"{onset_s:.6f}\t0.0\t{sample}\t{stim}\t{code}\t{task}\t{env}"
             )
 
+        aligned, detail = check_alignment(coded, all_onsets)
         coverage = (len(out_rows) / trigger_index * 100) if trigger_index else 0.0
+        flag = "OK  " if aligned else "FAIL"
         print(f"{sub:10} {trigger_index:>9} {len(out_rows):>7} {coverage:>8.1f}%  "
-              f"{len(seen)}/12 cells present")
+              f"{len(seen):>2}/12 cells  [{flag}] {detail}")
+        if not aligned:
+            skipped_alignment.append(sub)
+            if not dry_run:
+                # Writing a file whose labels are probably wrong is worse than
+                # writing none: it would be indistinguishable downstream.
+                continue
 
         if not dry_run:
             dest = out_dir / sub / "eeg" / src.name
@@ -144,6 +203,18 @@ def rebuild(bids_root: Path, out_dir: Path, dry_run: bool) -> int:
                 encoding="utf-8",
             )
             total_written += 1
+
+    if skipped_alignment:
+        print(
+            f"\n[FAIL] {len(skipped_alignment)} subject(s) failed the alignment check "
+            f"and were NOT written: {skipped_alignment}"
+        )
+        print(
+            "       Their condition-block transitions do not fall on the long gaps "
+            "between blocks, which means the epoch ordinals do not index this "
+            "trigger sequence -- most likely because spurious triggers were removed "
+            "before epoching. Their labels would be shifted and silently wrong."
+        )
 
     if not dry_run:
         print(f"\nWrote {total_written} events file(s) under {out_dir}")
