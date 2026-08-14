@@ -16,6 +16,15 @@ def build_arg_parser():
     ap.add_argument("--get_metrics", action="store_true", help="Compute ERP/TFR metrics from derivative epochs")
     ap.add_argument("--plot_figures", action="store_true", help="Generate figures from aggregated derivative metrics")
     ap.add_argument(
+        "--fail_fast",
+        action="store_true",
+        help=(
+            "Stop at the first recording that raises. By default the run continues "
+            "and records an ERROR QC row for it, so one bad recording cannot hide "
+            "the outcome of every other participant."
+        ),
+    )
+    ap.add_argument(
         "--skip_aggregate",
         action="store_true",
         help=(

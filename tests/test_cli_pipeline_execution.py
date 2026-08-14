@@ -387,11 +387,36 @@ def test_recording_that_raises_before_any_stage_still_gets_a_qc_row(monkeypatch,
     monkeypatch.setattr(cli_pipeline, "_process_recording_stages", _boom)
     monkeypatch.setattr(cli_pipeline, "run_aggregation", lambda root, a: None)
 
-    with pytest.raises(RuntimeError, match="raw load exploded"):
-        cli.run_full_pipeline(args, defaults=defaults, cfg={})
+    # The run completes: one bad recording must not end it, or later
+    # participants are never attempted and nothing records who was skipped.
+    cli.run_full_pipeline(args, defaults=defaults, cfg={})
 
     qc = list((Path(args.derivatives_root) / "eeg-pipeline").rglob("*desc-summary_qc.tsv"))
     assert qc, "a failing recording must still be reported in QC"
     row = pd.read_csv(qc[0], sep="\t").iloc[0]
     assert row["status"] == "ERROR"
     assert "raw load exploded" in row["error"]
+
+
+def test_fail_fast_stops_at_the_first_failing_recording(monkeypatch, tmp_path: Path):
+    """--fail_fast restores stop-on-first-error for callers that want it."""
+    args, defaults = _parser_args(tmp_path)
+    args.ica = "off"
+    args.fail_fast = True
+    bids_root, derivatives_root = _make_bids_fixture(tmp_path / "ff")
+    args.bids_root = bids_root
+    args.derivatives_root = derivatives_root
+
+    def _boom(*a, **kw):
+        raise RuntimeError("raw load exploded")
+
+    monkeypatch.setattr(cli_pipeline, "_process_recording_stages", _boom)
+    monkeypatch.setattr(cli_pipeline, "run_aggregation", lambda root, a: None)
+
+    with pytest.raises(RuntimeError, match="raw load exploded"):
+        cli.run_full_pipeline(args, defaults=defaults, cfg={})
+
+    # Even then the QC row is written, so the failure stays attributable.
+    qc = list((Path(derivatives_root) / "eeg-pipeline").rglob("*desc-summary_qc.tsv"))
+    assert qc
+    assert pd.read_csv(qc[0], sep="\t").iloc[0]["status"] == "ERROR"

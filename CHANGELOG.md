@@ -6,6 +6,14 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- A recording that raises no longer ends the whole run. Later participants were
+  never attempted, aggregation never ran, and no QC summary was written at all —
+  so nothing recorded which recording failed or who was skipped, which is the
+  worst state to debug from. The run now continues, the failing recording gets
+  its `ERROR` QC row, and a count is reported at the end. `--fail_fast` restores
+  the previous behavior.
+
 ### Fixed
 - A config section written as a non-mapping had the user's value silently
   discarded and defaults back-filled over it. `ica: on` — the `mode:` nesting

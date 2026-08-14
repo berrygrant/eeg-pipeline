@@ -1194,21 +1194,37 @@ def run_full_pipeline(args, defaults=None, cfg=None):
         else:
             metrics_conditions = ["Standard", "Deviant"]
 
+    n_failed = 0
     for recording in recordings:
-        _process_recording(
-            recording,
-            args=args,
-            ep=ep,
-            token_map=token_map,
-            dataset_root=dataset_root,
-            csv_fallback_dir=csv_fallback_dir,
-            std_codes=std_codes,
-            dev_codes=dev_codes,
-            stddev_set=stddev_set,
-            condition_map=condition_map,
-            metrics_conditions=metrics_conditions,
-            rows=rows,
-        )
+        try:
+            _process_recording(
+                recording,
+                args=args,
+                ep=ep,
+                token_map=token_map,
+                dataset_root=dataset_root,
+                csv_fallback_dir=csv_fallback_dir,
+                std_codes=std_codes,
+                dev_codes=dev_codes,
+                stddev_set=stddev_set,
+                condition_map=condition_map,
+                metrics_conditions=metrics_conditions,
+                rows=rows,
+            )
+        except Exception as exc:
+            # One bad recording used to end the run: later participants were
+            # never attempted, aggregation never ran, and no QC summary was
+            # written at all -- so nothing recorded which recording failed or who
+            # was skipped. The ERROR row is already persisted by the wrapper's
+            # finally block, so continuing keeps the failure attributable.
+            n_failed += 1
+            print(f"[ERROR] {recording.relative_raw_path}: {type(exc).__name__}: {exc}")
+            if getattr(args, "fail_fast", False):
+                print("[ERROR] --fail_fast set; stopping.")
+                raise
+
+    if n_failed:
+        print(f"\n[WARN] {n_failed} of {len(recordings)} recording(s) failed; see QC status=ERROR rows.")
 
     # Aggregate from the per-subject files just written rather than from the
     # in-memory accumulators. This is the same code path --aggregate_only runs
