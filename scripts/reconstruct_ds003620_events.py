@@ -201,16 +201,25 @@ def rebuild(bids_root: Path, out_dir: Path, dry_run: bool) -> int:
         events = sorted(sub_dir.glob("eeg/*_events.tsv"))
         vhdrs = sorted(sub_dir.glob("eeg/*.vhdr"))
         epochs = sorted((bids_root / "derivatives" / "erp" / sub / "eeg").glob("*desc-window_epochs.tsv"))
-        if not (events and vhdrs and epochs):
-            print(f"{sub:10} {'-':>9} {'-':>7} {'-':>9}  missing events/vhdr/derivatives")
+        # Derivatives are needed only to RECONSTRUCT missing labels. A subject
+        # that publishes its own labels needs just the events and the header's
+        # sampling rate, so requiring derivatives here was discarding labelled
+        # subjects that are perfectly usable -- 9 subjects have no published
+        # derivatives at all.
+        if not (events and vhdrs):
+            print(f"{sub:10} {'-':>9} {'-':>7} {'-':>9}  missing events or .vhdr")
             continue
 
         try:
             dt = sampling_interval_s(vhdrs[0])
-            codes = epoch_codes(epochs[0])
         except Exception as exc:
             print(f"{sub:10} {'-':>9} {'-':>7} {'-':>9}  {type(exc).__name__}: {exc}")
             continue
+        try:
+            codes = epoch_codes(epochs[0]) if epochs else {}
+        except Exception as exc:
+            print(f"{sub:10} {'-':>9} {'-':>7} {'-':>9}  derivatives unreadable: {exc}")
+            codes = {}
 
         src = events[0]
         lines = src.read_text(encoding="utf-8").splitlines()
@@ -280,6 +289,12 @@ def rebuild(bids_root: Path, out_dir: Path, dry_run: bool) -> int:
                     encoding="utf-8",
                 )
                 total_written += 1
+            continue
+
+        if not codes:
+            print(f"{sub:10} {len(all_rows):>9} {'-':>7} {'-':>9}  "
+                  f"{len(classes):>2}/12 cells  [SKIP] no published labels and no "
+                  "derivatives — nothing to reconstruct from")
             continue
 
         # Index STIMULUS rows only. Every file carries one "empty" New Segment
