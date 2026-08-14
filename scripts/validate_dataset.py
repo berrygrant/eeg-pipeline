@@ -152,8 +152,15 @@ def check_dataset_integrity(bids_root: Path) -> dict:
     # Empty or implausibly small files are the signature of an interrupted
     # download: the path exists, so every presence check above passes, and the
     # failure only surfaces later as an unreadable recording mid-run.
-    empty, tiny = [], []
+    empty, tiny, dangling = [], [], []
     for path in sorted(bids_root.glob("sub-*/**/*")):
+        # A git-annex clone without content is the common case here: OpenNeuro's
+        # GitHub mirrors are annex repos, so `git clone` alone yields symlinks
+        # into .git/annex with nothing behind them. They are not files, so every
+        # size check below would skip them and the dataset would look complete.
+        if path.is_symlink() and not path.exists():
+            dangling.append(str(path.relative_to(bids_root)))
+            continue
         if not path.is_file():
             continue
         size = path.stat().st_size
@@ -162,6 +169,12 @@ def check_dataset_integrity(bids_root: Path) -> dict:
         elif path.suffix.lower() in {".eeg", ".fdt", ".set", ".bdf", ".edf"} and size < 4096:
             # A real continuous-EEG data file is never a few hundred bytes.
             tiny.append(f"{path.relative_to(bids_root)} ({size} B)")
+    if dangling:
+        report["errors"].append(
+            f"{len(dangling)} unresolved git-annex pointer(s) — the repository was cloned "
+            "but its content was never fetched (run `datalad get .` or `git annex get .`)"
+        )
+        report["dangling_symlinks"] = dangling[:50]
     if empty:
         report["errors"].append(f"{len(empty)} zero-byte file(s) — likely an interrupted transfer")
         report["zero_byte_files"] = empty[:50]
