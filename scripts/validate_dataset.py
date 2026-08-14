@@ -269,6 +269,19 @@ def build_participant_flow(derivatives_root: Path) -> tuple[list[dict], list[str
             }
         )
 
+    # The QC table already carries the reason; making the analyst open it to see
+    # why every recording failed defeats the point of reconciling here.
+    failed = qc.loc[~status.eq("OK")]
+    if not failed.empty and "error" in failed.columns:
+        seen: dict[str, list[str]] = {}
+        for _, row in failed.iterrows():
+            msg = str(row.get("error") or row.get("status") or "").strip()
+            if msg and msg.lower() != "nan":
+                seen.setdefault(msg, []).append(str(row.get("subject", "?")))
+        for msg, subs in list(seen.items())[:5]:
+            shown = ", ".join(subs[:4]) + (" ..." if len(subs) > 4 else "")
+            notes.append(f"{len(subs)} recording(s) [{shown}]: {msg}")
+
     ok = qc.loc[status.eq("OK")]
     ok_subjects = set(ok["subject"].astype(str))
     bearing = ok_subjects & metric_subjects
