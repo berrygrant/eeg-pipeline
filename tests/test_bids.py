@@ -128,3 +128,51 @@ def test_filter_derivative_paths_drops_non_bids_names_when_filtering():
     kept = filter_derivative_paths(paths, subjects=["01"])
     assert all("sub-01" in p.name for p in kept)
     assert len(kept) == 2
+
+
+def _touch(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("x", encoding="utf-8")
+
+
+def test_discovery_skips_bids_reserved_directories(tmp_path: Path):
+    """sourcedata/, derivatives/ and VCS internals must not be scanned.
+
+    ds003620 keeps its non-BIDS originals in sourcedata/sub-1/eeg/runabout1.vhdr;
+    scanning that raised and aborted discovery for the whole dataset. Scanning
+    derivatives/ is worse in a quieter way: it feeds the pipeline's own outputs
+    back in as though they were raw input.
+    """
+    root = tmp_path / "ds"
+    _touch(root / "sub-01/eeg/sub-01_task-oddball_run-01_eeg.vhdr")
+    _touch(root / "sourcedata/sub-1/eeg/runabout1.vhdr")
+    _touch(root / "derivatives/eeg-pipeline/sub-01/eeg/sub-01_task-oddball_run-01_desc-preproc_eeg.vhdr")
+    _touch(root / "code/scratch_eeg.vhdr")
+    _touch(root / "stimuli/tone_eeg.vhdr")
+    _touch(root / ".datalad/weird.vhdr")
+
+    recs = discover_bids_eeg_recordings(root)
+
+    assert [r.relative_raw_path for r in recs] == [
+        "sub-01/eeg/sub-01_task-oddball_run-01_eeg.vhdr"
+    ]
+
+
+def test_discovery_reports_unparseable_names_without_aborting(tmp_path: Path, capsys):
+    """One oddly named file must not cost the entire dataset.
+
+    It is still reported: inside the BIDS tree proper a non-BIDS name may be a
+    recording that should have been processed, and dropping it silently is the
+    failure this whole exercise keeps running into.
+    """
+    root = tmp_path / "ds"
+    _touch(root / "sub-01/eeg/sub-01_task-oddball_run-01_eeg.vhdr")
+    _touch(root / "sub-02/eeg/sub-02_task-oddball_run-01_eeg.vhdr")
+    _touch(root / "sub-01/eeg/stray_notes.vhdr")
+
+    recs = discover_bids_eeg_recordings(root)
+
+    assert len(recs) == 2
+    out = capsys.readouterr().out
+    assert "stray_notes.vhdr" in out
+    assert "non-BIDS names" in out

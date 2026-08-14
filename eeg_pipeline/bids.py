@@ -9,6 +9,16 @@ from typing import Any
 PIPELINE_NAME = "eeg-pipeline"
 BIDS_VERSION = "1.11.1"
 RAW_EEG_EXTENSIONS = (".vhdr", ".set")
+
+#: Directories BIDS reserves for content that is deliberately NOT BIDS-formatted,
+#: plus version-control internals. Scanning them picks up files with non-BIDS
+#: names -- ds003620 keeps its originals in sourcedata/sub-1/eeg/runabout1.vhdr --
+#: and, in the case of derivatives/, would feed the pipeline's own outputs back in
+#: as though they were raw input.
+NON_BIDS_DIRS = frozenset({
+    "sourcedata", "derivatives", "code", "stimuli",
+    ".git", ".datalad", ".annex", ".github",
+})
 ENTITY_ORDER = ("sub", "ses", "task", "acq", "run", "recording")
 DERIVATIVE_EXTENSIONS = (".fif", ".tsv", ".csv", ".parquet")
 
@@ -138,12 +148,21 @@ def discover_bids_eeg_recordings(
         files.extend(
             p
             for p in bids_root.rglob(f"*{ext}")
-            if p.is_file() and "derivatives" not in p.parts and ".git" not in p.parts
+            if p.is_file() and not (set(p.parts) & NON_BIDS_DIRS)
         )
 
     recordings: list[BIDSRecording] = []
+    unparseable: list[Path] = []
     for raw_path in sorted(files):
-        entities = parse_bids_entities(raw_path)
+        try:
+            entities = parse_bids_entities(raw_path)
+        except ValueError:
+            # Inside the BIDS tree proper (the reserved directories are already
+            # excluded above), an unparseable name is worth reporting rather than
+            # dropping quietly -- but it must not abort discovery for the whole
+            # dataset, which is what raising here used to do.
+            unparseable.append(raw_path)
+            continue
         if subject_filter and entities["sub"] not in subject_filter:
             continue
         if session_filter and entities.get("ses") not in session_filter:
@@ -153,6 +172,17 @@ def discover_bids_eeg_recordings(
         if run_filter and entities.get("run") not in run_filter:
             continue
         recordings.append(BIDSRecording(bids_root=bids_root, raw_path=raw_path, entities=entities))
+
+    if unparseable:
+        print(
+            f"[WARN] {len(unparseable)} file(s) under {bids_root} have non-BIDS names "
+            "and were skipped; they are not in a reserved directory, so check whether "
+            "they should have been processed:"
+        )
+        for path in unparseable[:10]:
+            print(f"          {path.relative_to(bids_root)}")
+        if len(unparseable) > 10:
+            print(f"          ... and {len(unparseable) - 10} more")
 
     return recordings
 

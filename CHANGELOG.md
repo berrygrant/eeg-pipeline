@@ -15,6 +15,19 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the previous behavior.
 
 ### Fixed
+- BIDS discovery scanned `sourcedata/`, which the standard reserves for original
+  data that is deliberately *not* BIDS-formatted. ds003620 keeps its originals
+  there (`sourcedata/sub-1/eeg/runabout1.vhdr`), so discovery hit a non-BIDS
+  filename and raised, aborting the run before any subject was processed. The
+  reserved directories (`sourcedata`, `derivatives`, `code`, `stimuli`) and VCS
+  internals (`.git`, `.datalad`, `.annex`) are now excluded. `derivatives/` was
+  already excluded but only by a substring test on one name; a dataset with its
+  derivatives inside the BIDS root would otherwise feed the pipeline's own
+  outputs back in as raw input.
+- One unparseable filename anywhere aborted discovery for the entire dataset.
+  Such files are now skipped and reported, with the path, so a stray file costs
+  that file rather than the run — while still being visible, since inside the
+  BIDS tree proper it may be a recording that should have been processed.
 - A config section written as a non-mapping had the user's value silently
   discarded and defaults back-filled over it. `ica: on` — the `mode:` nesting
   omitted — became `ica.mode = "off"`, so the run completed with ICA quietly
