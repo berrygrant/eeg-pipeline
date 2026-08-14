@@ -212,6 +212,58 @@ def check_dataset_integrity(bids_root: Path, subjects: list[str] | None = None) 
         elif path.suffix.lower() in {".eeg", ".fdt", ".set", ".bdf", ".edf"} and size < 4096:
             # A real continuous-EEG data file is never a few hundred bytes.
             tiny.append(f"{path.relative_to(bids_root)} ({size} B)")
+    # BIDS requires events.tsv onsets in SECONDS. ds003620 publishes sample
+    # indices, so anything reading the file to spec places every event far
+    # outside the recording -- silently, since nothing about the numbers looks
+    # wrong on its own. Checked against the BrainVision header, which states the
+    # sample count and interval directly, so this needs no EEG library.
+    onset_issues, flat_trial_types = [], []
+    for raw in raws:
+        if raw.suffix.lower() != ".vhdr":
+            continue
+        try:
+            header = raw.read_text(encoding="utf-8", errors="replace")
+            n_points = int(next(ln.split("=", 1)[1] for ln in header.splitlines()
+                                if ln.startswith("DataPoints=")))
+            interval_us = float(next(ln.split("=", 1)[1] for ln in header.splitlines()
+                                     if ln.startswith("SamplingInterval=")))
+            duration_s = n_points * interval_us / 1e6
+        except Exception:
+            continue
+        for ev in raw.parent.glob(f"{raw.name.split('_eeg')[0]}*_events.tsv"):
+            try:
+                lines = ev.read_text(encoding="utf-8").splitlines()
+                head = lines[0].split("\t")
+                rows_ = [ln.split("\t") for ln in lines[1:] if ln.strip()]
+                if not rows_ or "onset" not in head:
+                    continue
+                oi = head.index("onset")
+                onsets = [float(r[oi]) for r in rows_ if len(r) > oi and r[oi].strip()]
+                if onsets and max(onsets) > duration_s * 1.01:
+                    onset_issues.append(
+                        f"{ev.relative_to(bids_root)}: max onset {max(onsets):.0f} exceeds the "
+                        f"{duration_s:.1f}s recording — onsets appear to be SAMPLES, not seconds"
+                    )
+                if "trial_type" in head:
+                    ti = head.index("trial_type")
+                    labels = {r[ti].strip() for r in rows_ if len(r) > ti and r[ti].strip()}
+                    if len(labels) < 2:
+                        flat_trial_types.append(
+                            f"{ev.relative_to(bids_root)}: trial_type has a single value "
+                            f"{sorted(labels)} across {len(rows_)} events — no condition "
+                            "contrast can be derived from this file"
+                        )
+            except Exception:
+                continue
+    if onset_issues:
+        report["errors"].append(f"{len(onset_issues)} events file(s) with out-of-range onsets")
+        report["onset_out_of_range"] = onset_issues[:20]
+    if flat_trial_types:
+        report["errors"].append(
+            f"{len(flat_trial_types)} events file(s) carry no condition distinction"
+        )
+        report["undifferentiated_events"] = flat_trial_types[:20]
+
     if dangling:
         report["errors"].append(
             f"{len(dangling)} unresolved git-annex pointer(s) — the repository was cloned "
