@@ -51,6 +51,23 @@ ARRAY_SBATCH=()
 
 command -v sbatch >/dev/null || { echo "sbatch not found -- run this on the cluster, not your laptop." >&2; exit 1; }
 
+# The precheck below runs HERE, on the login node, with whatever environment you
+# already have active. The array runs on compute nodes, which start a fresh
+# non-login shell and inherit none of it. That asymmetry is why a run can pass
+# the precheck and then have every single task die in two seconds.
+#
+# --export=ALL propagates EEG_ENV_SETUP, and hpc/env_setup.sh evaluates it in
+# each task before importing anything. Values with commas are not safe to pass
+# through --export explicitly, which is why this relies on ALL rather than
+# naming it.
+if [[ -z "${EEG_ENV_SETUP:-}" ]]; then
+    echo "[WARN] EEG_ENV_SETUP is unset. If 'python -c \"import mne, eeg_pipeline\"'"
+    echo "       only works on this node after a module load or conda activate, every"
+    echo "       array task will fail on its preflight. Set it and resubmit:"
+    echo "         export EEG_ENV_SETUP='module load miniconda && conda activate eeg-pipeline'"
+    echo
+fi
+
 # Expand a leading ~ ourselves. Bash expands it on the command line only when
 # unquoted, so a quoted "~/scratch/ds003620" -- the natural way to write a path
 # that might contain spaces -- would otherwise arrive here as a literal tilde and

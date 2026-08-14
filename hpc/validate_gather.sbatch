@@ -33,6 +33,8 @@ export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export MPLBACKEND=Agg
 
+source "${SLURM_SUBMIT_DIR:-.}/hpc/env_setup.sh"
+
 # Memory is the binding constraint here, not CPU: the gather concatenates every
 # subject's tables and reads every evoked file to build the grand averages.
 echo "=== gather on $(hostname) ==="

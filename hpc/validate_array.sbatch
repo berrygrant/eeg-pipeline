@@ -39,6 +39,10 @@ export NUMEXPR_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 # Matplotlib must not try to reach a display on a compute node.
 export MPLBACKEND=Agg
 
+# Activate the environment and prove it works before doing anything else.
+# SLURM_SUBMIT_DIR is where sbatch was invoked, i.e. the repo root.
+source "${SLURM_SUBMIT_DIR:-.}/hpc/env_setup.sh"
+
 # Index NON-BLANK lines so a blank or trailing line cannot desynchronize the
 # task id from the subject, which would land a task on an empty string and
 # silently process nobody while reporting a task for that index.
