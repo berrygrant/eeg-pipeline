@@ -149,6 +149,26 @@ def check_dataset_integrity(bids_root: Path) -> dict:
                     if not target.exists():
                         broken_links.append(f"{raw.name} -> missing {target.name}")
 
+    # Empty or implausibly small files are the signature of an interrupted
+    # download: the path exists, so every presence check above passes, and the
+    # failure only surfaces later as an unreadable recording mid-run.
+    empty, tiny = [], []
+    for path in sorted(bids_root.glob("sub-*/**/*")):
+        if not path.is_file():
+            continue
+        size = path.stat().st_size
+        if size == 0:
+            empty.append(str(path.relative_to(bids_root)))
+        elif path.suffix.lower() in {".eeg", ".fdt", ".set", ".bdf", ".edf"} and size < 4096:
+            # A real continuous-EEG data file is never a few hundred bytes.
+            tiny.append(f"{path.relative_to(bids_root)} ({size} B)")
+    if empty:
+        report["errors"].append(f"{len(empty)} zero-byte file(s) — likely an interrupted transfer")
+        report["zero_byte_files"] = empty[:50]
+    if tiny:
+        report["errors"].append(f"{len(tiny)} implausibly small EEG data file(s)")
+        report["truncated_files"] = tiny[:50]
+
     if no_events:
         report["warnings"].append(f"{len(no_events)} recording(s) with no events.tsv")
         report["recordings_without_events"] = no_events[:50]
