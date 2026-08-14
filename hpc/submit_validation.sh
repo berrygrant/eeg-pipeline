@@ -110,6 +110,25 @@ OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 
 SUBJECT_LIST="${OUT_DIR}/subjects.txt"
 
+# Validate the config HERE, before queuing anything. The precheck below never
+# loads it through the schema -- it only snapshots the text -- so a config error
+# used to surface only inside the array, as every task exiting 1 in about the
+# time it takes to import mne, with the reason in a per-task .err file. That
+# failure is indistinguishable at a glance from a missing environment or an
+# out-of-memory kill, and it costs a full submit cycle to tell them apart.
+echo "== config check =="
+python - "$CONFIG" "$BIDS_ROOT" "${OUT_DIR}/derivatives" <<'PY' || {
+import sys
+from eeg_pipeline.config import load_config
+cfg, bids, derivs = sys.argv[1], sys.argv[2], sys.argv[3]
+load_config(cfg, overrides={"paths": {"bids_root": bids, "derivatives_root": derivs}})
+print("  config loads and validates")
+PY
+    echo "[FAIL] the config is rejected by the schema. Every array task would have" >&2
+    echo "       failed identically. Fix the config before submitting." >&2
+    exit 1
+}
+
 echo "== precheck (gates 0-1) =="
 python scripts/validate_dataset.py \
     --stage precheck \
