@@ -31,10 +31,23 @@ SLURM_ACCOUNT="${SLURM_ACCOUNT:-}"
 SLURM_PARTITION="${SLURM_PARTITION:-}"
 SLURM_MAIL_USER="${SLURM_MAIL_USER:-}"
 
+# Per-task resources. The #SBATCH lines in validate_array.sbatch are the
+# defaults; these override them on the command line, which SLURM honours over
+# the in-file directives. Raise them when tasks come back OUT_OF_MEMORY or
+# TIMEOUT rather than editing the template.
+VALIDATE_TIME="${VALIDATE_TIME:-}"
+VALIDATE_MEM="${VALIDATE_MEM:-}"
+VALIDATE_CPUS="${VALIDATE_CPUS:-}"
+
 EXTRA_SBATCH=()
 [[ -n "$SLURM_ACCOUNT"   ]] && EXTRA_SBATCH+=(--account="$SLURM_ACCOUNT")
 [[ -n "$SLURM_PARTITION" ]] && EXTRA_SBATCH+=(--partition="$SLURM_PARTITION")
 [[ -n "$SLURM_MAIL_USER" ]] && EXTRA_SBATCH+=(--mail-user="$SLURM_MAIL_USER" --mail-type=END,FAIL)
+
+ARRAY_SBATCH=()
+[[ -n "$VALIDATE_TIME" ]] && ARRAY_SBATCH+=(--time="$VALIDATE_TIME")
+[[ -n "$VALIDATE_MEM"  ]] && ARRAY_SBATCH+=(--mem="$VALIDATE_MEM")
+[[ -n "$VALIDATE_CPUS" ]] && ARRAY_SBATCH+=(--cpus-per-task="$VALIDATE_CPUS")
 
 command -v sbatch >/dev/null || { echo "sbatch not found -- run this on the cluster, not your laptop." >&2; exit 1; }
 
@@ -108,7 +121,7 @@ echo "  out-dir:    ${OUT_DIR}"
 
 ARRAY_JOBID="$(
     sbatch --parsable \
-        "${EXTRA_SBATCH[@]}" \
+        "${EXTRA_SBATCH[@]}" "${ARRAY_SBATCH[@]}" \
         --array="0-$((N_SUBJECTS - 1))%${MAX_CONCURRENT}" \
         --export=ALL,CONFIG="$CONFIG",BIDS_ROOT="$BIDS_ROOT",OUT_DIR="$OUT_DIR",SUBJECT_LIST="$SUBJECT_LIST" \
         hpc/validate_array.sbatch
