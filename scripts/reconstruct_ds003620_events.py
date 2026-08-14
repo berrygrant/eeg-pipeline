@@ -98,31 +98,45 @@ def check_alignment(coded: list[tuple[int, float, int]], all_onsets_s: list[floa
     if len(coded) < 50 or len(all_onsets_s) < 50:
         return True, "too few events to test"
 
-    isis = [b - a for a, b in zip(sorted(all_onsets_s), sorted(all_onsets_s)[1:], strict=False) if b > a]
-    if not isis:
+    # Rank the raw inter-trigger gaps rather than thresholding them. An earlier
+    # version required a seam to exceed 10x the median ISI, which assumed long
+    # pauses between blocks; this dataset has none (median ISI 0.56s, no
+    # transition above 5.6s), so that test failed every subject including ones at
+    # 99.9% coverage. Whatever separates the blocks, it should still be among the
+    # LARGEST gaps present -- an assumption about rank, not magnitude.
+    onsets = sorted(all_onsets_s)
+    gaps = [(onsets[i + 1] - onsets[i], i) for i in range(len(onsets) - 1)]
+    if not gaps:
         return True, "no usable intervals"
-    isis_sorted = sorted(isis)
-    median_isi = isis_sorted[len(isis_sorted) // 2]
+    median_isi = sorted(g for g, _ in gaps)[len(gaps) // 2]
 
-    transitions = []
-    for (_, t_prev, c_prev), (_, t_now, c_now) in zip(coded, coded[1:], strict=False):
-        # Codes are stim*100 + task*10 + environ, so the block identity is the
-        # low two digits. Using the high digit instead would count every
-        # Standard->Deviant switch as a block change.
+    # Transition points, as indices into the raw trigger sequence.
+    transitions: list[int] = []
+    for (i_prev, _, c_prev), (_, _, c_now) in zip(coded, coded[1:], strict=False):
+        # Codes are stim*100 + task*10 + environ, so block identity is the low
+        # two digits; the high digit alone would count every Standard->Deviant
+        # switch as a block change.
         if (c_prev % 100) != (c_now % 100):
-            transitions.append(t_now - t_prev)
+            transitions.append(i_prev - 1)  # 0-based index of the gap that follows
 
     if not transitions:
         return False, "no block transitions found — expected 5 for a 6-block design"
 
-    # A seam should be conspicuous: an order of magnitude beyond a normal ISI is
-    # a deliberately loose bar, so this flags real misalignment rather than noise.
-    threshold = max(median_isi * 10, median_isi + 5.0)
-    on_seam = sum(1 for gap in transitions if gap >= threshold)
-    passed = on_seam >= len(transitions) - 1  # tolerate one ambiguous seam
+    # Are the transitions among the largest gaps? Take a generous candidate pool
+    # (4x the number of seams) so the test flags a genuine shift rather than
+    # ordinary jitter in which gap is biggest.
+    n = len(transitions)
+    largest = {i for _, i in sorted(gaps, reverse=True)[: max(n * 4, 20)]}
+    hits = sum(1 for t in transitions if any(abs(t - li) <= 2 for li in largest))
+    passed = hits >= n - 1
+    ranks = []
+    order = {i: r for r, (_, i) in enumerate(sorted(gaps, reverse=True))}
+    for t in transitions:
+        best = min((order.get(t + d, 10**9) for d in (-2, -1, 0, 1, 2)), default=10**9)
+        ranks.append(best if best < 10**9 else -1)
     detail = (
-        f"{on_seam}/{len(transitions)} block transitions on a long gap "
-        f"(median ISI {median_isi:.2f}s, threshold {threshold:.1f}s)"
+        f"{hits}/{n} transitions at a top-ranked gap "
+        f"(gap ranks {ranks}, median ISI {median_isi:.2f}s)"
     )
     return passed, detail
 
