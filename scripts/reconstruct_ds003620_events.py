@@ -187,6 +187,7 @@ def rebuild(bids_root: Path, out_dir: Path, dry_run: bool) -> int:
     total_written = 0
     skipped_alignment: list[str] = []
     already_labelled: list[str] = []
+    disagreeing: list[str] = []
     print(f"{'subject':10} {'triggers':>9} {'coded':>7} {'coverage':>9}  cells      alignment")
     print("-" * 104)
     for sub_dir in subjects:
@@ -219,9 +220,59 @@ def rebuild(bids_root: Path, out_dir: Path, dry_run: bool) -> int:
         if ti is not None:
             classes = {r[ti].strip() for r in all_rows if len(r) > ti} - {"", "empty"}
         if len(classes) >= 10:
-            print(f"{sub:10} {len(all_rows):>9} {'-':>7} {'-':>9}  "
-                  f"{len(classes):>2}/12 cells  [SKIP] already labelled — left untouched")
+            # These subjects need no reconstruction -- their labels are correct as
+            # published. They still need REPAIR: onsets are sample indices where
+            # BIDS requires seconds, so read to spec every event lands outside the
+            # recording. Rewrite using the subject's OWN labels, converting the
+            # onsets and adding the numeric `value` column the pipeline reads.
+            repaired = []
+            for r in all_rows:
+                if ti is None or len(r) <= ti:
+                    continue
+                label = r[ti].strip()
+                if label not in LABEL_TO_CODE:
+                    continue  # the lone "empty" New Segment marker
+                try:
+                    sample = int(float(r[oi].strip()))
+                except ValueError:
+                    continue
+                code = LABEL_TO_CODE[label]
+                stim, task, env = CODE_LEVELS[code]
+                repaired.append(
+                    f"{sample * dt:.6f}\t0.0\t{sample}\t{stim}\t{code}\t{task}\t{env}"
+                )
+            # Cross-check against the derivatives where they exist. This is the
+            # measurement that caught the off-by-one, so it runs even though these
+            # subjects need no reconstruction.
+            hit, tot = verify_against_published(
+                [r for r in all_rows if len(r) > ti and r[ti].strip() != "empty"], ti, codes
+            )
+            pct = (hit / tot * 100) if tot else None
+            agree = f"{pct:.2f}%" if pct is not None else "no derivative"
+            # Exactly 100%, or not at all. Anything less means the labels and the
+            # derivatives disagree about which trial is which, and there is no
+            # way to tell from here which of the two is right. sub-24 sits at
+            # 67.76% -- resolvable only per-subject, not by a global rule.
+            trustworthy = pct is None or pct >= 99.999
+            if not trustworthy:
+                print(f"{sub:10} {len(all_rows):>9} {len(repaired):>7} {'published':>9}  "
+                      f"{len(classes):>2}/12 cells  [HOLD] labels disagree with derivatives "
+                      f"({agree}) — not written, needs individual review")
+                disagreeing.append(sub)
+                continue
+            print(f"{sub:10} {len(all_rows):>9} {len(repaired):>7} {'published':>9}  "
+                  f"{len(classes):>2}/12 cells  [REPAIR] own labels, onsets->seconds; "
+                  f"derivative agreement {agree}")
             already_labelled.append(sub)
+            if not dry_run and repaired:
+                dest = out_dir / sub / "eeg" / src.name
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(
+                    "onset\tduration\tsample\ttrial_type\tvalue\ttask_condition\tenvironment\n"
+                    + "\n".join(repaired) + "\n",
+                    encoding="utf-8",
+                )
+                total_written += 1
             continue
 
         # Index STIMULUS rows only. Every file carries one "empty" New Segment
@@ -274,6 +325,11 @@ def rebuild(bids_root: Path, out_dir: Path, dry_run: bool) -> int:
                 encoding="utf-8",
             )
             total_written += 1
+
+    if disagreeing:
+        print(f"\n[HOLD] {len(disagreeing)} subject(s) whose published labels disagree with "
+              f"their own derivatives: {disagreeing}")
+        print("       Neither source can be assumed correct from here; resolve per subject.")
 
     if skipped_alignment:
         print(
