@@ -183,13 +183,17 @@ def check_dataset_integrity(bids_root: Path, subjects: list[str] | None = None) 
             try:
                 text = raw.read_text(encoding="utf-8", errors="replace")
             except Exception as exc:  # pragma: no cover - defensive
-                broken_links.append(f"{raw.name}: unreadable ({exc})")
+                broken_links.append(f"{raw.relative_to(bids_root)}: unreadable ({exc})")
                 continue
             for line in text.splitlines():
                 if line.startswith(("DataFile=", "MarkerFile=")):
                     target = raw.parent / line.split("=", 1)[1].strip()
                     if not target.exists():
-                        broken_links.append(f"{raw.name} -> missing {target.name}")
+                        # Path relative to the root, not the bare filename, so the
+                        # finding can be attributed back to a subject.
+                        broken_links.append(
+                            f"{raw.relative_to(bids_root)} -> missing {target.name}"
+                        )
 
     # Empty or implausibly small files are the signature of an interrupted
     # download: the path exists, so every presence check above passes, and the
@@ -283,6 +287,33 @@ def check_dataset_integrity(bids_root: Path, subjects: list[str] | None = None) 
     if broken_links:
         report["errors"].append(f"{len(broken_links)} broken BrainVision link(s)")
         report["broken_links"] = broken_links[:50]
+
+    # Attribute each blocking finding to the subject it belongs to.
+    #
+    # Without this, --allow-integrity-warnings is all-or-nothing: it waves through
+    # every error at once, including the ones that make a recording actively
+    # misleading rather than merely absent. A file whose onsets are in samples
+    # still epochs, still yields an evoked, and still lands a row in the metrics
+    # table -- it is just wrong, and nothing downstream can tell. Excluding those
+    # subjects by name and recording why keeps the flow accounting honest.
+    blocking: dict[str, list[str]] = {}
+    for reason, entries in (
+        ("onsets in samples, not seconds", onset_issues),
+        ("no condition distinction in trial_type", flat_trial_types),
+        ("broken BrainVision link", broken_links),
+        ("truncated data file", tiny),
+        ("zero-byte file", empty),
+        ("unfetched git-annex pointer", dangling),
+    ):
+        for entry in entries:
+            head = entry.split(":", 1)[0].split(" -> ", 1)[0].strip()
+            parts = Path(head).parts
+            if not parts or not parts[0].startswith("sub-"):
+                continue
+            blocking.setdefault(parts[0], [])
+            if reason not in blocking[parts[0]]:
+                blocking[parts[0]].append(reason)
+    report["blocking_subjects"] = {k: blocking[k] for k in sorted(blocking)}
     return report
 
 
@@ -429,17 +460,41 @@ def main(argv: list[str] | None = None) -> int:
     for key in ("errors", "warnings"):
         for item in integrity[key]:
             print(f"  [{key[:-1].upper()}] {item}")
+    # Counts alone send the analyst to open the JSON to learn which files. Naming
+    # them here is the whole point of the gate.
+    for detail_key in ("onset_out_of_range", "undifferentiated_events", "broken_links",
+                       "truncated_files", "zero_byte_files", "dangling_symlinks"):
+        for entry in integrity.get(detail_key, [])[:10]:
+            print(f"      - {entry}")
     print(f"  counts: {integrity['counts']}")
+
+    blocking = integrity.get("blocking_subjects", {})
+    if blocking:
+        print(f"  {len(blocking)} subject(s) carry blocking findings:")
+        for sub, reasons in blocking.items():
+            print(f"      {sub}: {'; '.join(reasons)}")
+
     if integrity["errors"] and not args.allow_integrity_warnings:
         print("[FAIL] Gate 1: integrity errors. Fix them, or pass "
-              "--allow-integrity-warnings to proceed and document them.", file=sys.stderr)
+              "--allow-integrity-warnings to proceed. Affected subjects are then "
+              "EXCLUDED by name and recorded in excluded_subjects.json, not "
+              "processed anyway.", file=sys.stderr)
         (out / "run_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         return 1
 
     if args.stage == "precheck":
         subject_list = args.subject_list or (out / "subjects.txt")
         subject_list.parent.mkdir(parents=True, exist_ok=True)
-        subjects = sorted(p.name for p in args.bids_root.glob("sub-*") if p.is_dir())
+        found = sorted(p.name for p in args.bids_root.glob("sub-*") if p.is_dir())
+        # Gate 1 already established which subjects cannot be interpreted. Queuing
+        # them anyway would spend hours of cluster time producing output that is
+        # wrong rather than missing, which is the harder failure to notice.
+        subjects = [s for s in found if s not in blocking]
+        excluded = {s: blocking[s] for s in found if s in blocking}
+        (out / "excluded_subjects.json").write_text(
+            json.dumps(excluded, indent=2), encoding="utf-8"
+        )
+        manifest["Execution"]["excluded_subjects"] = excluded
         # No trailing blank line: hpc/submit.sh sizes the array by non-blank line
         # count and slurm_array.sbatch indexes non-blank lines, so the two agree
         # either way, but an exact file is easier to eyeball.
@@ -447,7 +502,15 @@ def main(argv: list[str] | None = None) -> int:
         manifest["Execution"]["ended_at"] = datetime.now(timezone.utc).isoformat()
         manifest["Execution"]["stage"] = "precheck"
         (out / "run_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        print(f"  wrote {len(subjects)} subject label(s) -> {subject_list}")
+        if excluded:
+            print(f"  excluded {len(excluded)} subject(s) on Gate 1 findings "
+                  f"-> excluded_subjects.json")
+            for sub, reasons in excluded.items():
+                print(f"      {sub}: {'; '.join(reasons)}")
+        print(f"  wrote {len(subjects)} of {len(found)} subject label(s) -> {subject_list}")
+        if not subjects:
+            print("[FAIL] every subject was excluded; nothing to submit.", file=sys.stderr)
+            return 1
         print("\nPrecheck passed. Submit the array, then run --stage package.")
         return 0
 
