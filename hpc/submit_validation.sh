@@ -115,20 +115,23 @@ ARRAY_JOBID="$(
 )"
 echo "  array job:  ${ARRAY_JOBID}"
 
+# afterany, NOT afterok. Over real archival data some subjects are expected to
+# fail -- a broken BrainVision link, events with no usable codes -- and naming
+# them is the deliverable, not an accident. Under afterok a single such subject
+# leaves the gather permanently PENDING as DependencyNeverSatisfied and produces
+# nothing at all, which is the least informative possible outcome. The gather
+# tolerates partial input by design and exits non-zero if NOTHING landed, so a
+# genuinely systemic failure still reads as a failure.
 GATHER_JOBID="$(
     sbatch --parsable \
         "${EXTRA_SBATCH[@]}" \
-        --dependency="afterok:${ARRAY_JOBID}" \
+        --dependency="afterany:${ARRAY_JOBID}" \
         --export=ALL,CONFIG="$CONFIG",BIDS_ROOT="$BIDS_ROOT",OUT_DIR="$OUT_DIR",DATASET_ID="$DATASET_ID",DATASET_VERSION="$DATASET_VERSION" \
         hpc/validate_gather.sbatch
 )"
-echo "  gather job: ${GATHER_JOBID} (runs only if every array task succeeds)"
+echo "  gather job: ${GATHER_JOBID} (runs once the array finishes, pass or fail)"
 echo
 echo "Watch:    squeue -u \$USER"
 echo "Package:  ${OUT_DIR}"
 echo
-echo "If some array tasks fail, the gather will not run. Aggregate what landed with:"
-echo "  CONFIG='$CONFIG' BIDS_ROOT='$BIDS_ROOT' OUT_DIR='$OUT_DIR' \\"
-echo "    DATASET_ID='$DATASET_ID' DATASET_VERSION='$DATASET_VERSION' \\"
-echo "    sbatch ${EXTRA_SBATCH[*]} hpc/validate_gather.sbatch"
-echo "participant_flow.csv will then name exactly who is missing."
+echo "participant_flow.csv will name every subject that did not make it, and why."

@@ -4,14 +4,15 @@
 # Runs --aggregate_only over whatever the array produced, then reconciles the
 # participant flow and writes the evidence package (gates 3 and 5).
 #
-# Chained by hpc/submit_validation.sh with afterok, so it runs only if every
-# array task succeeded. If some tasks failed and you would rather aggregate what
-# did land, run it by hand:
+# Chained by hpc/submit_validation.sh with afterany, so it runs once the array
+# finishes whether or not every task succeeded. That is deliberate: subjects that
+# cannot be processed are a finding to report, not a reason to withhold the
+# report. Aggregation overwrites its outputs, so re-running is safe, and it exits
+# non-zero if nothing at all landed.
+#
+# To re-package an existing run by hand:
 #
 #   CONFIG=... BIDS_ROOT=... OUT_DIR=... sbatch hpc/validate_gather.sbatch
-#
-# That is safe: aggregation overwrites its outputs and the participant-flow table
-# will show exactly who is missing.
 #SBATCH --job-name=eeg-validate-gather
 #SBATCH --output=logs/validate-gather-%j.out
 #SBATCH --error=logs/validate-gather-%j.err

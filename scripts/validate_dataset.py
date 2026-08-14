@@ -558,6 +558,18 @@ sensitivity estimates side by side&gt;
                  "pipeline_run.log", "participant_flow.csv", "validation_statement.md"):
         p = out / name
         print(f"  {'OK ' if p.exists() else '-- '} {name}")
+
+    # A partial run is a legitimate result -- the flow table says who is missing.
+    # No run at all is not: with no QC table there is nothing to reconcile, and
+    # returning 0 here would present an empty directory as a finished package.
+    if not flow:
+        print(
+            "\n[FAIL] no QC rows: not one recording was processed. This is a "
+            "systemic failure, not per-subject exclusions -- check the array task "
+            "logs (logs/validate-*_*.err) before re-running.",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

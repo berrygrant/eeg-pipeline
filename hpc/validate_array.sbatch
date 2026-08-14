@@ -32,8 +32,8 @@ export NUMEXPR_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export MPLBACKEND=Agg
 
 # Index NON-BLANK lines so a blank or trailing line cannot desynchronize the
-# task id from the subject, which would land a task on an empty string, exit
-# non-zero, and make the afterok-chained gather unsatisfiable.
+# task id from the subject, which would land a task on an empty string and
+# silently process nobody while reporting a task for that index.
 SUBJECT="$(grep -v '^[[:space:]]*$' "$SUBJECT_LIST" | sed -n "$((SLURM_ARRAY_TASK_ID + 1))p")"
 if [[ -z "$SUBJECT" ]]; then
     echo "No subject at index ${SLURM_ARRAY_TASK_ID} of $SUBJECT_LIST" >&2
