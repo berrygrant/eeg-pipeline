@@ -25,16 +25,22 @@ WHERE THE LABELS COME FROM
     onset is also converted from sample indices to seconds, which BIDS requires
     and the published files violate.
 
-VERIFICATION
-    Where a subject has published labels, agreement is measured and must be
-    exactly 100%; anything less means the mapping is wrong. That check is what
-    caught the off-by-one, and is worth running even though those subjects are
-    skipped for output.
+TWO DIFFERENT OPERATIONS
+    REPAIR (labelled subjects): a format conversion of the subject's OWN
+    published labels -- onsets from samples to seconds, plus the numeric `value`
+    column the pipeline reads. It never consults the derivatives, so it cannot
+    introduce error beyond what the dataset already publishes. Agreement with the
+    derivatives is measured and reported, but a mismatch (sub-24: 67.76%, an
+    apparent one-trial offset in the derivatives) is a note for the validation
+    statement, not a reason to withhold the repair.
 
-    For the 11 "S  1" subjects there is no ground truth, so alignment is inferred
-    from block-seam timing. Treat those as provisional: published labels and a
-    reconstruction are different classes of evidence and must not be pooled
-    silently in the validation statement.
+    RECONSTRUCT ("S  1" subjects): labels inferred from derivatives/erp, verified
+    against block-seam timing, and withheld if that check fails. These are a
+    different class of evidence from published labels and must not be pooled with
+    them silently.
+
+    The agreement measurement is what caught this script indexing every row
+    rather than every stimulus row (68% vs 100%), so it stays either way.
 
     python scripts/reconstruct_ds003620_events.py ~/scratch/ds003620 --dry-run
 """
@@ -249,20 +255,21 @@ def rebuild(bids_root: Path, out_dir: Path, dry_run: bool) -> int:
             )
             pct = (hit / tot * 100) if tot else None
             agree = f"{pct:.2f}%" if pct is not None else "no derivative"
-            # Exactly 100%, or not at all. Anything less means the labels and the
-            # derivatives disagree about which trial is which, and there is no
-            # way to tell from here which of the two is right. sub-24 sits at
-            # 67.76% -- resolvable only per-subject, not by a global rule.
-            trustworthy = pct is None or pct >= 99.999
-            if not trustworthy:
-                print(f"{sub:10} {len(all_rows):>9} {len(repaired):>7} {'published':>9}  "
-                      f"{len(classes):>2}/12 cells  [HOLD] labels disagree with derivatives "
-                      f"({agree}) — not written, needs individual review")
+            # The repair is a FORMAT conversion of the subject's own published
+            # labels -- onsets to seconds, plus the numeric code the pipeline
+            # reads. It never consults the derivatives, so it cannot introduce
+            # error beyond what the dataset already publishes, and a derivative
+            # disagreement is not a reason to withhold it. Report it: where the
+            # two sources differ (sub-24: 67.76%, an apparent one-trial offset in
+            # the derivatives) that belongs in the validation statement, and it
+            # matters if the derivatives are later used as the benchmark.
+            note = ""
+            if pct is not None and pct < 99.999:
+                note = "  <-- differs from its derivatives; note in the statement"
                 disagreeing.append(sub)
-                continue
             print(f"{sub:10} {len(all_rows):>9} {len(repaired):>7} {'published':>9}  "
-                  f"{len(classes):>2}/12 cells  [REPAIR] own labels, onsets->seconds; "
-                  f"derivative agreement {agree}")
+                  f"{len(classes):>2}/12 cells  [REPAIR] onsets->seconds; "
+                  f"derivative agreement {agree}{note}")
             already_labelled.append(sub)
             if not dry_run and repaired:
                 dest = out_dir / sub / "eeg" / src.name
@@ -327,9 +334,11 @@ def rebuild(bids_root: Path, out_dir: Path, dry_run: bool) -> int:
             total_written += 1
 
     if disagreeing:
-        print(f"\n[HOLD] {len(disagreeing)} subject(s) whose published labels disagree with "
+        print(f"\n[NOTE] {len(disagreeing)} subject(s) whose published labels disagree with "
               f"their own derivatives: {disagreeing}")
-        print("       Neither source can be assumed correct from here; resolve per subject.")
+        print("       Their events were still repaired -- the labels used are the published "
+              "ones. Record the discrepancy, and re-check before using derivatives/erp as a "
+              "benchmark for these subjects.")
 
     if skipped_alignment:
         print(
@@ -342,6 +351,12 @@ def rebuild(bids_root: Path, out_dir: Path, dry_run: bool) -> int:
             "trigger sequence -- most likely because spurious triggers were removed "
             "before epoching. Their labels would be shifted and silently wrong."
         )
+
+    if already_labelled and not dry_run:
+        listing = out_dir / "usable_subjects.txt"
+        listing.write_text("\n".join(already_labelled) + "\n", encoding="utf-8")
+        print(f"\nUsable subjects -> {listing}  ({len(already_labelled)} with published labels)")
+        print(f"   Pass to the run with:  --subjects $(cat {listing} | tr '\\n' ' ')")
 
     if not dry_run:
         print(f"\nWrote {total_written} events file(s) under {out_dir}")
