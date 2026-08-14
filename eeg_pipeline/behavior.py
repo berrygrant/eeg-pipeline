@@ -212,9 +212,22 @@ def extract_codes_from_bids_events(
                 "Provide a numeric events column such as 'value' or a matching events.condition_map."
             ) from exc
 
+    # Report what the file actually has. Without it the analyst has to go open
+    # the events.tsv to work out which of the two remedies applies -- supply a
+    # numeric column, or map the labels they already have.
+    found = list(events_df.columns)
+    hint = (
+        f" Found columns: {found}."
+        + (
+            f" 'trial_type' is present, so set events.condition_map to map its labels "
+            f"(e.g. {sorted(set(events_df['trial_type'].dropna().astype(str)))[:6]}) to codes."
+            if "trial_type" in events_df.columns
+            else ""
+        )
+    )
     raise ValueError(
         "BIDS events must include a numeric code column "
-        f"({', '.join(BIDS_CODE_COLUMNS)}) or trial_type labels plus events.condition_map."
+        f"({', '.join(BIDS_CODE_COLUMNS)}) or trial_type labels plus events.condition_map.{hint}"
     )
 
 
