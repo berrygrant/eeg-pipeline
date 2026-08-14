@@ -1,36 +1,42 @@
 #!/usr/bin/env python3
-"""Rebuild BIDS-compliant events.tsv for ds003620 from its published derivatives.
+"""Rebuild BIDS events.tsv for the ds003620 subjects whose labels are missing.
 
-ds003620's events.tsv is unusable as published, in two independent ways:
+SCOPE - this applies to a MINORITY of the dataset. Of 43 subjects with events:
 
-* ``trial_type`` is the single value ``S  1`` for every event, so no condition
-  contrast can be derived. The original ``.vmrk`` markers are identical, so the
-  trigger stream never carried condition identity -- this is what the source
-  workflow's "manual trigger cleanup" was reconstructing.
-* ``onset`` holds sample indices, where BIDS requires seconds. Read to spec,
-  every event lands far outside the recording.
+  * 31 already ship the full 12-class vocabulary (ntDontcount_lab, t_count_oval,
+    ...). They are correct as distributed and are SKIPPED, never rewritten.
+  *  1 (sub-09) carries target/non_target only - stimulus but no task/environment.
+  * 11 (sub-01..08, 17, 25, 30) carry the single value "S  1" and no condition
+    information at all. Those are the only candidates for reconstruction.
 
-The dataset's own ``derivatives/erp/**/desc-window_epochs.tsv`` carries the
-answer: a ``code`` per epoch drawn from the 2x3x2 design (stimulus x environment
-x instruction), and an ``epoch`` ordinal that is the position within the *original*
-trigger sequence -- verified by the ordinals having gaps where epochs were
-rejected (sub-01: 3682 distinct values reaching 4494). So epoch N identifies
-trigger N, and the codes can be attached to the trigger onsets.
+An earlier version inspected one subject, found uniform "S  1", and treated that
+as a property of the dataset. It then rewrote all 43 - which would have replaced
+31 subjects' published ground truth with a reconstruction.
 
-    python scripts/reconstruct_ds003620_events.py ~/scratch/ds003620 --out-dir ~/scratch/ds003620_events
+WHERE THE LABELS COME FROM
+    derivatives/erp/**/desc-window_epochs.tsv carries a `code` per epoch from the
+    2x3x2 design, and an `epoch` ordinal indexing the original stimulus sequence.
 
-Writes a mirror of ``sub-*/eeg/*_events.tsv`` under --out-dir rather than editing
-the dataset, which is a datalad clone. Apply them with the printed command once
-the coverage report looks right.
+    Indexing is over STIMULUS rows, not all rows. Every events.tsv carries one
+    "empty" New Segment marker at onset 1; counting it as a trigger shifts every
+    code by one. Measured against the ground-truth subjects, that scored 68%
+    agreement - chance, for an 80/20 oddball - versus 100% once excluded.
 
-WHAT THIS INHERITS
-    Only triggers that survived the authors' epoch rejection carry a code, so a
-    reconstructed file covers ~82% of triggers for sub-01. Labelling is therefore
-    downstream of their rejection decisions, even though this pipeline still
-    applies its own artifact rejection afterwards. That is a real limitation to
-    record in the validation statement: it is not a fully independent analysis.
-    Reconstructing from sourcedata/sub-N/behav/subject-N.csv would avoid it, and
-    can be checked against this output, which is authoritative where it exists.
+    onset is also converted from sample indices to seconds, which BIDS requires
+    and the published files violate.
+
+VERIFICATION
+    Where a subject has published labels, agreement is measured and must be
+    exactly 100%; anything less means the mapping is wrong. That check is what
+    caught the off-by-one, and is worth running even though those subjects are
+    skipped for output.
+
+    For the 11 "S  1" subjects there is no ground truth, so alignment is inferred
+    from block-seam timing. Treat those as provisional: published labels and a
+    reconstruction are different classes of evidence and must not be pooled
+    silently in the validation statement.
+
+    python scripts/reconstruct_ds003620_events.py ~/scratch/ds003620 --dry-run
 """
 from __future__ import annotations
 
@@ -53,6 +59,37 @@ CODE_LEVELS: dict[int, tuple[str, str, str]] = {
     222: ("Deviant", "Count", "Oval"),
     223: ("Deviant", "Count", "Campus"),
 }
+
+
+#: The published trial_type vocabulary, for the subjects that carry it.
+LABEL_TO_CODE: dict[str, int] = {
+    "ntDontcount_lab": 111, "ntDontcount_oval": 112, "ntDontcount_campus": 113,
+    "ntcount_lab": 121, "ntcount_oval": 122, "ntcount_campus": 123,
+    "t_Dontcount_lab": 211, "t_Dontcount_oval": 212, "t_Dontcount_campus": 213,
+    "t_count_lab": 221, "t_count_oval": 222, "t_count_campus": 223,
+}
+
+
+def verify_against_published(
+    stim_rows: list[list[str]], ti: int, codes: dict[int, int]
+) -> tuple[int, int]:
+    """Agreement between derivative codes and already-published labels.
+
+    Only 11 of 43 subjects have the undifferentiated "S  1" events; the other 31
+    ship the full 12-class vocabulary. Those subjects are ground truth, and
+    checking against them is what turns the epoch-to-trigger mapping from an
+    assumption into a measurement. It is also what caught this script indexing
+    every row rather than every stimulus row.
+    """
+    hit = tot = 0
+    for epoch, code in codes.items():
+        j = epoch - 1
+        if 0 <= j < len(stim_rows):
+            label = stim_rows[j][ti].strip()
+            if label in LABEL_TO_CODE:
+                tot += 1
+                hit += LABEL_TO_CODE[label] == code
+    return hit, tot
 
 
 def sampling_interval_s(vhdr: Path) -> float:
@@ -149,6 +186,7 @@ def rebuild(bids_root: Path, out_dir: Path, dry_run: bool) -> int:
 
     total_written = 0
     skipped_alignment: list[str] = []
+    already_labelled: list[str] = []
     print(f"{'subject':10} {'triggers':>9} {'coded':>7} {'coverage':>9}  cells      alignment")
     print("-" * 104)
     for sub_dir in subjects:
@@ -171,7 +209,26 @@ def rebuild(bids_root: Path, out_dir: Path, dry_run: bool) -> int:
         lines = src.read_text(encoding="utf-8").splitlines()
         head = lines[0].split("\t")
         oi = head.index("onset")
-        rows = [ln.split("\t") for ln in lines[1:] if ln.strip()]
+        ti = head.index("trial_type") if "trial_type" in head else None
+        all_rows = [ln.split("\t") for ln in lines[1:] if ln.strip()]
+
+        # Subjects that already carry the published labels must never be
+        # rewritten: their events are correct as distributed, and overwriting
+        # them would substitute a reconstruction for ground truth.
+        classes = set()
+        if ti is not None:
+            classes = {r[ti].strip() for r in all_rows if len(r) > ti} - {"", "empty"}
+        if len(classes) >= 10:
+            print(f"{sub:10} {len(all_rows):>9} {'-':>7} {'-':>9}  "
+                  f"{len(classes):>2}/12 cells  [SKIP] already labelled — left untouched")
+            already_labelled.append(sub)
+            continue
+
+        # Index STIMULUS rows only. Every file carries one "empty" New Segment
+        # marker at onset 1; counting it as a trigger shifts every code by one,
+        # which measured 68% agreement against ground truth -- chance, for an
+        # 80/20 oddball -- versus 100% when it is excluded.
+        rows = [r for r in all_rows if ti is None or (len(r) > ti and r[ti].strip() != "empty")]
 
         out_rows, seen, coded, all_onsets = [], set(), [], []
         trigger_index = 0

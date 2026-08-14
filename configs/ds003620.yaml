@@ -63,10 +63,15 @@ events:
   # "code" Levels: nt/t = non-target/target (Standard/Deviant), Dontcount/count
   # = Ignore/Count, and lab/oval/campus = environment.
   #
-  # These are NOT in the published events.tsv, whose trial_type is the single
-  # value "S  1" for all 4503 events -- nor in the original .vmrk. Run
-  # scripts/reconstruct_ds003620_events.py first to produce events files that
-  # carry them (and that express onsets in seconds rather than samples).
+  # 31 of 43 subjects publish these labels directly in events.tsv trial_type and
+  # need nothing further. 11 (sub-01..08, 17, 25, 30) carry only "S  1" and have
+  # no condition information; sub-09 has stimulus but no task/environment.
+  #
+  # Those 12 cannot currently be recovered -- see
+  # scripts/reconstruct_ds003620_events.py, which refuses to guess -- so a run
+  # today covers the 31 labelled subjects. Note also that every published
+  # events.tsv states onsets in SAMPLES where BIDS requires seconds, so they must
+  # be converted before use.
   standard_codes: [111, 112, 113, 121, 122, 123]
   deviant_codes: [211, 212, 213, 221, 222, 223]
   behavioral_keep_codes: [111, 112, 113, 121, 122, 123, 211, 212, 213, 221, 222, 223]
