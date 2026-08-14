@@ -99,7 +99,13 @@ def build_run_manifest(args, config_text: str, started_at: str) -> dict:
 # ---------------------------------------------------------------------------
 # Gate 1 - dataset integrity
 # ---------------------------------------------------------------------------
-def check_dataset_integrity(bids_root: Path) -> dict:
+def _normalize_label(label: str) -> str:
+    """Compare subject labels ignoring zero-padding (sub-1 vs sub-01)."""
+    body = label[4:] if label.startswith("sub-") else label
+    return f"sub-{body.lstrip('0') or '0'}" if body.isdigit() else label
+
+
+def check_dataset_integrity(bids_root: Path, subjects: list[str] | None = None) -> dict:
     report: dict = {"errors": [], "warnings": [], "counts": {}}
     if not bids_root.is_dir():
         report["errors"].append(f"BIDS root does not exist: {bids_root}")
@@ -107,6 +113,20 @@ def check_dataset_integrity(bids_root: Path) -> dict:
 
     subject_dirs = sorted(p.name for p in bids_root.glob("sub-*") if p.is_dir())
     report["counts"]["subject_directories"] = len(subject_dirs)
+
+    # When a subset is requested, per-file checks are scoped to it. Otherwise a
+    # deliberate two-subject smoke test fails on content never fetched for the
+    # other forty-two.
+    if subjects:
+        wanted = {s if s.startswith("sub-") else f"sub-{s}" for s in subjects}
+        scoped = sorted(d for d in subject_dirs if d in wanted or _normalize_label(d) in
+                        {_normalize_label(w) for w in wanted})
+        report["counts"]["subjects_checked"] = len(scoped)
+        unknown = sorted(wanted - set(subject_dirs))
+        if unknown:
+            report["errors"].append(f"requested subject(s) not present: {unknown}")
+    else:
+        scoped = subject_dirs
 
     participants = bids_root / "participants.tsv"
     if not participants.exists():
@@ -117,14 +137,36 @@ def check_dataset_integrity(bids_root: Path) -> dict:
         report["counts"]["participants_tsv_rows"] = len(rows)
         missing_dir = sorted(listed - set(subject_dirs))
         missing_row = sorted(set(subject_dirs) - listed)
-        if missing_dir:
-            report["errors"].append(f"listed in participants.tsv but no directory: {missing_dir}")
-        if missing_row:
-            report["errors"].append(f"directory present but absent from participants.tsv: {missing_row}")
+
+        # Distinguish "the same subjects, written differently" from "subjects are
+        # genuinely absent". Zero-padding drift is a real defect -- a join on
+        # participant_id silently drops those rows -- but it does not stop the
+        # pipeline, which discovers subjects from directories.
+        norm_listed = {_normalize_label(x) for x in missing_dir}
+        norm_dirs = {_normalize_label(x) for x in missing_row}
+        padding_only = sorted(norm_listed & norm_dirs)
+        if padding_only:
+            report["warnings"].append(
+                f"{len(padding_only)} subject(s) differ only by zero-padding between "
+                f"participants.tsv and the directory names, e.g. "
+                f"{[x for x in missing_dir if _normalize_label(x) in padding_only][:3]} vs "
+                f"{[x for x in missing_row if _normalize_label(x) in padding_only][:3]}. "
+                "Processing is unaffected (subjects are discovered from directories), "
+                "but any join on participant_id will silently drop them."
+            )
+            report["padding_mismatch"] = padding_only
+        truly_missing_dir = [x for x in missing_dir if _normalize_label(x) not in padding_only]
+        truly_missing_row = [x for x in missing_row if _normalize_label(x) not in padding_only]
+        if truly_missing_dir:
+            report["errors"].append(f"listed in participants.tsv but no directory: {truly_missing_dir}")
+        if truly_missing_row:
+            report["errors"].append(f"directory present but absent from participants.tsv: {truly_missing_row}")
 
     raws, no_events, broken_links = [], [], []
-    for ext in (".vhdr", ".set"):
-        raws.extend(sorted(bids_root.glob(f"sub-*/**/eeg/*{ext}")))
+    for sub in scoped:
+        for ext in (".vhdr", ".set"):
+            raws.extend(sorted((bids_root / sub).glob(f"**/eeg/*{ext}")))
+    raws.sort()
     report["counts"]["raw_recordings"] = len(raws)
 
     for raw in raws:
@@ -153,7 +195,8 @@ def check_dataset_integrity(bids_root: Path) -> dict:
     # download: the path exists, so every presence check above passes, and the
     # failure only surfaces later as an unreadable recording mid-run.
     empty, tiny, dangling = [], [], []
-    for path in sorted(bids_root.glob("sub-*/**/*")):
+    scanned = [q for sub in scoped for q in sorted((bids_root / sub).glob("**/*"))]
+    for path in scanned:
         # A git-annex clone without content is the common case here: OpenNeuro's
         # GitHub mirrors are annex repos, so `git clone` alone yields symlinks
         # into .git/annex with nothing behind them. They are not files, so every
@@ -316,7 +359,7 @@ def main(argv: list[str] | None = None) -> int:
     (out / "config.snapshot.yaml").write_text(config_text, encoding="utf-8")
 
     print("== Gate 1: dataset integrity ==")
-    integrity = check_dataset_integrity(args.bids_root)
+    integrity = check_dataset_integrity(args.bids_root, subjects=args.subjects)
     (out / "dataset_integrity.json").write_text(json.dumps(integrity, indent=2), encoding="utf-8")
     for key in ("errors", "warnings"):
         for item in integrity[key]:
