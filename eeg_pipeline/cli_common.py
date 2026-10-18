@@ -376,6 +376,7 @@ def _processing_metadata(
         "Preprocessing": {
             "Montage": args.montage,
             "Rereference": args.reref,
+            "ImplicitReference": getattr(args, "implicit_reference", None),
             "HighPassHz": float(args.l_freq),
             "LowPassHz": float(args.h_freq),
             "NotchHz": list(args.notch) if args.notch else [],

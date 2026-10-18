@@ -453,6 +453,7 @@ def _process_recording_stages(
             h_freq=args.h_freq,
             notch=args.notch,
             n_jobs=int(getattr(args, "n_jobs", 1) or 1),
+            implicit_reference=getattr(args, "implicit_reference", None),
         )
 
     with timings.stage("ica"):

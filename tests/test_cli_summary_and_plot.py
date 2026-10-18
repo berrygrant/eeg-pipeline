@@ -204,3 +204,38 @@ def test_run_plot_figures_builds_expected_argv_with_stubbed_module(monkeypatch, 
     assert "--freq_band" in argv
     assert "--diff_heatmap" in argv
     assert "--channels" in argv
+
+
+def test_summarize_one_file_forwards_implicit_reference(monkeypatch, tmp_path: Path, synthetic_raw):
+    bids_root, raw_path = _make_bids_summary_fixture(tmp_path)
+    _patch_summary_dependencies(monkeypatch, synthetic_raw)
+    captured = {}
+
+    def fake_preprocess(**kwargs):
+        captured.update(kwargs)
+        return synthetic_raw.copy()
+
+    monkeypatch.setattr(cli_summary, "read_raw_preprocess", fake_preprocess)
+    args = _summary_args(bids_root)
+    args.reref = "tp9_tp10"
+    args.implicit_reference = "TP9"
+
+    cli_summary.summarize_one_file(args, raw_path)
+
+    assert captured["reref"] == "tp9_tp10"
+    assert captured["implicit_reference"] == "TP9"
+
+
+def test_summarize_one_file_defaults_implicit_reference_to_none(monkeypatch, tmp_path: Path, synthetic_raw):
+    bids_root, raw_path = _make_bids_summary_fixture(tmp_path)
+    _patch_summary_dependencies(monkeypatch, synthetic_raw)
+    captured = {}
+
+    def fake_preprocess(**kwargs):
+        captured.update(kwargs)
+        return synthetic_raw.copy()
+
+    monkeypatch.setattr(cli_summary, "read_raw_preprocess", fake_preprocess)
+    cli_summary.summarize_one_file(_summary_args(bids_root), raw_path)   # Namespace without the attribute
+
+    assert captured["implicit_reference"] is None

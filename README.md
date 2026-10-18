@@ -23,7 +23,8 @@ Questions? Try the [ChatGPT eeg-pipeline Assistant](https://chatgpt.com/g/g-6998
 ### Core preprocessing
 - BrainVision (.vhdr / .vmrk) and EEGLAB (.set) input
 - Standard montages (e.g., `standard_1020`)
-- Configurable re-reference (`average` or `none`)
+- Configurable re-reference (`average`, `none`, or linked mastoids `tp9_tp10`), including an
+  `implicit_reference` option for amplifiers that do not store the online reference channel
 - Band-pass and notch filtering
 - Automatic handling of missing `.vmrk` or behavioral files (skip / warn / fail)
 
@@ -177,7 +178,11 @@ channels:
 
 preprocess:
   montage: standard_1020
-  reref: average     # average | none
+  reref: average     # average | none | tp9_tp10
+  # If the online reference electrode is not stored as a channel (e.g. a LiveAmp referenced to the
+  # left mastoid), name it here: a flat channel is added before re-referencing so that
+  # reref: tp9_tp10 averages both mastoids.
+  implicit_reference: null   # e.g. TP9
   l_freq: 0.1
   h_freq: 30
   notch_hz: [60]
@@ -489,7 +494,7 @@ using the repo's BIDS-aware structural validator helpers in `eeg_pipeline.bids`.
 **Optional extras** (install only if needed):
 - `viz` — matplotlib, seaborn (paper figures / `--plot_figures`)
 - `gpu` — a CUDA-compatible CuPy build
-- `ica` — python-picard (for `ica.method: picard`)
+- `ica` — scikit-learn (for the default `ica.method: fastica`) and python-picard (for `ica.method: picard`)
 
 Install:
 ```bash

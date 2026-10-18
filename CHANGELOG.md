@@ -6,6 +6,19 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `preprocess.implicit_reference` / `--implicit_reference`: name of the online reference electrode
+  when the amplifier does not store it as a channel (e.g. `TP9` for a LiveAmp referenced to the
+  left mastoid). A flat channel of that name is added (`mne.add_reference_channels`) and the montage
+  re-applied before re-referencing, so `reref: tp9_tp10` can average both mastoids from recordings
+  that only contain TP10. Applied in the full pipeline and in `--summarize_one_file`; recorded in the
+  preprocessing sidecar as `ImplicitReference`.
+- BrainVision channel-name normalization now also maps `Ft9/Ft10/Tp9/Tp10` to `FT9/FT10/TP9/TP10`.
+
+### Fixed
+- The `ica` extra now installs `scikit-learn`, which the default `ica.method: fastica` requires; a
+  run with `ica.mode: auto` previously raised `ImportError` on the first recording that needed ICA.
+
 ## [2.2.0] - 2026-08-12
 
 ### Added

@@ -423,3 +423,23 @@ def test_validate_config_rejects_non_integer_n_jobs():
     cfg["compute"] = {"n_jobs": "many"}
     with pytest.raises(ValueError, match="compute.n_jobs must be an integer"):
         _validate_config(_apply_defaults(cfg))
+
+
+def test_implicit_reference_defaults_to_none_and_accepts_channel_name():
+    cfg = _apply_defaults(_valid_min_cfg())
+    assert cfg["preprocess"]["implicit_reference"] is None
+    cfg["preprocess"]["implicit_reference"] = "TP9"
+    cfg["preprocess"]["reref"] = "tp9_tp10"
+    _validate_config(cfg)
+    norm = _normalize_config(cfg)
+    assert norm["preprocess"]["implicit_reference"] == "TP9"
+
+
+def test_implicit_reference_rejects_non_string_and_normalizes_null_strings():
+    cfg = _apply_defaults(_valid_min_cfg())
+    cfg["preprocess"]["implicit_reference"] = 7
+    with pytest.raises(ValueError, match="implicit_reference"):
+        _validate_config(cfg)
+    cfg["preprocess"]["implicit_reference"] = "null"
+    _validate_config(cfg)
+    assert _normalize_config(cfg)["preprocess"]["implicit_reference"] is None

@@ -120,6 +120,15 @@ def build_arg_parser():
         choices=["average", "none", "p9_p10", "tp9_tp10", "mastoids"],
         help="EEG re-reference mode (average, none, or p9_p10/tp9_tp10 mastoids).",
     )
+    ap.add_argument(
+        "--implicit_reference",
+        default=None,
+        help=(
+            "Name of the online reference channel when it is not stored in the file (e.g. TP9 for a "
+            "left-mastoid reference). A flat channel of that name is added before re-referencing, so "
+            "--reref tp9_tp10 can average the two mastoids."
+        ),
+    )
     ap.add_argument("--l_freq", type=float, default=0.1, help="High-pass Hz")
     ap.add_argument("--h_freq", type=float, default=30.0, help="Low-pass Hz")
     ap.add_argument("--notch", type=float, nargs="*", default=[60.0], help="Notch freqs Hz")
