@@ -311,3 +311,47 @@ def test_explicit_n_jobs_one_overrides_config(monkeypatch):
     args = parser.parse_args(["--config", "config.yaml"])
     cli.apply_config(args, defaults)
     assert args.n_jobs == 8
+
+
+def test_apply_config_implicit_reference_from_config_when_cli_default(monkeypatch):
+    _, args, defaults = _parser_and_args()
+    cfg = _rich_config()
+    cfg["preprocess"]["implicit_reference"] = "TP9"
+    monkeypatch.setattr(cli_config, "load_config", lambda path, overrides=None: cfg)
+
+    cli_config.apply_config(args, defaults)
+
+    assert args.implicit_reference == "TP9"
+
+
+def test_apply_config_implicit_reference_cli_wins_and_is_passed_as_override(monkeypatch):
+    parser = cli.build_arg_parser()
+    args = parser.parse_args(["--config", "config.yaml", "--implicit_reference", "M1"])
+    defaults = cli.build_defaults(parser)
+    captured = {}
+
+    def fake_load(path, overrides=None):
+        captured["overrides"] = overrides
+        cfg = _rich_config()
+        cfg["preprocess"]["implicit_reference"] = "TP9"
+        return cfg
+
+    monkeypatch.setattr(cli_config, "load_config", fake_load)
+
+    cli_config.apply_config(args, defaults)
+
+    assert args.implicit_reference == "M1"
+    assert captured["overrides"]["preprocess"]["implicit_reference"] == "M1"
+
+
+def test_apply_config_implicit_reference_without_parser_default(monkeypatch):
+    # Entry points that build args without the parser (no default registered) still get the config value.
+    _, args, defaults = _parser_and_args()
+    defaults = {k: v for k, v in defaults.items() if k != "implicit_reference"}
+    cfg = _rich_config()
+    cfg["preprocess"]["implicit_reference"] = "TP9"
+    monkeypatch.setattr(cli_config, "load_config", lambda path, overrides=None: cfg)
+
+    cli_config.apply_config(args, defaults)
+
+    assert args.implicit_reference == "TP9"
