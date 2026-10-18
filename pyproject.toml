@@ -35,8 +35,9 @@ viz = [
   "matplotlib",
   "seaborn",
 ]
-# ICA solver alternative selectable via ica.method: picard
+# ICA solvers: the default ica.method (fastica) needs scikit-learn; picard needs python-picard
 ica = [
+  "scikit-learn",
   "python-picard",
 ]
 

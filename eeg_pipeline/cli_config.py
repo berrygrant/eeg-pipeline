@@ -29,6 +29,7 @@ def _build_config_overrides(args, defaults: dict | None) -> dict:
         "behavior_csv_fallback_dir": ("events", "csv_fallback_dir"),
         "montage": ("preprocess", "montage"),
         "reref": ("preprocess", "reref"),
+        "implicit_reference": ("preprocess", "implicit_reference"),
         "l_freq": ("preprocess", "l_freq"),
         "h_freq": ("preprocess", "h_freq"),
         "notch": ("preprocess", "notch_hz"),
@@ -152,6 +153,13 @@ def apply_config(args, defaults=None):
     # Channels and preprocessing
     set_if_default(args, defaults, "montage", cfg["preprocess"].get("montage", args.montage))
     set_if_default(args, defaults, "reref", cfg["preprocess"].get("reref", args.reref))
+    if "implicit_reference" not in defaults:
+        args.implicit_reference = cfg["preprocess"].get("implicit_reference", getattr(args, "implicit_reference", None))
+    else:
+        set_if_default(
+            args, defaults, "implicit_reference",
+            cfg["preprocess"].get("implicit_reference", args.implicit_reference),
+        )
     set_if_default(args, defaults, "l_freq", cfg["preprocess"].get("l_freq", args.l_freq))
     set_if_default(args, defaults, "h_freq", cfg["preprocess"].get("h_freq", args.h_freq))
     set_if_default(args, defaults, "notch", cfg["preprocess"].get("notch_hz", args.notch))

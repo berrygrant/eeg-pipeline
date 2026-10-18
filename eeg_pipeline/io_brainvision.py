@@ -21,7 +21,16 @@ def read_raw_preprocess(
     h_freq: float,
     notch: list[float] | None,
     n_jobs: int = 1,
+    implicit_reference: str | None = None,
 ):
+    """Load a raw file and apply channel fixes, montage, re-referencing and filtering.
+
+    ``implicit_reference`` names the online reference electrode when the amplifier did not store it
+    as a channel (e.g. a LiveAmp referenced to the left mastoid, TP9).  A flat channel of that name is
+    added before re-referencing so that ``reref="tp9_tp10"`` averages both mastoids; the result is
+    identical to recording the reference explicitly and re-referencing offline.  Ignored when the
+    channel already exists.
+    """
     suffix = raw_path.suffix.lower()
     if suffix == ".vhdr":
         raw = mne.io.read_raw_brainvision(raw_path, preload=True)
@@ -43,6 +52,10 @@ def read_raw_preprocess(
     _maybe_rename("CZ", "Cz")
     _maybe_rename("Mastoid L", "TP9")
     _maybe_rename("Mastoid R", "TP10")
+    _maybe_rename("Ft9", "FT9")
+    _maybe_rename("Ft10", "FT10")
+    _maybe_rename("Tp9", "TP9")
+    _maybe_rename("Tp10", "TP10")
 
     if rename_map:
         raw.rename_channels(rename_map)
@@ -56,6 +69,11 @@ def read_raw_preprocess(
         raw.drop_channels(drop_aux)
 
     raw.set_montage(montage, on_missing="warn")
+    ref_name = str(implicit_reference).strip() if implicit_reference else ""
+    if ref_name and ref_name not in raw.ch_names:
+        # The online reference is implicit (all-zero); make it explicit so it can enter the new reference.
+        mne.add_reference_channels(raw, ref_name, copy=False)
+        raw.set_montage(montage, on_missing="warn")
     if eog_chs:
         eog_map = {ch: "eog" for ch in eog_chs if ch in raw.ch_names}
         if eog_map:

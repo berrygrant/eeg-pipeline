@@ -112,6 +112,7 @@ _CONFIG_DEFAULTS: list[tuple[str, Any]] = [
     ("channels.drop_aux_chs", ["AUX"]),
     ("preprocess.montage", "standard_1020"),
     ("preprocess.reref", "average"),  # average | none | p9_p10/tp9_tp10
+    ("preprocess.implicit_reference", None),  # online reference channel to add as a flat channel
     ("preprocess.notch_hz", [60.0]),
     ("preprocess.l_freq", 0.1),
     ("preprocess.h_freq", 30.0),
@@ -319,6 +320,10 @@ def _validate_config(cfg: dict[str, Any]) -> None:
     if reref_mode not in {"average", "avg", "none", "no", "p9_p10", "tp9_tp10", "mastoids", "mastoid", "linked_mastoids", "linked"}:
         errors.append("preprocess.reref must be one of: average | none | p9_p10/tp9_tp10 (mastoids).")
 
+    implicit_ref = config_get(cfg, "preprocess.implicit_reference", None)
+    if implicit_ref not in (None, "null", "None") and (not isinstance(implicit_ref, str) or not implicit_ref.strip()):
+        errors.append("preprocess.implicit_reference must be a channel name (e.g. TP9) or null.")
+
     volt_method = str(config_get(cfg, "artifacts.voltage.method", "simple")).lower()
     if volt_method not in {"simple", "window_ptp", "combined"}:
         errors.append("artifacts.voltage.method must be one of: simple | window_ptp | combined.")
@@ -441,6 +446,10 @@ def _normalize_config(cfg: dict[str, Any]) -> dict[str, Any]:
     cfg["events"]["condition_map"] = _normalize_condition_map(cfg["events"].get("condition_map", None))
 
     # Floats
+    implicit_ref = cfg["preprocess"].get("implicit_reference", None)
+    cfg["preprocess"]["implicit_reference"] = (
+        None if implicit_ref in (None, "null", "None", "") else str(implicit_ref).strip()
+    )
     cfg["preprocess"]["l_freq"] = float(cfg["preprocess"]["l_freq"])
     cfg["preprocess"]["h_freq"] = float(cfg["preprocess"]["h_freq"])
     cfg["preprocess"]["notch_hz"] = _as_float_list(cfg["preprocess"].get("notch_hz", []))

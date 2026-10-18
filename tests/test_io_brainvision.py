@@ -229,3 +229,73 @@ def test_read_raw_preprocess_forwards_n_jobs_to_filters(monkeypatch, tmp_path: P
 
     assert raw.notch_calls == [([60.0], 8)]
     assert raw.filter_calls == [(0.1, 30.0, 8)]
+
+
+def test_read_raw_preprocess_adds_implicit_reference_before_mastoid_reref(monkeypatch, tmp_path: Path):
+    raw = DummyRaw(["Fp1", "Fz", "Cz", "Ft9", "Tp10"])
+    monkeypatch.setattr(io_mod.mne.io, "read_raw_brainvision", lambda path, preload=True: raw)
+    added = []
+
+    def fake_add_reference_channels(inst, ref_channels, copy=True):
+        added.append((ref_channels, copy))
+        inst.ch_names.append(ref_channels)
+        return inst
+
+    monkeypatch.setattr(io_mod.mne, "add_reference_channels", fake_add_reference_channels)
+
+    result = io_mod.read_raw_preprocess(
+        tmp_path / "sample.vhdr",
+        montage="standard_1020",
+        eog_chs=[],
+        aux_chs=[],
+        reref="tp9_tp10",
+        l_freq=0.1,
+        h_freq=30.0,
+        notch=None,
+        implicit_reference="TP9",
+    )
+
+    assert result is raw
+    # case-normalized names, flat reference added once, montage re-applied, mastoid average requested
+    assert raw.rename_calls == [{"Ft9": "FT9", "Tp10": "TP10"}]
+    assert added == [("TP9", False)]
+    assert raw.montage_calls == [("standard_1020", "warn"), ("standard_1020", "warn")]
+    assert raw.reference_calls == [(["TP9", "TP10"], False)]
+
+
+def test_read_raw_preprocess_implicit_reference_is_noop_when_channel_exists(monkeypatch, tmp_path: Path):
+    raw = DummyRaw(["Fp1", "TP9", "TP10"])
+    monkeypatch.setattr(io_mod.mne.io, "read_raw_brainvision", lambda path, preload=True: raw)
+    monkeypatch.setattr(io_mod.mne, "add_reference_channels", lambda *a, **k: pytest.fail("must not be called"))
+
+    io_mod.read_raw_preprocess(
+        tmp_path / "sample.vhdr",
+        montage="standard_1020",
+        eog_chs=[],
+        aux_chs=[],
+        reref="tp9_tp10",
+        l_freq=0.1,
+        h_freq=30.0,
+        notch=None,
+        implicit_reference="TP9",
+    )
+
+    assert raw.montage_calls == [("standard_1020", "warn")]
+    assert raw.reference_calls == [(["TP9", "TP10"], False)]
+
+
+def test_read_raw_preprocess_mastoid_reref_still_fails_without_implicit_reference(monkeypatch, tmp_path: Path):
+    raw = DummyRaw(["Fp1", "Fz", "TP10"])
+    monkeypatch.setattr(io_mod.mne.io, "read_raw_brainvision", lambda path, preload=True: raw)
+
+    with pytest.raises(ValueError, match="mastoid reference"):
+        io_mod.read_raw_preprocess(
+            tmp_path / "sample.vhdr",
+            montage="standard_1020",
+            eog_chs=[],
+            aux_chs=[],
+            reref="tp9_tp10",
+            l_freq=0.1,
+            h_freq=30.0,
+            notch=None,
+        )
